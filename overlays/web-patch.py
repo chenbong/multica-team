@@ -382,8 +382,8 @@ CHANGES = {
             '    "skills_section": {\n      "label": "Skills",\n',
             '    "skills_section": {\n      "label": "Skills",\n'
             '      "scope_team": "Team",\n'
-            '      "scope_project_prefix": "Project: ",\n'
-            '      "scope_project_default": "current project",\n'
+            '      "scope_project_prefix": "Workspace: ",\n'
+            '      "scope_project_default": "current workspace",\n'
             '      "scope_personal": "Personal",\n',
         ),
     ],
@@ -392,8 +392,8 @@ CHANGES = {
             '    "skills_section": {\n      "label": "Skills",\n',
             '    "skills_section": {\n      "label": "Skills",\n'
             '      "scope_team": "团队",\n'
-            '      "scope_project_prefix": "项目：",\n'
-            '      "scope_project_default": "当前项目",\n'
+            '      "scope_project_prefix": "工作区：",\n'
+            '      "scope_project_default": "当前工作区",\n'
             '      "scope_personal": "个人",\n',
         ),
     ],
@@ -421,27 +421,27 @@ CHANGES = {
         ),
     ],
     SKILLS_EN: [
-        ('    "new_skill": "New skill",', '    "new_skill": "New skill",\n    "team_skills": "Team skills",\n    "project_skills": "Project skills",\n    "personal_skills": "Personal skills",'),
+        ('    "new_skill": "New skill",', '    "new_skill": "New skill",\n    "team_skills": "Team skills",\n    "project_skills": "Workspace skills",\n    "personal_skills": "Personal skills",'),
         ('    "used_by": "Used by",', '    "used_by": "Used by",\n    "usage_count": "Usage count",'),
-        ('    "source": "Source",', '    "source": "Source",\n    "level": "Level",\n    "level_team": "Team",\n    "level_project": "Project",\n    "level_project_prefix": "Project: ",\n    "level_personal": "Personal",\n    "level_current_project": "Current project",'),
-        ('  "detail": {', '  "detail": {\n    "category_label": "Skill category",\n    "category_team": "Team",\n    "category_project": "Project",\n    "category_personal": "Personal",'),
+        ('    "source": "Source",', '    "source": "Source",\n    "level": "Level",\n    "level_team": "Team",\n    "level_project": "Workspace",\n    "level_project_prefix": "Workspace: ",\n    "level_personal": "Personal",\n    "level_current_project": "Current workspace",'),
+        ('  "detail": {', '  "detail": {\n    "category_label": "Skill category",\n    "category_team": "Team",\n    "category_project": "Workspace",\n    "category_personal": "Personal",'),
         ('  "actions": {\n    "row_menu":', '  "actions": {\n    "change_level": "Change level",\n    "change_level_title": "Change skill level",\n    "change_level_desc": "Only the skill creator can change its level.",\n    "change_level_save": "Save level",\n    "change_level_saved": "Skill level updated",\n    "change_level_failed": "Failed to change skill level",\n    "row_menu":'),
-        ('    "section_usage": "Usage",', '    "section_usage": "Usage",\n    "section_projects": "Projects",\n    "other_projects": "Other projects",'),
+        ('    "section_usage": "Usage",', '    "section_usage": "Usage",\n    "section_projects": "Workspaces",\n    "other_projects": "Other workspaces",'),
         (
             '  "create": {',
-            '  "create": {\n    "scope": {"title": "Scope", "desc": "Choose whether this skill belongs to the team, a project, or only to you.", "team": {"title": "Team skill", "desc": "Visible to every user across every project."}, "workspace": {"title": "Project skill", "desc": "Visible across users and projects; keeps this project as its source."}, "personal": {"title": "Personal skill", "desc": "Reusable by you across workspaces."}},',
+            '  "create": {\n    "scope": {"title": "Scope", "desc": "Choose whether this skill belongs to the team, a workspace, or only to you.", "team": {"title": "Team skill", "desc": "Visible to every user across every workspace."}, "workspace": {"title": "Workspace skill", "desc": "Visible across users and workspaces; keeps this workspace as its source."}, "personal": {"title": "Personal skill", "desc": "Reusable by you across workspaces."}},',
         ),
     ],
     SKILLS_ZH: [
-        ('    "new_skill": "新建 skill",', '    "new_skill": "新建 skill",\n    "team_skills": "团队 Skill",\n    "project_skills": "项目 Skill",\n    "personal_skills": "个人 Skill",'),
+        ('    "new_skill": "新建 skill",', '    "new_skill": "新建 skill",\n    "team_skills": "团队 Skill",\n    "project_skills": "工作区 Skill",\n    "personal_skills": "个人 Skill",'),
         ('    "used_by": "被谁使用",', '    "used_by": "被谁使用",\n    "usage_count": "使用次数",'),
-        ('    "source": "来源",', '    "source": "来源",\n    "level": "Skill 级别",\n    "level_team": "团队",\n    "level_project": "项目",\n    "level_project_prefix": "项目：",\n    "level_personal": "个人",\n    "level_current_project": "当前项目",'),
-        ('  "detail": {', '  "detail": {\n    "category_label": "Skill 类别",\n    "category_team": "团队",\n    "category_project": "项目",\n    "category_personal": "个人",'),
+        ('    "source": "来源",', '    "source": "来源",\n    "level": "Skill 级别",\n    "level_team": "团队",\n    "level_project": "工作区",\n    "level_project_prefix": "工作区：",\n    "level_personal": "个人",\n    "level_current_project": "当前工作区",'),
+        ('  "detail": {', '  "detail": {\n    "category_label": "Skill 类别",\n    "category_team": "团队",\n    "category_project": "工作区",\n    "category_personal": "个人",'),
         ('  "actions": {\n    "row_menu":', '  "actions": {\n    "change_level": "调整级别",\n    "change_level_title": "调整 Skill 级别",\n    "change_level_desc": "只有 Skill 添加者可以调整级别。",\n    "change_level_save": "保存级别",\n    "change_level_saved": "Skill 级别已更新",\n    "change_level_failed": "调整 Skill 级别失败",\n    "row_menu":'),
-        ('    "section_usage": "使用状态",', '    "section_usage": "使用状态",\n    "section_projects": "项目",\n    "other_projects": "其他项目",'),
+        ('    "section_usage": "使用状态",', '    "section_usage": "使用状态",\n    "section_projects": "工作区",\n    "other_projects": "其他工作区",'),
         (
             '  "create": {',
-            '  "create": {\n    "scope": {"title": "Skill 范围", "desc": "选择这个 Skill 属于团队、项目还是仅属于你。", "team": {"title": "团队 Skill", "desc": "所有用户、所有项目都可见。"}, "workspace": {"title": "项目 Skill", "desc": "跨用户、跨项目可见，并保留来源项目。"}, "personal": {"title": "个人 Skill", "desc": "你可以跨工作区复用。"}},',
+            '  "create": {\n    "scope": {"title": "Skill 范围", "desc": "选择这个 Skill 属于团队、工作区还是仅属于你。", "team": {"title": "团队 Skill", "desc": "所有用户、所有工作区都可见。"}, "workspace": {"title": "工作区 Skill", "desc": "跨用户、跨工作区可见，并保留来源工作区。"}, "personal": {"title": "个人 Skill", "desc": "你可以跨工作区复用。"}},',
         ),
     ],
     SKILLS_PAGE: [
