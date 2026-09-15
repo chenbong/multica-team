@@ -47,6 +47,10 @@ export MULTICA_VERIFICATION_BOT_URL="${MULTICA_VERIFICATION_BOT_URL:-}"
 # Where the "add a computer" dialog points for the CLI installer. Empty keeps
 # upstream's installer, so a public clone is not tied to this repository.
 export MULTICA_CLI_INSTALL_URL="${MULTICA_CLI_INSTALL_URL:-}"
+# InfoFlow (如流) binding page linked from the agents page header. Empty hides
+# the button, so a public clone builds the upstream page unchanged.
+export MULTICA_INFOFLOW_BRIDGE_URL="${MULTICA_INFOFLOW_BRIDGE_URL:-}"
+export MULTICA_INFOFLOW_BRIDGE_LABEL="${MULTICA_INFOFLOW_BRIDGE_LABEL:-}"
 # Runtime ids the "add a computer" command pins, comma separated. Empty hands
 # out the upstream command, which registers every agent CLI found on the
 # machine; a deployment that only wants its own runtimes sets e.g. `ducc,ducx`.

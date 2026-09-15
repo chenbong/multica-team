@@ -34,7 +34,8 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
 9. **如流（InfoFlow）Bridge**（独立 Node 服务，见 `infoflow-bridge/`）：把 IM 私聊/群消息变成
    Multica 任务并把智能体结果回帖；转发 Multica 的登录验证码到 IM 私聊；把验证码镜像到指定群
    （正文前加 `发送给 <用户名>`）；自带管理页做机器人配置、按登录邮箱隔离 Multica 账号、
-   绑定智能体与连通性自检。
+   绑定智能体与连通性自检。智能体页右上角还有「绑定如流机器人」入口，直接打到这个管理页
+   （地址由 `MULTICA_INFOFLOW_BRIDGE_URL` 在构建时注入，留空则整个按钮不渲染）。
 10. **可复用的部署工具链**：Go overlay 清单生成与构建、Web 临时树补丁构建、单实例的
     build/start/stop/status 脚本、可选隔离 daemon，以及 GitHub Actions 多平台 daemon 构建
     （`darwin`/`linux`/`windows` × `amd64`/`arm64`）。
@@ -230,6 +231,10 @@ git -C multica status --short          # 必须为空
 （预置 `config set runtime_shims`，见第 12 条）；`MULTICA_CLI_INSTALL_URL` 决定页面给出的安装命令
 指向哪个 `scripts/install.sh`。三个都留空时下发的是上游原样命令。
 
+界面里还有一处可配置入口：`MULTICA_INFOFLOW_BRIDGE_URL`（配 `MULTICA_INFOFLOW_BRIDGE_LABEL`，
+默认「绑定如流机器人」）会在智能体页右上角渲染一个跳转到如流绑定页的按钮；留空则不渲染，
+公开克隆构建出来的就是上游原样的页面。
+
 ### 4.3 命令
 
 ```bash
@@ -296,6 +301,8 @@ python3 infoflow-bridge/scripts/bridgectl.py status|start|restart|stop
 `purpose: "task"` 的机器人负责把如流消息变成 Multica 任务（私聊直接派活，群里需要 @ 机器人）。
 在 <http://192.0.2.10:8002> 用 baidu 邮箱 + 验证码登录后可以新增/编辑机器人、
 查看连接状态、发送测试消息；AppSecret 不回显，留空表示保持原值。
+从 Multica 的智能体页右上角可以一键跳到这个管理页（按钮是否存在取决于
+`MULTICA_INFOFLOW_BRIDGE_URL`，见 §4.2）。
 
 管理页本身不保存 Multica 凭据，它读取**本机** `~/.multica` 下的 CLI profile
 （默认 `config.json` 和 `profiles/<名字>/config.json`），只把登录邮箱与页面登录邮箱一致、

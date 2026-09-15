@@ -8,6 +8,7 @@ the original is copied into generated/web-backup/ before it is written, and
 restore puts it back whether the build succeeded or not. If upstream moves an
 anchor the build stops instead of silently producing an unpatched site.
 """
+import json
 import os
 import shutil
 import sys
@@ -29,6 +30,7 @@ LOGIN_PAGE = "packages/views/auth/login-page.tsx"
 LOGIN_ROUTE = "apps/web/app/(auth)/login/page.tsx"
 AGENTS_EN = "packages/views/locales/en/agents.json"
 AGENTS_ZH = "packages/views/locales/zh-Hans/agents.json"
+AGENTS_PAGE = "packages/views/agents/components/agents-page.tsx"
 SKILL_PICKER = "packages/views/agents/components/skill-picker-list.tsx"
 
 # The "Add computer" dialog hands out the daemon command. A daemon started
@@ -156,6 +158,66 @@ CLI_INSTALL_URL = (
     os.environ.get("MULTICA_CLI_INSTALL_URL", "").strip()
     or "https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh"
 )
+
+# The agents page gets one extra action: a link to this deployment's InfoFlow
+# (如流) binding page, which lives on another port of the same host. Both the
+# URL and its label are deployment configuration — the URL names a host that
+# must never appear in the public repository — and an empty URL leaves the page
+# exactly as upstream ships it.
+INFOFLOW_BRIDGE_URL = os.environ.get("MULTICA_INFOFLOW_BRIDGE_URL", "").strip().rstrip("/")
+INFOFLOW_BRIDGE_LABEL = (
+    os.environ.get("MULTICA_INFOFLOW_BRIDGE_LABEL", "").strip() or "绑定如流机器人"
+)
+
+
+def agents_page_changes():
+    """Add the InfoFlow binding entry point next to "new agent"."""
+    if not INFOFLOW_BRIDGE_URL:
+        return []
+    return [
+        (
+            'import { useCallback, useMemo, useRef, useState } from "react";\n',
+            'import { useCallback, useMemo, useRef, useState } from "react";\n'
+            "\n"
+            "// Local overlay: entry point to this deployment's InfoFlow binding page.\n"
+            "// Injected at build time from MULTICA_INFOFLOW_BRIDGE_URL; the button is\n"
+            "// not rendered at all when that variable is empty.\n"
+            f"const INFOFLOW_BRIDGE_URL = {json.dumps(INFOFLOW_BRIDGE_URL)};\n"
+            f"const INFOFLOW_BRIDGE_LABEL = {json.dumps(INFOFLOW_BRIDGE_LABEL)};\n",
+        ),
+        (
+            "import {\n  AlertCircle,\n  Bot,\n  Lock,\n  Plus,\n} from \"lucide-react\";\n",
+            "import {\n  AlertCircle,\n  Bot,\n  Lock,\n  MessageSquare,\n  Plus,\n} from \"lucide-react\";\n",
+        ),
+        (
+            "      actions={\n"
+            "        <CollectionPageHeaderAction\n"
+            "          icon={Plus}\n"
+            "          label={t(($) => $.page.new_agent)}\n"
+            "          onClick={onCreate}\n"
+            "        />\n"
+            "      }\n",
+            "      actions={\n"
+            "        <>\n"
+            "          {INFOFLOW_BRIDGE_URL ? (\n"
+            "            <CollectionPageHeaderAction\n"
+            "              icon={MessageSquare}\n"
+            "              label={INFOFLOW_BRIDGE_LABEL}\n"
+            "              nativeButton={false}\n"
+            "              render={\n"
+            '                <a href={INFOFLOW_BRIDGE_URL} target="_blank" rel="noreferrer" />\n'
+            "              }\n"
+            "            />\n"
+            "          ) : null}\n"
+            "          <CollectionPageHeaderAction\n"
+            "            icon={Plus}\n"
+            "            label={t(($) => $.page.new_agent)}\n"
+            "            onClick={onCreate}\n"
+            "          />\n"
+            "        </>\n"
+            "      }\n",
+        ),
+    ]
 
 
 def daemon_runtime_defaults() -> str:
@@ -314,6 +376,7 @@ CHANGES = {
         ),
         ('import Link from "next/link";\n', ""),
     ],
+    AGENTS_PAGE: agents_page_changes(),
     AGENTS_EN: [
         (
             '    "skills_section": {\n      "label": "Skills",\n',
