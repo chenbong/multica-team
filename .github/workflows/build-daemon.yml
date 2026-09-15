@@ -1,0 +1,192 @@
+name: Build daemon
+
+# Builds the Multica CLI + daemon from this repository's overlay for every
+# platform the upstream release covers (see multica/.goreleaser.yml), so the
+# macOS host that runs the agent runtimes and the Linux host that runs the API
+# can both use the same patched binary instead of the plain upstream release.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-daemon-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-overlay:
+    name: verify overlay against the pinned upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: multica/server/go.mod
+          cache-dependency-path: multica/server/go.sum
+
+      - name: Prepare the Go overlay manifest
+        run: python3 overlays/prepare.py
+
+      - name: Compile-check the overlaid packages
+        working-directory: multica/server
+        run: |
+          set -euo pipefail
+          go test -overlay="$GITHUB_WORKSPACE/overlays/go-overlay.json" -run '^$' \
+            ./cmd/server ./internal/daemon/... ./internal/handler \
+            ./internal/service ./pkg/agent ./pkg/db/generated
+
+      - name: Fail if the build touched the upstream checkout
+        run: |
+          set -euo pipefail
+          if [ -n "$(git -C multica status --porcelain)" ]; then
+            echo "the multica submodule is no longer clean:" >&2
+            git -C multica status --short >&2
+            exit 1
+          fi
+
+  build:
+    name: ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same target set as multica/.goreleaser.yml.
+        include:
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: multica/server/go.mod
+          cache-dependency-path: multica/server/go.sum
+
+      - name: Prepare the Go overlay manifest
+        run: python3 overlays/prepare.py
+
+      - name: Build the CLI and daemon
+        working-directory: multica/server
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        shell: bash
+        run: |
+          set -euo pipefail
+          suffix=""
+          if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
+          # Version basis: the newest v* tag on this repository, else on the
+          # submodule, else the upstream sha. Nothing here may abort the step —
+          # a tagless shallow submodule checkout is the normal case.
+          parent_rev="$(git -C ../.. rev-parse --short HEAD)"
+          upstream_commit="$(git -C .. rev-parse --short HEAD)"
+          base_version=""
+          for dir in ../.. ..; do
+            candidate="$(git -C "$dir" describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)"
+            if [ -n "$candidate" ]; then
+              base_version="${candidate#v}"
+              break
+            fi
+          done
+          if [ -z "$base_version" ]; then
+            base_version="$upstream_commit"
+          fi
+          version="${base_version}-overlay.${parent_rev}"
+          out="$GITHUB_WORKSPACE/dist/multica-$GOOS-$GOARCH$suffix"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          go build \
+            -overlay="$GITHUB_WORKSPACE/overlays/go-overlay.json" \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${version} -X main.commit=${upstream_commit}-overlay -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "$out" ./cmd/multica
+          echo "built $out as ${version}"
+          ls -l "$out"
+
+      - name: Smoke-test the native binary
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          ./dist/multica-linux-amd64 version
+
+      - name: Package the binary
+        shell: bash
+        env:
+          GOOS_TARGET: ${{ matrix.goos }}
+          GOARCH_TARGET: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          cd dist
+          suffix=""
+          if [ "$GOOS_TARGET" = "windows" ]; then
+            suffix=".exe"
+            mkdir -p pkg
+            cp "multica-${GOOS_TARGET}-${GOARCH_TARGET}${suffix}" "pkg/multica${suffix}"
+            zip -q -j "multica_${GOOS_TARGET}_${GOARCH_TARGET}.zip" "pkg/multica${suffix}"
+            rm -rf pkg
+          else
+            mkdir -p pkg
+            cp "multica-${GOOS_TARGET}-${GOARCH_TARGET}${suffix}" "pkg/multica${suffix}"
+            tar -czf "multica_${GOOS_TARGET}_${GOARCH_TARGET}.tar.gz" -C pkg "multica${suffix}"
+            rm -rf pkg
+          fi
+          ls -l
+
+      - name: Upload the artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: multica-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify-overlay, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download every artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: multica-*
+          merge-multiple: true
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum multica_* > checksums.txt
+          cat checksums.txt
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/multica_*
+            dist/checksums.txt
+          generate_release_notes: true

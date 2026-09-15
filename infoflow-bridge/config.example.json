@@ -1,0 +1,18 @@
+{
+  "infoflow": {
+    "appKey": "<robot AppKey>",
+    "appSecret": "<robot AppSecret>",
+    "agentId": "<robot agentId>",
+    "baseUrl": "https://<im-open-platform-api>/api/v1"
+  },
+  "multica": {
+    "cli": "../deploy/bin/multica",
+    "defaultAgent": "<agent name>",
+    "webUrl": "http://localhost:3000",
+    "workspaceSlug": "<workspace-slug>"
+  },
+  "allowUsers": ["<如流用户名>"],
+  "verificationMirrorGroupIds": ["<group id that also receives every verification message>"],
+  "pollIntervalMs": 5000,
+  "pollTimeoutMs": 1800000
+}
