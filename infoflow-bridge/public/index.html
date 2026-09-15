@@ -24,6 +24,8 @@
   #list td:nth-child(4), #list td:nth-child(5) { white-space: nowrap; width: 1%; }
   .state { display: inline-block; white-space: nowrap; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #d1d5db; }
   .state.connected { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
+  .state.connecting { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
+  .state.reconnecting { color: #a16207; border-color: #fde68a; background: #fffbeb; }
   .state.error, .state.incomplete { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
   .state.disabled, .state.stopped { color: #6b7280; }
   .hint { font-size: 12px; color: #6b7280; margin-top: 6px; }
@@ -169,7 +171,7 @@ function toast(message) {
 }
 
 function stateLabel(state) {
-  return { connected: "已连接", ready: "就绪（只发送）", error: "连接失败", incomplete: "信息不全", disabled: "已停用", stopped: "未连接" }[state] || state;
+  return { connected: "连接成功", connecting: "连接中", reconnecting: "重连中", ready: "就绪（只发送）", error: "连接失败", incomplete: "信息不全", disabled: "已停用", stopped: "未连接" }[state] || state;
 }
 
 function render() {
@@ -226,9 +228,16 @@ function render() {
     if (status.error) {
       const detail = document.createElement("div");
       detail.className = "hint";
-      detail.style.color = "#b91c1c";
+      detail.style.color = status.state === "reconnecting" ? "#a16207" : "#b91c1c";
       detail.textContent = status.error;
       state.append(detail);
+    }
+    if (status.retryAttempt) {
+      const retry = document.createElement("div");
+      retry.className = "hint";
+      const next = status.nextRetryAt ? new Date(status.nextRetryAt).toLocaleTimeString() : "";
+      retry.textContent = "第 " + status.retryAttempt + " 次重连" + (next ? "，下次尝试 " + next : "");
+      state.append(retry);
     }
     row.append(state);
 

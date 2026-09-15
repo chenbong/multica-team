@@ -3,6 +3,9 @@ import { Bridge } from "./bridge.js";
 import { VerificationCodeRelay } from "./codes.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
 
+const INITIAL_RECONNECT_DELAY_MS = 5000;
+const MAX_INITIAL_RECONNECT_DELAY_MS = 120000;
+
 // Owns one InfoFlow connection per configured robot and keeps that set in step
 // with whatever the admin page saved, so a change never needs a process restart.
 export class RobotRuntime {
@@ -37,7 +40,22 @@ export class RobotRuntime {
       if (!instance) return { id: robot.id, state: "stopped" };
       // A verification robot only ever sends, so it holds no connection to report on.
       if (robot.purpose === "verification") return { id: robot.id, state: "ready" };
-      return { id: robot.id, state: instance.error ? "error" : "connected", error: instance.error };
+
+      const state = connectionState(instance.wsClient);
+      if (instance.reconnecting || state === "reconnecting") {
+        const result = { id: robot.id, state: "reconnecting", error: instance.error };
+        const retryAttempt = Math.max(instance.retryAttempt, reconnectAttempts(instance.wsClient));
+        if (retryAttempt > 0) result.retryAttempt = retryAttempt;
+        if (instance.nextRetryAt) result.nextRetryAt = new Date(instance.nextRetryAt).toISOString();
+        return result;
+      }
+      if (state === "connecting") return { id: robot.id, state: "connecting" };
+      if (instance.error) return { id: robot.id, state: "error", error: instance.error };
+      return {
+        id: robot.id,
+        state: "connected",
+        connectedAt: instance.connectedAt ? new Date(instance.connectedAt).toISOString() : undefined,
+      };
     });
   }
 
@@ -143,7 +161,20 @@ export class RobotRuntime {
     };
 
     const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger);
-    const instance = { robot, client, bridge, wsClient: null, fingerprint: fingerprint(robot), error: null };
+    const instance = {
+      robot,
+      client,
+      bridge,
+      wsClient: null,
+      fingerprint: fingerprint(robot),
+      error: null,
+      reconnecting: false,
+      retryAttempt: 0,
+      retryTimer: null,
+      nextRetryAt: null,
+      connectInFlight: false,
+      stopping: false,
+    };
     this.instances.set(robot.id, instance);
 
     // A verification robot needs no inbound channel: opening one would both waste a
@@ -164,45 +195,129 @@ export class RobotRuntime {
     instance.wsClient = wsClient;
 
     registerHandlers({ wsClient, bridge, robot, logger: this.logger });
-    // The SDK reconnects on its own (maxReconnectAttempts defaults to -1), so a
-    // failed or dropped connection is transient. Keep the page's badge honest:
-    // mark the disconnect while the SDK is retrying, and clear the recorded error
-    // the moment a connection is (re)established. Without this, one startup
-    // timeout left the page showing 「连接失败 · Request timeout after 30000ms」
-    // forever — for a robot that was already dispatching messages again.
+    // Established connections use the SDK's reconnect loop (infinite by default).
+    // Initial endpoint failures need a local retry loop because this SDK deliberately
+    // does not start reconnect() after connect() rejects before the first connection.
     wsClient.on("connected", () => {
-      if (instance.error) this.logger.log(`[${robot.name}] reconnected after: ${instance.error}`);
+      const previousError = instance.error;
+      const wasReconnecting = instance.reconnecting;
+      if (instance.retryTimer) clearTimeout(instance.retryTimer);
+      instance.retryTimer = null;
+      instance.nextRetryAt = null;
       instance.error = null;
+      instance.reconnecting = false;
+      instance.retryAttempt = 0;
       instance.connectedAt = Date.now();
+      if (wasReconnecting || previousError) {
+        this.logger.log("[" + robot.name + "] reconnected after: " + (previousError || "retrying"));
+      }
     });
     wsClient.on("disconnected", () => {
+      if (instance.stopping) return;
+      instance.reconnecting = true;
       instance.error = "连接已断开，正在自动重连";
-      this.logger.warn(`[${robot.name}] InfoFlow connection dropped`);
+      this.logger.warn("[" + robot.name + "] InfoFlow connection dropped");
     });
 
     try {
       await wsClient.connect();
+      if (connectionState(wsClient) !== "connected") {
+        throw new Error("连接未建立");
+      }
       instance.error = null;
       instance.connectedAt = Date.now();
-      this.logger.log(`[${robot.name}] connected — messages dispatch to agent 「${robot.agent}」`);
+      this.logger.log("[" + robot.name + "] connected — messages dispatch to agent 「" + robot.agent + "」");
     } catch (error) {
-      instance.error = error.message;
-      this.logger.error(`[${robot.name}] connect failed: ${error.message}（SDK 会自动重连）`);
+      instance.error = errorMessage(error);
+      instance.reconnecting = true;
+      instance.retryAttempt += 1;
+      this.logger.error("[" + robot.name + "] connect failed: " + instance.error + "（将自动重试）");
+      this.#scheduleInitialReconnect(instance);
+    }
+  }
+
+  #scheduleInitialReconnect(instance) {
+    if (instance.stopping || instance.retryTimer || instance.connectInFlight) return;
+    instance.reconnecting = true;
+    const attempt = Math.max(instance.retryAttempt, 1);
+    const delay = initialReconnectDelay(attempt);
+    instance.nextRetryAt = Date.now() + delay;
+    this.logger.warn(
+      "[" + instance.robot.name + "] retry " + attempt + " scheduled in " + delay + "ms",
+    );
+    instance.retryTimer = setTimeout(() => {
+      instance.retryTimer = null;
+      instance.nextRetryAt = null;
+      void this.#retryInitialConnect(instance);
+    }, delay);
+    instance.retryTimer.unref?.();
+  }
+
+  async #retryInitialConnect(instance) {
+    if (instance.stopping || !this.instances.has(instance.robot.id)) return;
+    instance.connectInFlight = true;
+    try {
+      await instance.wsClient.connect();
+      if (connectionState(instance.wsClient) !== "connected") {
+        throw new Error("连接未建立");
+      }
+    } catch (error) {
+      instance.error = errorMessage(error);
+      instance.reconnecting = true;
+      instance.retryAttempt += 1;
+      this.logger.error(
+        "[" + instance.robot.name + "] retry failed: " + instance.error,
+      );
+    } finally {
+      instance.connectInFlight = false;
+    }
+    if (instance.stopping || !this.instances.has(instance.robot.id)) return;
+    if (connectionState(instance.wsClient) !== "connected") {
+      this.#scheduleInitialReconnect(instance);
     }
   }
 
   async #stop(id) {
     const instance = this.instances.get(id);
-    this.instances.delete(id);
     if (!instance) return;
+    instance.stopping = true;
+    if (instance.retryTimer) clearTimeout(instance.retryTimer);
+    instance.retryTimer = null;
+    instance.nextRetryAt = null;
+    instance.reconnecting = false;
+    this.instances.delete(id);
     if (!instance.wsClient) return;
     try {
       instance.wsClient.disconnect();
-      this.logger.log(`[${instance.robot.name}] disconnected`);
+      this.logger.log("[" + instance.robot.name + "] disconnected");
     } catch (error) {
-      this.logger.warn(`[${instance.robot.name}] disconnect failed: ${error.message}`);
+      this.logger.warn(
+        "[" + instance.robot.name + "] disconnect failed: " + error.message,
+      );
     }
   }
+}
+
+function connectionState(wsClient) {
+  if (!wsClient) return "stopped";
+  return typeof wsClient.getState === "function" ? wsClient.getState() : wsClient.state;
+}
+
+function reconnectAttempts(wsClient) {
+  const value = Number(wsClient?.reconnectAttempts ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function errorMessage(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message || "连接失败";
+}
+
+function initialReconnectDelay(attempt) {
+  return Math.min(
+    MAX_INITIAL_RECONNECT_DELAY_MS,
+    INITIAL_RECONNECT_DELAY_MS * 2 ** Math.max(0, attempt - 1),
+  );
 }
 
 // Restart a connection only when something it depends on changed; renaming the
