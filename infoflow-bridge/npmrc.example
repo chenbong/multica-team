@@ -1,0 +1,3 @@
+# Copy to .npmrc when the IM SDK lives in a private registry. The real file is
+# git-ignored so the repository carries no internal registry hostname.
+registry=https://<private-npm-registry>/

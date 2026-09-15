@@ -1,0 +1,3 @@
+[submodule "multica"]
+	path = multica
+	url = https://github.com/multica-ai/multica.git
