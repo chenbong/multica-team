@@ -304,6 +304,11 @@ python3 infoflow-bridge/scripts/bridgectl.py status|start|restart|stop
 从 Multica 的智能体页右上角可以一键跳到这个管理页（按钮是否存在取决于
 `MULTICA_INFOFLOW_BRIDGE_URL`，见 §4.2）。
 
+一个账号可以属于多个工作区，页面会把该账号**所有工作区**的智能体一起列出来（每项标 `【工作区】智能体 · 模型 · 归属`）：
+内部对每个工作区各调一次 `multica --profile <账号> --workspace-id <工作区> agent list`（`--workspace-id`
+是 CLI 全局参数），选中的智能体所属工作区会跟着机器人一起存进 `config.local.json`，派任务与 issue 链接都按它走。
+所以同一个账号在不同工作区的智能体可以各绑一个机器人，不需要改 profile，也不会出现"第二个工作区看不到"。
+
 管理页本身不保存 Multica 凭据，它读取**本机** `~/.multica` 下的 CLI profile
 （默认 `config.json` 和 `profiles/<名字>/config.json`），只把登录邮箱与页面登录邮箱一致、
 且 `server_url` 指向本部署的那些 profile 列为"已登录"。所以这台机器上必须有这样一个 profile，

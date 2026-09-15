@@ -6,11 +6,16 @@ import { execFile } from "node:child_process";
 // (~/.multica/config.json); a named one is ~/.multica/profiles/<name>/, which is
 // what keeps one robot's account independent of whoever logged in last.
 export class Multica {
-  constructor({ cli, webUrl, workspaceSlug, profile = "" }, logger = console) {
+  constructor({ cli, webUrl, workspaceSlug, workspaceId = "", profile = "" }, logger = console) {
     this.cli = cli;
     this.webUrl = webUrl;
     this.workspaceSlug = workspaceSlug;
     this.profile = String(profile ?? "").trim();
+    // The workspace every call should act in. A CLI profile pins one workspace
+    // (the one written at login), so a page that has to reach an account's other
+    // workspaces passes the id explicitly — `--workspace-id` overrides the
+    // profile for that one command, and the CLI supports it on every command.
+    this.workspaceId = String(workspaceId ?? "").trim();
     this.logger = logger;
   }
 
@@ -59,13 +64,18 @@ export class Multica {
 
   #json(args, stdin) {
     return new Promise((resolvePromise, reject) => {
+      const scoped = [
+        ...(this.profile === "" ? [] : ["--profile", this.profile]),
+        ...(this.workspaceId === "" ? [] : ["--workspace-id", this.workspaceId]),
+        ...args,
+      ];
       const child = execFile(
         this.cli,
-        this.profile === "" ? args : ["--profile", this.profile, ...args],
+        scoped,
         { maxBuffer: 16 * 1024 * 1024, timeout: 120000 },
         (error, stdout, stderr) => {
           if (error) {
-            reject(new Error(`multica ${args[0]} ${args[1]} failed: ${(stderr || error.message).trim()}`));
+            reject(new Error(`multica ${args[0]} ${args[1] ?? ""} failed: ${(stderr || error.message).trim()}`));
             return;
           }
           const text = stdout.trim();
@@ -76,7 +86,7 @@ export class Multica {
           try {
             resolvePromise(JSON.parse(text));
           } catch {
-            reject(new Error(`multica ${args[0]} ${args[1]} returned non-JSON output: ${text.slice(0, 200)}`));
+            reject(new Error(`multica ${args[0]} ${args[1] ?? ""} returned non-JSON output: ${text.slice(0, 200)}`));
           }
         },
       );

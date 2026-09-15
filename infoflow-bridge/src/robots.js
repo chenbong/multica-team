@@ -192,7 +192,7 @@ export class RobotRuntime {
 // Restart a connection only when something it depends on changed; renaming the
 // robot or editing an unrelated field should not drop the WebSocket.
 function fingerprint(robot) {
-  return [robot.purpose, robot.appKey, robot.appSecret, robot.appId, robot.baseUrl, robot.agent, robot.profile, robot.allowAllInGroups, robot.allowUsers.join(",")].join("|");
+  return [robot.purpose, robot.appKey, robot.appSecret, robot.appId, robot.baseUrl, robot.agent, robot.profile, robot.workspaceId, robot.allowAllInGroups, robot.allowUsers.join(",")].join("|");
 }
 
 function robotConfig(base, robot) {
@@ -201,8 +201,10 @@ function robotConfig(base, robot) {
     multica: {
       ...base.multica,
       // Each robot dispatches as its own Multica account, and links point at
-      // that account's workspace.
+      // the workspace its agent lives in — which is not necessarily the one the
+      // CLI profile is pinned to.
       profile: robot.profile ?? "",
+      workspaceId: robot.workspaceId || base.multica.workspaceId || "",
       workspaceSlug: robot.workspaceSlug || base.multica.workspaceSlug,
       defaultAgent: robot.agent,
     },

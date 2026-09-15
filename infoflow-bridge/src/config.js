@@ -146,7 +146,10 @@ function normalizeRobot(robot) {
     // whoever last ran `multica login` on this machine.
     profile: String(robot.profile ?? "").trim(),
     // Recorded when the robot is saved so issue links point at the workspace
-    // that account actually creates issues in.
+    // that account actually creates issues in. workspaceId is the authoritative
+    // one: an account can see several workspaces, and this is the workspace the
+    // bound agent lives in (the CLI is called with --workspace-id for it).
+    workspaceId: String(robot.workspaceId ?? "").trim(),
     workspaceSlug: String(robot.workspaceSlug ?? "").trim(),
     // Optional deep link that opens this robot's chat in the IM client. The
     // admin page's login hint uses the verification robot's link.

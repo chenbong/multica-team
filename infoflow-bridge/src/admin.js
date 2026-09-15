@@ -176,13 +176,24 @@ async function route(request, response, runtime, accounts, auth, logger) {
       return;
     }
 
+    // Which workspace the bound agent lives in. The form sends it along with the
+    // agent name; a robot saved before this existed falls back to whatever it
+    // already recorded, and finally to the profile's pinned workspace.
+    const accountWorkspaces = await accounts.workspaces(account.profile);
+    const wantedWorkspace = String(input.workspaceId ?? "").trim();
+    const workspace =
+      accountWorkspaces.find((entry) => entry.id === wantedWorkspace) ??
+      accountWorkspaces.find((entry) => entry.id === String(previous.workspaceId ?? "")) ??
+      null;
+
     const merged = {
       ...previous,
       id: input.id || previous.id,
       name,
       purpose: "task",
       profile: account.profile,
-      workspaceSlug: account.workspaceSlug ?? previous.workspaceSlug ?? "",
+      workspaceId: workspace?.id ?? previous.workspaceId ?? account.workspaceId ?? "",
+      workspaceSlug: workspace?.slug ?? account.workspaceSlug ?? previous.workspaceSlug ?? "",
       appId: input.appId,
       appKey: input.appKey,
       appSecret,
@@ -297,24 +308,57 @@ async function snapshot(runtime, accounts, requestedProfile, session) {
 
   let agents = [];
   let agentsError = null;
+  // Every workspace this account can reach. The binding form lists agents from
+  // all of them (each row carries its workspace), because a profile's pinned
+  // workspace is only one of the workspaces a person actually works in.
+  let workspaces = [];
   if (!active) {
     agentsError = `这台机器上还没有登记 ${session.email} 的 Multica 账号——在 ${config.multica.webUrl} 用这个邮箱登录一次，服务端会自动完成登记`;
   } else if (active.error) {
     agentsError = `账号 ${active.label} 不可用：${active.error}`;
   } else {
     try {
-      const [raw, members] = await Promise.all([
-        new Multica({ ...config.multica, profile: active.profile }).listAgents(),
-        accounts.members(active.profile),
-      ]);
-      agents = (raw ?? []).map((agent) => ({
-        name: agent.name,
-        model: agent.model,
-        ownerId: agent.owner_id,
-        ownerEmail: members[agent.owner_id]?.email ?? null,
-        mine: Boolean(active.userId) && agent.owner_id === active.userId,
-        visibility: agent.visibility,
-      }));
+      workspaces = await accounts.workspaces(active.profile);
+      // A server that answers with nothing (or fails) leaves us on the pinned
+      // workspace, which is what the page showed before.
+      if (workspaces.length === 0 && active.workspaceId) {
+        workspaces = [
+          {
+            id: active.workspaceId,
+            name: active.workspaceName ?? "",
+            slug: active.workspaceSlug ?? "",
+          },
+        ];
+      }
+      const perWorkspace = await Promise.all(
+        workspaces.map(async (workspace) => {
+          try {
+            const [raw, members] = await Promise.all([
+              new Multica({ ...config.multica, profile: active.profile, workspaceId: workspace.id }).listAgents(),
+              accounts.members(active.profile, workspace.id),
+            ]);
+            return {
+              agents: (raw ?? []).map((agent) => ({
+                name: agent.name,
+                model: agent.model,
+                ownerId: agent.owner_id,
+                ownerEmail: members[agent.owner_id]?.email ?? null,
+                mine: Boolean(active.userId) && agent.owner_id === active.userId,
+                visibility: agent.visibility,
+                workspaceId: workspace.id,
+                workspaceName: workspace.name,
+                workspaceSlug: workspace.slug,
+              })),
+            };
+          } catch (error) {
+            // One unreadable workspace must not hide the others.
+            return { error: `${workspace.slug || workspace.name || workspace.id}: ${error.message}` };
+          }
+        }),
+      );
+      agents = perWorkspace.flatMap((entry) => entry.agents ?? []);
+      const failures = perWorkspace.map((entry) => entry.error).filter(Boolean);
+      if (failures.length > 0) agentsError = `部分工作区读取失败：${failures.join("；")}`;
     } catch (error) {
       agentsError = error.message;
     }
@@ -329,6 +373,7 @@ async function snapshot(runtime, accounts, requestedProfile, session) {
     unresolvedAccounts: unresolved,
     activeProfile: active?.profile ?? "",
     me: active ? { profile: active.profile, name: active.name, email: active.email, workspaceName: active.workspaceName } : null,
+    workspaces: workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name, slug: workspace.slug })),
     robots: visibleRobots.map((robot) => ({
       ...redactRobot(robot),
       mineAccount: true,

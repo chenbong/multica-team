@@ -49,16 +49,38 @@ export class Accounts {
     return account ? this.#describe(account) : null;
   }
 
-  // user id -> person, for the workspace this profile points at, so the agent
-  // list can name an owner instead of showing a raw uuid.
-  async members(profile) {
+  // Every workspace this account can act in. A profile pins exactly one of them
+  // (the id written at login), but the binding page lists agents across all of
+  // them, so it needs the whole set rather than just the pinned one.
+  async workspaces(profile) {
     const account = (await this.list()).find((entry) => entry.profile === profile);
-    if (!account?.workspaceId) return {};
+    if (!account) return [];
     try {
-      const rows = await this.#api(account, `/api/workspaces/${account.workspaceId}/members`);
+      const rows = await this.#api(account, "/api/workspaces");
+      return rows
+        .map((row) => ({
+          id: String(row.id ?? ""),
+          name: String(row.name ?? ""),
+          slug: String(row.slug ?? ""),
+        }))
+        .filter((row) => row.id !== "");
+    } catch (error) {
+      this.logger.warn(`could not list workspaces for profile ${profile || "(default)"}: ${error.message}`);
+      return [];
+    }
+  }
+
+  // user id -> person, for one workspace (the pinned one by default), so the
+  // agent list can name an owner instead of showing a raw uuid.
+  async members(profile, workspaceId = "") {
+    const account = (await this.list()).find((entry) => entry.profile === profile);
+    const workspace = String(workspaceId ?? "").trim() || account?.workspaceId || "";
+    if (!account || workspace === "") return {};
+    try {
+      const rows = await this.#api(account, `/api/workspaces/${workspace}/members`);
       return Object.fromEntries(rows.map((row) => [row.user_id, { name: row.name, email: row.email, role: row.role }]));
     } catch (error) {
-      this.logger.warn(`could not list members for profile ${profile || "(default)"}: ${error.message}`);
+      this.logger.warn(`could not list members for profile ${profile || "(default)"} workspace ${workspace}: ${error.message}`);
       return {};
     }
   }

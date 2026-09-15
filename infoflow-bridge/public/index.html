@@ -206,6 +206,10 @@ function render() {
       ? "账号：" + (account?.email || account?.label || "你的账号")
       : "账号：别人的 Multica 账号";
     agent.append(accountLine);
+    const workspaceLine = document.createElement("div");
+    workspaceLine.className = "hint";
+    workspaceLine.textContent = "工作区：" + (robot.workspaceSlug || robot.workspaceId || "未记录");
+    agent.append(workspaceLine);
     row.append(agent);
 
     const scope = document.createElement("td");
@@ -275,6 +279,7 @@ function button(text, onClick, className) {
 // account changes. The current pick survives the 8-second refresh.
 function renderAgents() {
   const keep = agentSelect.value;
+  const keepWorkspace = agentSelect.selectedOptions[0]?.dataset.workspaceId ?? "";
   const visible = mineOnly.checked ? data.agents.filter((agent) => agent.mine) : data.agents;
   // data.me is null when this machine holds no Multica profile for the address
   // that signed into the page, which is a different state from "logged in, no
@@ -295,20 +300,36 @@ function renderAgents() {
   for (const agent of visible) {
     const option = document.createElement("option");
     option.value = agent.name;
-    const parts = [agent.name];
+    // Value is the agent name; the workspace lives in the dataset because two
+    // workspaces may well hold an agent with the same name.
+    option.dataset.workspaceId = agent.workspaceId ?? "";
+    const workspace = agent.workspaceName || agent.workspaceSlug || "";
+    const parts = [];
+    if (workspace) parts.push("【" + workspace + "】");
+    parts.push(agent.name);
     if (agent.model) parts.push(agent.model);
     parts.push(agent.mine ? "本人创建" : agent.ownerEmail ? "来自 " + agent.ownerEmail : "他人创建");
     option.textContent = parts.join(" · ");
     agentSelect.append(option);
   }
-  if (keep && visible.some((agent) => agent.name === keep)) agentSelect.value = keep;
+  if (keep) {
+    const match =
+      [...agentSelect.options].find(
+        (option) => option.value === keep && (option.dataset.workspaceId ?? "") === keepWorkspace,
+      ) ?? [...agentSelect.options].find((option) => option.value === keep);
+    if (match) match.selected = true;
+  }
 
   // The "not logged in" state already shows in the dropdown placeholder, so
   // this line only carries per-account details and load failures.
   const hint = [];
   if (!multicaMissing) {
     if (data.agentsError) hint.push("读取智能体失败：" + data.agentsError);
-    else if (data.me) hint.push("当前账号 " + (data.me.email || "未知") + (data.me.workspaceName ? "，工作区 " + data.me.workspaceName : ""));
+    else if (data.me) {
+      const names = (data.workspaces || []).map((workspace) => workspace.name || workspace.slug).filter(Boolean);
+      hint.push("当前账号 " + (data.me.email || "未知") +
+        (names.length ? "，可见工作区 " + names.join("、") : data.me.workspaceName ? "，工作区 " + data.me.workspaceName : ""));
+    }
     if (!mineOnly.checked && data.agents.some((agent) => !agent.mine)) hint.push("列表里也包含别人创建但这个账号有权访问的智能体。");
   }
   document.getElementById("agent-hint").textContent = hint.join(" ");
@@ -429,7 +450,15 @@ async function edit(robot) {
   form.appId.value = robot.appId;
   form.appKey.value = robot.appKey;
   form.appSecret.value = "";
-  form.agent.value = robot.agent;
+  // Agents are listable per workspace, so restore the exact (workspace, agent)
+  // pair the robot was saved with.
+  const match = [...agentSelect.options].find(
+    (option) =>
+      option.value === robot.agent &&
+      (option.dataset.workspaceId ?? "") === (robot.workspaceId ?? ""),
+  );
+  if (match) match.selected = true;
+  else form.agent.value = robot.agent;
   form.allowAllInGroups.checked = robot.allowAllInGroups;
   document.getElementById("form-title").textContent = "编辑 " + robot.name;
   document.getElementById("secret-hint").textContent = robot.hasSecret ? "已保存过，留空表示不修改。" : "还没有保存过 App Secret。";
@@ -478,6 +507,7 @@ async function remove(robot) {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const selectedOption = agentSelect.selectedOptions[0];
   const payload = {
     id: form.id.value,
     profile: activeProfile ?? "",
@@ -485,6 +515,9 @@ form.addEventListener("submit", async (event) => {
     appKey: form.appKey.value.trim(),
     appSecret: form.appSecret.value,
     agent: form.agent.value,
+    // Which workspace that agent lives in — the server validates it against the
+    // account's workspaces and stores it on the robot.
+    workspaceId: selectedOption?.dataset.workspaceId ?? "",
     allowAllInGroups: form.allowAllInGroups.checked,
   };
   if (!payload.agent) {
