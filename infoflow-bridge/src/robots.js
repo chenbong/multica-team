@@ -164,14 +164,30 @@ export class RobotRuntime {
     instance.wsClient = wsClient;
 
     registerHandlers({ wsClient, bridge, robot, logger: this.logger });
-    wsClient.on("disconnected", () => this.logger.warn(`[${robot.name}] InfoFlow connection dropped`));
+    // The SDK reconnects on its own (maxReconnectAttempts defaults to -1), so a
+    // failed or dropped connection is transient. Keep the page's badge honest:
+    // mark the disconnect while the SDK is retrying, and clear the recorded error
+    // the moment a connection is (re)established. Without this, one startup
+    // timeout left the page showing 「连接失败 · Request timeout after 30000ms」
+    // forever — for a robot that was already dispatching messages again.
+    wsClient.on("connected", () => {
+      if (instance.error) this.logger.log(`[${robot.name}] reconnected after: ${instance.error}`);
+      instance.error = null;
+      instance.connectedAt = Date.now();
+    });
+    wsClient.on("disconnected", () => {
+      instance.error = "连接已断开，正在自动重连";
+      this.logger.warn(`[${robot.name}] InfoFlow connection dropped`);
+    });
 
     try {
       await wsClient.connect();
+      instance.error = null;
+      instance.connectedAt = Date.now();
       this.logger.log(`[${robot.name}] connected — messages dispatch to agent 「${robot.agent}」`);
     } catch (error) {
       instance.error = error.message;
-      this.logger.error(`[${robot.name}] connect failed: ${error.message}`);
+      this.logger.error(`[${robot.name}] connect failed: ${error.message}（SDK 会自动重连）`);
     }
   }
 
