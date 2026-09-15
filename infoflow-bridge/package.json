@@ -1,0 +1,15 @@
+{
+  "name": "infoflow-multica-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Relays InfoFlow (Ruliu) direct messages into Multica issues and sends the agent result back.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js && node --check src/config.js && node --check src/multica.js && node --check src/bridge.js && node --check src/robots.js && node --check src/admin.js && node --check src/accounts.js && node --check src/auth.js && node --check src/codes.js && node --check src/infoflow.js && node --check scripts/dry-run.js && node --check scripts/robot-info.js"
+  },
+  "dependencies": {
+    "@baidu/infoflow-sdk-nodejs": "2026.8.28"
+  }
+}

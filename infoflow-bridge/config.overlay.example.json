@@ -1,0 +1,22 @@
+{
+  "multica": {
+    "cli": "../deploy/bin/multica",
+    "webUrl": "http://127.0.0.1:8004",
+    "workspaceSlug": "",
+    "apiLogPath": "../deploy/logs/api.log",
+    "serverUrl": "http://127.0.0.1:8006",
+    "serverUrls": [
+      "http://127.0.0.1:8006",
+      "http://127.0.0.1:8006"
+    ]
+  },
+  "admin": {
+    "port": 8002,
+    "host": "0.0.0.0",
+    "publicHosts": ["127.0.0.1"],
+    "allowedDomains": ["example.com"],
+    "allowEmails": [],
+    "infoflowConsoleUrl": "https://<im-open-platform-console>"
+  },
+  "robots": []
+}
