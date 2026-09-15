@@ -1,0 +1,13 @@
+# GitHub over SSH for a host that cannot reach github.com:22.
+#
+# Outbound port 22 is blocked on this network, so GitHub is reached through
+# the official SSH-over-443 endpoint. Append this block to the *top* of
+# ~/.ssh/config: OpenSSH keeps the first value it reads for a keyword, and the
+# existing file sets a global "Port" later on, which would otherwise win.
+
+Host github.com
+  HostName ssh.github.com
+  Port 443
+  User git
+  IdentityFile ~/.ssh/id_github
+  IdentitiesOnly yes
