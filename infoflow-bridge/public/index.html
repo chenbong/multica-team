@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Multica智能体 绑定 如流机器人</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif; margin: 0; padding: 32px; max-width: 940px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lede { color: #6b7280; margin: 0 0 24px; }
+  section { border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
+  label { display: block; font-size: 13px; color: #6b7280; margin: 12px 0 4px; }
+  input[type=text], input[type=password], select { width: 100%; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; box-sizing: border-box; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 220px; }
+  .actions { margin-top: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; }
+  a.action-link { display: inline-block; font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; color: inherit; text-decoration: none; cursor: pointer; margin-left: 6px; }
+  button.primary { background: #111827; color: #fff; border-color: #111827; }
+  button.danger { color: #b91c1c; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #f3f4f6; font-size: 14px; vertical-align: middle; }
+  #list td:nth-child(4), #list td:nth-child(5) { white-space: nowrap; width: 1%; }
+  .state { display: inline-block; white-space: nowrap; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #d1d5db; }
+  .state.connected { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
+  .state.error, .state.incomplete { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+  .state.disabled, .state.stopped { color: #6b7280; }
+  .hint { font-size: 12px; color: #6b7280; margin-top: 6px; }
+  .toast { position: fixed; right: 20px; bottom: 20px; background: #111827; color: #fff; padding: 10px 16px; border-radius: 10px; opacity: 0; transition: opacity .2s; }
+  .toast.show { opacity: 1; }
+  .session { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #6b7280; margin: 0 0 14px; }
+  /* display:flex would otherwise beat the hidden attribute. */
+  .session[hidden] { display: none; }
+  .session button { padding: 2px 10px; font-size: 12px; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="session" id="session-bar" hidden>
+  <span id="who"></span>
+  <span id="multica-state"></span>
+  <a id="multica-login" href="#" target="_blank" rel="noreferrer" hidden>去登录 Multica</a>
+  <button type="button" id="logout">退出</button>
+</div>
+<h1>Multica智能体 绑定 如流机器人</h1>
+
+<section id="login" hidden>
+  <h2 style="font-size:16px;margin:0 0 10px">登录</h2>
+  <p class="hint">请先登录 <a id="multica-link" href="#" target="_blank" rel="noreferrer">Multica</a> 后，再登录本页面。</p>
+  <p class="hint" id="login-lede">用你的企业邮箱登录，验证码会由如流机器人私聊发给你。</p>
+  <p class="hint" id="verification-bot-hint" hidden>如果从未使用过“<span id="verification-bot-name"></span>”，请先打开 <a id="verification-bot-link" href="#" target="_blank" rel="noreferrer">对话窗口</a>，后续即可正常接收验证码。</p>
+  <div class="row">
+    <div>
+      <label>邮箱</label>
+      <input type="text" id="login-email" placeholder="you@example.com" autocomplete="username" />
+    </div>
+    <div>
+      <label>验证码</label>
+      <input type="text" id="login-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+    </div>
+  </div>
+  <div class="actions">
+    <button type="button" id="send-code">发送验证码</button>
+    <button type="button" class="primary" id="do-login">登录</button>
+    <span class="hint" id="login-hint"></span>
+  </div>
+</section>
+
+<div id="app" hidden>
+
+<section>
+  <h2 style="font-size:16px;margin:0 0 10px">已配置的机器人</h2>
+  <table id="list"><tbody></tbody></table>
+  <p class="hint" id="empty" hidden>暂无已配置的机器人，用下面的表单添加一个。</p>
+</section>
+
+<section>
+  <h2 style="font-size:16px;margin:0 0 10px">还没有机器人？两步创建</h2>
+  <ol style="margin:0;padding-left:20px">
+    <li><strong>建应用</strong>：打开 <a id="console-link" href="#" target="_blank" rel="noreferrer">如流开放平台</a>，右上角「新建应用」，填应用名称（2–16 字）和账号 ID（<code>ai_xxx@example.com</code>），点「创建」。免审，建完立刻可用。</li>
+    <li><strong>拿凭据</strong>：在左侧应用列表里点开它 →「凭证与能力」→ 用「复制全部」拿到应用 ID、App Key、App Secret，粘到下面的表单里。</li>
+  </ol>
+  <p class="hint">默认权限就够用，不用改。只有一处要留意：新应用的「可见范围」里没有你要用它的人和群时，机器人发消息会报「接收者不在可见范围/未关注」（errcode 40070）。</p>
+  <p class="hint">保存之后点列表里的「发测试消息」，如流里收到就说明凭据、权限、可见范围都对了。</p>
+</section>
+
+
+<section>
+  <h2 style="font-size:16px;margin:0 0 10px" id="form-title">新增机器人</h2>
+  <form id="form">
+    <input type="hidden" name="id" />
+    <div class="row">
+     <div>
+       <label>绑定的 Multica 智能体</label>
+       <select name="agent" id="agent" required></select>
+       <label style="margin:6px 0 0;color:inherit"><input type="checkbox" id="mine-only" /> 只看这个账号创建的</label>
+       <p class="hint" id="agent-hint"></p>
+     </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>应用 ID</label>
+        <input type="text" name="appId" required />
+      </div>
+      <div>
+        <label>App Key</label>
+        <input type="text" name="appKey" required />
+      </div>
+      <div>
+        <label>App Secret</label>
+        <input type="password" name="appSecret" autocomplete="new-password" />
+        <p class="hint" id="secret-hint">在如流开放平台的「凭证与能力」里获取。</p>
+      </div>
+    </div>
+    <div class="actions" style="margin-top:4px">
+      <label style="margin:0;color:inherit"><input type="checkbox" name="allowAllInGroups" checked /> 启用群聊功能</label>
+      <span class="hint">勾上后，机器人所在群里的任何人 @ 它都能派任务；私聊默认只放行建这个机器人的人。</span>
+    </div>
+    <div class="actions">
+      <button type="submit" class="primary">保存并连接</button>
+      <button type="button" id="reset">清空表单</button>
+      <span class="hint" id="form-hint"></span>
+    </div>
+  </form>
+</section>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>window.__BRIDGE_PAGE = {{BRIDGE_PAGE_CONFIG}};</script>
+<script>
+const page = window.__BRIDGE_PAGE || {};
+// Every deployment address on this page comes from the instance's own
+// configuration, so the repository carries no internal hostname.
+function applyPageConfig() {
+  const multicaLink = document.getElementById("multica-link");
+  if (page.multicaWebUrl) multicaLink.href = page.multicaWebUrl;
+  else multicaLink.replaceWith(document.createTextNode("Multica"));
+  if (page.emailPlaceholder) document.getElementById("login-email").placeholder = page.emailPlaceholder;
+  if (page.verificationBotName && page.verificationBotChatUrl) {
+    document.getElementById("verification-bot-name").textContent = page.verificationBotName;
+    document.getElementById("verification-bot-link").href = page.verificationBotChatUrl;
+    document.getElementById("verification-bot-hint").hidden = false;
+  }
+  const consoleLink = document.getElementById("console-link");
+  if (page.infoflowConsoleUrl) consoleLink.href = page.infoflowConsoleUrl;
+  else consoleLink.replaceWith(document.createTextNode("如流开放平台"));
+}
+applyPageConfig();
+
+const form = document.getElementById("form");
+const listBody = document.querySelector("#list tbody");
+const agentSelect = document.getElementById("agent");
+const mineOnly = document.getElementById("mine-only");
+let data = { robots: [], status: [], agents: [], accounts: [], activeProfile: "" };
+const chatLinks = new Map();
+const chatLinkLoads = new Map();
+// null means "whatever the server picks"; after the first load it is the profile
+// the page is looking through.
+let activeProfile = null;
+
+function toast(message) {
+  const node = document.getElementById("toast");
+  node.textContent = message;
+  node.classList.add("show");
+  setTimeout(() => node.classList.remove("show"), 2600);
+}
+
+function stateLabel(state) {
+  return { connected: "已连接", ready: "就绪（只发送）", error: "连接失败", incomplete: "信息不全", disabled: "已停用", stopped: "未连接" }[state] || state;
+}
+
+function render() {
+  renderSession();
+  renderAgents();
+
+  listBody.innerHTML = "";
+  document.getElementById("empty").hidden = data.robots.length > 0;
+  for (const robot of data.robots) {
+    const status = data.status.find((entry) => entry.id === robot.id) || {};
+    const row = document.createElement("tr");
+
+   const name = document.createElement("td");
+   name.innerHTML = "<strong>" + robot.name + "</strong><div class=hint>应用 ID " + robot.appId + (robot.hasSecret ? "" : " · 缺少 AppSecret") + "</div>";
+   row.append(name);
+    const base = page.infoflowConsoleUrl
+      ? page.infoflowConsoleUrl + "/projects/" + encodeURIComponent(robot.appId)
+      : "";
+    const links = document.createElement("div");
+    links.className = "hint";
+    links.innerHTML = base
+      ? '<a href="' + base + '/credentials" target="_blank" rel="noreferrer">凭证</a> · ' +
+        '<a href="' + base + '/permissions" target="_blank" rel="noreferrer">权限管理</a> · ' +
+        '<a href="' + base + '" target="_blank" rel="noreferrer">应用主页</a>'
+      : "";
+    name.append(links);
+
+    const agent = document.createElement("td");
+    agent.textContent = robot.agent;
+    const account = (data.accounts || []).find((entry) => entry.profile === (robot.profile || ""));
+    const accountLine = document.createElement("div");
+    accountLine.className = "hint";
+    accountLine.textContent = robot.mineAccount
+      ? "账号：" + (account?.email || account?.label || "你的账号")
+      : "账号：别人的 Multica 账号";
+    agent.append(accountLine);
+    row.append(agent);
+
+    const scope = document.createElement("td");
+    scope.innerHTML = "<div class=hint>私聊：" + (robot.allowUsers.join("、") || "无人") +
+      "<br>群聊：" + (robot.allowAllInGroups ? "所有成员" : "仅上面这些人") + "</div>";
+    row.append(scope);
+
+    const state = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "state " + (status.state || "stopped");
+    badge.textContent = stateLabel(status.state);
+   badge.title = status.error || "";
+    state.append(badge);
+    if (status.error) {
+      const detail = document.createElement("div");
+      detail.className = "hint";
+      detail.style.color = "#b91c1c";
+      detail.textContent = status.error;
+      state.append(detail);
+    }
+    row.append(state);
+
+    const actions = document.createElement("td");
+    actions.style.textAlign = "right";
+    if (robot.mineAccount) {
+      actions.append(button("编辑", () => edit(robot)));
+      actions.append(chatAction(robot));
+      actions.append(button("发测试消息", () => test(robot)));
+      actions.append(button("删除", () => remove(robot), "danger"));
+    } else {
+      const note = document.createElement("span");
+      note.className = "hint";
+      note.textContent = "只读";
+      actions.append(note);
+    }
+    row.append(actions);
+
+    listBody.append(row);
+  }
+}
+
+function chatAction(robot) {
+  const url = chatLinks.get(robot.id);
+  if (url) {
+    const node = document.createElement("a");
+    node.className = "action-link";
+    node.textContent = "打开机器人对话";
+    node.href = url;
+    node.target = "_blank";
+    node.rel = "noreferrer";
+    return node;
+  }
+  return button("打开机器人对话", () => prepareChatLink(robot));
+}
+
+function button(text, onClick, className) {
+  const node = document.createElement("button");
+  node.type = "button";
+  node.textContent = text;
+  node.style.marginLeft = "6px";
+  if (className) node.className = className;
+  node.addEventListener("click", onClick);
+  return node;
+}
+
+// The agent list belongs to one account, so it is rebuilt whenever the selected
+// account changes. The current pick survives the 8-second refresh.
+function renderAgents() {
+  const keep = agentSelect.value;
+  const visible = mineOnly.checked ? data.agents.filter((agent) => agent.mine) : data.agents;
+  // data.me is null when this machine holds no Multica profile for the address
+  // that signed into the page, which is a different state from "logged in, no
+  // agents yet". The server writes that profile when the account logs into
+  // Multica itself, so the way out is to log in there once.
+  const multicaMissing = !data.me;
+  agentSelect.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  if (multicaMissing) {
+    placeholder.textContent = "这台机器还没有登记你的 Multica 账号，先在 Multica 用同一个邮箱登录一次";
+  } else if (visible.length === 0) {
+    placeholder.textContent = "当前用户暂未创建智能体";
+  } else {
+    placeholder.textContent = "选择一个智能体";
+  }
+  agentSelect.append(placeholder);
+  for (const agent of visible) {
+    const option = document.createElement("option");
+    option.value = agent.name;
+    const parts = [agent.name];
+    if (agent.model) parts.push(agent.model);
+    parts.push(agent.mine ? "本人创建" : agent.ownerEmail ? "来自 " + agent.ownerEmail : "他人创建");
+    option.textContent = parts.join(" · ");
+    agentSelect.append(option);
+  }
+  if (keep && visible.some((agent) => agent.name === keep)) agentSelect.value = keep;
+
+  // The "not logged in" state already shows in the dropdown placeholder, so
+  // this line only carries per-account details and load failures.
+  const hint = [];
+  if (!multicaMissing) {
+    if (data.agentsError) hint.push("读取智能体失败：" + data.agentsError);
+    else if (data.me) hint.push("当前账号 " + (data.me.email || "未知") + (data.me.workspaceName ? "，工作区 " + data.me.workspaceName : ""));
+    if (!mineOnly.checked && data.agents.some((agent) => !agent.mine)) hint.push("列表里也包含别人创建但这个账号有权访问的智能体。");
+  }
+  document.getElementById("agent-hint").textContent = hint.join(" ");
+}
+
+// Top-left status line: who is on this page, and whether that person has a
+// Multica account signed in on this machine. Without one the page cannot list
+// agents at all, so the bar carries the way out.
+function renderSession() {
+  document.getElementById("who").textContent = "当前登录：" + (data.session?.email ?? "");
+  const signedIn = Boolean(data.me?.email);
+  const badge = document.getElementById("multica-state");
+  badge.className = "state " + (signedIn ? "connected" : "error");
+  badge.textContent = signedIn
+    ? "Multica 已登录：" + data.me.email + "（profile " + (data.me.profile === "" ? "默认" : data.me.profile) + "）"
+    : "Multica 未登录";
+  const link = document.getElementById("multica-login");
+  link.hidden = signedIn;
+  link.href = data.webUrl || "#";
+}
+
+async function load() {
+  const query = activeProfile === null ? "" : "?profile=" + encodeURIComponent(activeProfile);
+  const response = await fetch("/api/data" + query);
+  if (response.status === 401) {
+    const detail = await response.json().catch(() => ({}));
+    showLogin(detail.login);
+    return;
+  }
+  data = await response.json();
+  activeProfile = data.activeProfile ?? "";
+  document.getElementById("login").hidden = true;
+  document.getElementById("app").hidden = false;
+  document.getElementById("session-bar").hidden = false;
+  render();
+  warmChatLinks();
+}
+
+function warmChatLinks() {
+  const currentIds = new Set((data.robots || []).map((robot) => robot.id));
+  for (const id of chatLinks.keys()) {
+    if (!currentIds.has(id)) chatLinks.delete(id);
+  }
+  for (const robot of data.robots || []) {
+    if (!robot.mineAccount || chatLinks.has(robot.id) || chatLinkLoads.has(robot.id)) continue;
+    const pending = post("/api/robot/link", { id: robot.id })
+      .then((result) => {
+        chatLinks.set(robot.id, result.url);
+        render();
+      })
+      .catch(() => {})
+      .finally(() => chatLinkLoads.delete(robot.id));
+    chatLinkLoads.set(robot.id, pending);
+  }
+}
+
+function showLogin(detail) {
+  document.getElementById("app").hidden = true;
+  document.getElementById("session-bar").hidden = true;
+  const panel = document.getElementById("login");
+  panel.hidden = false;
+  const lede = [];
+  if (detail?.domains?.length) lede.push("用你的 " + detail.domains.join(" / ") + " 邮箱登录，验证码会由如流的验证码机器人私聊发给你。");
+  if (detail && detail.robot === false) lede.push("这台机器还没有配置验证码机器人，现在发不出验证码。");
+  if (lede.length) document.getElementById("login-lede").textContent = lede.join(" ");
+}
+
+async function sendLoginCode() {
+  const email = document.getElementById("login-email").value.trim();
+  const hint = document.getElementById("login-hint");
+  try {
+    const result = await post("/api/login/code", { email });
+    hint.textContent = "验证码已发给如流用户 " + result.user + "，10 分钟内有效。";
+    document.getElementById("login-code").focus();
+  } catch (error) {
+    hint.textContent = error.message;
+  }
+}
+
+async function doLogin() {
+  const email = document.getElementById("login-email").value.trim();
+  const code = document.getElementById("login-code").value.trim();
+  const hint = document.getElementById("login-hint");
+  try {
+    await post("/api/login/verify", { email, code });
+    document.getElementById("login-code").value = "";
+    hint.textContent = "";
+    activeProfile = null;
+    await load();
+  } catch (error) {
+    hint.textContent = error.message;
+  }
+}
+
+document.getElementById("send-code").addEventListener("click", sendLoginCode);
+document.getElementById("do-login").addEventListener("click", doLogin);
+document.getElementById("login-code").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") doLogin();
+});
+document.getElementById("logout").addEventListener("click", async () => {
+  await post("/api/logout", {});
+  showLogin();
+});
+
+async function post(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "请求失败");
+  return result;
+}
+
+async function edit(robot) {
+  form.id.value = robot.id;
+  form.appId.value = robot.appId;
+  form.appKey.value = robot.appKey;
+  form.appSecret.value = "";
+  form.agent.value = robot.agent;
+  form.allowAllInGroups.checked = robot.allowAllInGroups;
+  document.getElementById("form-title").textContent = "编辑 " + robot.name;
+  document.getElementById("secret-hint").textContent = robot.hasSecret ? "已保存过，留空表示不修改。" : "还没有保存过 App Secret。";
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+}
+
+async function prepareChatLink(robot) {
+  if (chatLinks.has(robot.id)) return;
+  if (chatLinkLoads.has(robot.id)) {
+    toast("正在生成如流链接，请稍候再点击");
+    return;
+  }
+  toast("正在生成如流链接…");
+  const pending = post("/api/robot/link", { id: robot.id })
+    .then((result) => {
+      chatLinks.set(robot.id, result.url);
+      render();
+    })
+    .catch((error) => toast(error.message))
+    .finally(() => chatLinkLoads.delete(robot.id));
+  chatLinkLoads.set(robot.id, pending);
+  try {
+    await pending;
+  } catch {}
+}
+
+async function test(robot) {
+  try {
+    const result = await post("/api/robot/test", { id: robot.id });
+    toast("已给 " + result.target + " 发了一条测试消息");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function remove(robot) {
+  if (!confirm("删除「" + robot.name + "」？它的凭据会从配置里移除。")) return;
+  data = await post("/api/robot/delete", { id: robot.id, profile: activeProfile ?? "" });
+  chatLinks.delete(robot.id);
+  chatLinkLoads.delete(robot.id);
+  activeProfile = data.activeProfile ?? "";
+  render();
+  warmChatLinks();
+  toast("已删除");
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {
+    id: form.id.value,
+    profile: activeProfile ?? "",
+    appId: form.appId.value.trim(),
+    appKey: form.appKey.value.trim(),
+    appSecret: form.appSecret.value,
+    agent: form.agent.value,
+    allowAllInGroups: form.allowAllInGroups.checked,
+  };
+  if (!payload.agent) {
+    toast("先选一个 Multica 智能体");
+    return;
+  }
+  try {
+    data = await post("/api/robot", payload);
+    chatLinks.clear();
+    chatLinkLoads.clear();
+    activeProfile = data.activeProfile ?? "";
+    render();
+    warmChatLinks();
+    resetForm();
+    toast("已保存，连接状态见上面的列表");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+function resetForm() {
+  form.reset();
+  form.id.value = "";
+  form.allowAllInGroups.checked = true;
+  document.getElementById("form-title").textContent = "新增机器人";
+  document.getElementById("secret-hint").textContent = "在如流开放平台的「凭证与能力」里获取。";
+}
+
+document.getElementById("reset").addEventListener("click", resetForm);
+
+mineOnly.addEventListener("change", renderAgents);
+load().catch((error) => toast("加载失败：" + error.message));
+setInterval(() => {
+  if (!document.getElementById("app").hidden) load().catch(() => {});
+}, 8000);
+</script>
+</body>
+</html>

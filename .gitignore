@@ -1,0 +1,22 @@
+.web-build/
+deploy/bin/
+deploy/data/
+deploy/logs/
+# Machine-specific values, instance secrets and 如流 robot credentials stay on
+# the host that runs the instance. Copy the *.example files and fill them in.
+deploy/host.env
+deploy/secrets.env
+infoflow-bridge/config.local.json
+infoflow-bridge/config.local.json.before-*
+infoflow-bridge/state.json
+infoflow-bridge/bridge.pid
+infoflow-bridge/logs/
+infoflow-bridge/node_modules
+# The registry that hosts the IM SDK and the lock file recording it are
+# deployment-local, so neither the registry hostname nor its resolved URLs are
+# committed. Copy infoflow-bridge/npmrc.example instead.
+infoflow-bridge/.npmrc
+infoflow-bridge/package-lock.json
+overlays/go-overlay.json
+overlays/upstream.json
+__pycache__/
