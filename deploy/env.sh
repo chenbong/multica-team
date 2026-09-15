@@ -62,8 +62,18 @@ export MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS="${MULTICA_DAEMON_RUNTIME_SHIM_DEFAU
 # IM open-platform endpoints used by infoflow-bridge. All optional: empty keeps
 # the SDK's own defaults, and the deployment sets its real values in host.env.
 export INFOFLOW_BASE_URL="${INFOFLOW_BASE_URL:-}"
-export INFOFLOW_WS_GATEWAY="${INFOFLOW_WS_GATEWAY:-}"
-export INFOFLOW_WS_CONNECT_DOMAIN="${INFOFLOW_WS_CONNECT_DOMAIN:-}"
+# Leave the WS override variables absent unless host.env explicitly sets them.
+# Empty environment values prevent the SDK from using its built-in gateway.
+if test -n "$(printenv INFOFLOW_WS_GATEWAY 2>/dev/null)"; then
+  export INFOFLOW_WS_GATEWAY
+else
+  unset INFOFLOW_WS_GATEWAY
+fi
+if test -n "$(printenv INFOFLOW_WS_CONNECT_DOMAIN 2>/dev/null)"; then
+  export INFOFLOW_WS_CONNECT_DOMAIN
+else
+  unset INFOFLOW_WS_CONNECT_DOMAIN
+fi
 
 export WEB_TREE="$INSTANCE_DIR/.web-build/multica"
 
