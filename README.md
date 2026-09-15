@@ -10,6 +10,8 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
    `personal`、`workspace`（项目）、`team` 三级，团队技能与项目技能都跨工作区、跨用户可见，
    列表里按级别分区展示并标注 `团队` / `项目：<项目名>` / `个人`；创建者可以在三级之间调整级别
    （`PUT /api/skills/{id}/scope`、`POST /api/skills/{id}/promote`），其余人只能按来源项目的管理员策略编辑。
+   导入技能时同样按所选级别落库：URL、压缩包/本地目录、从运行时导入都会保留 `团队` 级别，
+   不会悄悄降级成项目（团队技能的 `workspace_id` 为空，项目技能才绑定工作区）。
    数据库侧对应 `migrations/457`–`463`：scope 字段、跨工作区可见性、团队唯一索引、owner 与用量统计索引。
 2. **技能级别在智能体侧统一呈现**。创建智能体、智能体能力（Skills）页、技能选择器都显示同一套
    级别标签，避免"在 Skills 页是团队、在智能体里看不出来"的不一致。
@@ -223,6 +225,11 @@ git -C multica status --short          # 必须为空
 `multica.webUrl`、`multica.serverUrl(s)`、`admin.port`、`admin.publicHosts`，
 机器人条目、`admin.infoflowConsoleUrl` 等保持不变。**改端口请改 `host.env`。**
 
+另外两个只影响「添加电脑」下发内容的变量：`MULTICA_DAEMON_RUNTIME_DEFAULTS`（预置
+`config set daemon_runtimes`，见增量列表第 11 条）与 `MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS`
+（预置 `config set runtime_shims`，见第 12 条）；`MULTICA_CLI_INSTALL_URL` 决定页面给出的安装命令
+指向哪个 `scripts/install.sh`。三个都留空时下发的是上游原样命令。
+
 ### 4.3 命令
 
 ```bash
@@ -311,8 +318,16 @@ profile 里暂时没有工作区时，Bridge 第一次读到会自动选中该�
 - 浏览器打开 <http://192.0.2.10:8004>，填企业邮箱（如 `xxx@example.com`），点继续；
 - 验证码有两种查看方式：如流验证码机器人的私聊消息，或点页面上的机器人链接直接打开对话窗口；
 - 首次使用需要先在如流里打开过该机器人的会话，否则收不到消息；
-- Mac 上的 CLI profile（`profile-a`、`profile-b`）指向 `http://192.0.2.10:8006` + `http://192.0.2.10:8004`，
-  改端口后需要同步更新并 `multica --profile <名字> daemon restart`。
+- **登录成功时服务端会自动把账号登记到本机**：签发该用户那枚长期 PAT（一人一枚，与「添加电脑」
+  发给用户的是同一枚），并写 `~/.multica/profiles/<邮箱前缀>/config.json`（`server_url`、`app_url`、
+  `token`，账号已有工作区时连 `workspace_id` 一起写；文件 0600、目录 0700，已存在的其他字段如
+  `device_name`/`workspaces_root`/`daemon_runtimes` 会被保留）。如流 Bridge 管理页认账号读的就是它，
+  所以用户不需要在服务器上做任何手工操作。
+- 账号暂时没有工作区时 profile 里会缺 `workspace_id`，Bridge 第一次读到会选中该账号可见的第一个
+  工作区并写回（CLI 没有 `workspace_id` 会拒绝所有工作区相关命令）。
+- 手工维护 profile 的方式仍然有效：`multica --profile <名字> config set server_url …` +
+  `login --token mul_…` + 需要时 `config set workspace_id <id>`；改端口后要同步更新并
+  `multica --profile <名字> daemon restart`。
 
 ## 7. 从零重建
 
@@ -368,19 +383,35 @@ git submodule update --init --recursive      # 拉取固定版本的上游
 - **构建报子模块不干净**：说明有人改了 `multica/` 里的文件，先 `git -C multica checkout -- .` 或把改动挪进 overlay。
 - **Bridge 里的任务机器人连接超时**：`connect failed: Request timeout` 属于如流侧网络/长连接问题，
   验证码机器人通常不受影响，可稍后重试或检查该机器人的可见范围与权限。
+- **daemon 加不到服务端、日志里是 `502`（或 `login --token` 报 "token 无效"）**：多半是这台机器设了
+  `http_proxy`/`https_proxy`，把发往部署地址的请求也交给代理了，而代理到内网这台机器是间歇性 502。
+  症状很好认：`curl http://<部署地址>:8006/health` 时通时不通，加 `--noproxy "*"` 立刻 200，而服务端
+  `deploy/logs/api.log` 里根本没有这次请求。修法是把部署地址加进 `NO_PROXY`
+  （`export NO_PROXY="<部署地址>,${NO_PROXY}"`，写进 `/etc/environment` 或登录 profile 更省事），
+  或者启动 daemon 时 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY …`。
+- **智能体回「Not logged in · Please run /login」或"模型账号登录已失效"**：先确认这台机器是不是
+  用 `runtime_shims` 覆盖了那个 CLI（见增量列表第 12 条）——`multica --profile <名字> config show`
+  里的 `runtime_shims` 应为出问题的命令名（如 `ducc`），daemon 日志里应有
+  `runtime shim installed` 与 `command_path=~/.multica/shims/<命令>`。shim 是**在跑 daemon 的那台
+  客户端机器上**生成的，服务端不参与；`ducx` 之类本来就正常的 CLI 不要写进名单。
+- **daemon 启动报 `no agent CLI found`**：这是 `daemon_runtimes` 白名单把内置探测过滤空了；
+  `0.4.42-overlay.4` 起这种情况不再报错（显式白名单视为"只要自定义运行时"），旧二进制请升级，
+  或先把白名单清空（`multica config set daemon_runtimes ""`）再启动。
 
 ## 9. Git 工作流
 
-185 已配置好直连 GitHub（SSH over 443），日常同步直接在服务器上完成：
+部署机上已配置好直连 GitHub（SSH over 443，见 `deploy/ssh-config.github`），日常同步直接在服务器上完成：
 
 ```bash
-cd /opt/multica-team
+cd <仓库目录>
 git fetch origin && git merge --ff-only origin/main    # 拉取
 git add -A && git commit -m "..." && git push origin main   # 提交推送
 ```
 
 约定：
 
+- 按**常规提交历史**维护：一个改动一个 commit，直接 `git push`，不需要 `--amend`、也不需要
+  强制推送（早期为了对外发布曾把历史压成单提交，现在不再这样做）；
 - 提交前保持 `git -C multica status --short` 为空；
 - `deploy/host.env`、`deploy/secrets.env`、`infoflow-bridge/config.local.json`（以及
   `config.local.json.before-*` 这类备份）是机器本地文件，永远不要提交，改动只留在机器上；
@@ -402,7 +433,21 @@ git add -A && git commit -m "..." && git push origin main   # 提交推送
 - 另一个 job 先用 overlay 做编译检查（`go test -overlay=… -run '^$'`），并断言构建后
   `multica/` 子模块仍然干净——和 `deploy/build.sh` 的约束保持一致
 
-在 macOS 上换用 CI 产物（daemon 宿主就是跑这个二进制）：
+**客户端机器装的就是这个二进制**（daemon 跑在里面）。仓库自带 `scripts/install.sh`，会按平台和架构
+从 Releases 下载对应压缩包、校验 `checksums.txt`、装到 `/usr/local/bin`（不可写且 sudo 不可用时
+自动落到 `~/.local/bin` 并写进 shell 配置）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | bash
+# 不想输 sudo 密码就指定用户目录：
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | MULTICA_BIN_DIR=$HOME/.local/bin bash
+```
+
+「添加电脑」对话框里那条安装命令就是它——把 `deploy/host.env` 的
+`MULTICA_CLI_INSTALL_URL` 指到本仓库的 `scripts/install.sh`，页面就会下发这个地址（见 §4.2）。
+也可以用 `--version <tag>` / `MULTICA_VERSION=<tag>` 固定某个版本，例如 `v0.4.42-overlay.4`。
+
+在 macOS 上手工替换 CI 产物（daemon 宿主就是跑这个二进制）：
 
 ```bash
 # 从仓库 Actions 页面下载 multica_darwin_arm64.tar.gz
@@ -418,3 +463,18 @@ daemon 会比较自身版本与它将要重新执行的 `multica --version`，�
 这也是修"模型下拉列表与本地实际可用模型不一致"的通道：daemon 侧的 `codex debug models`
 调用被 overlay 改过（见 `overlays/go/files/server/pkg/agent/thinking.go`），只有用本仓库
 构建的二进制才会带上这个修复。
+
+## 11. 版本与发布记录
+
+CLI/daemon 走 tag 发版（`v*.*.*` → CI 构建 + Release），服务端与 Web 的改动随 `main` 部署即可，
+不需要新版本号。以下是已经发布过的 tag 及其中影响客户端的那部分内容：
+
+| Tag | 客户端侧内容 |
+| --- | --- |
+| `v0.4.42-overlay.1` | 首个 overlay 构建：技能三级作用域、运行时 profile 归属、模型目录、`--profile` 隔离 |
+| `v0.4.42-overlay.2` | `daemon_runtimes` 白名单（只注册名单内的内置运行时）；安装脚本的可写性判断与 `~/.local/bin` 回退 |
+| `v0.4.42-overlay.3` | 显式白名单允许把内置探测过滤空（不再报 `no agent CLI found`） |
+| `v0.4.42-overlay.4` | `runtime_shims`：为声明过的命令自动生成包装器（`~/.multica/shims/<命令>`），修 `--verbose` + `--settings` 同时出现时 CLI 掉登录态的问题 |
+
+保持升级到最新的办法就是让客户端装最新 Release（`scripts/install.sh` 默认取 Latest，或按
+`MULTICA_VERSION` 指定）；daemon 侧的自动跟随见上一节。
