@@ -10,6 +10,7 @@ infoflow-bridge/config.local.json
 infoflow-bridge/config.local.json.before-*
 infoflow-bridge/state.json
 infoflow-bridge/bridge.pid
+infoflow-bridge/bridge-watchdog.pid
 infoflow-bridge/logs/
 infoflow-bridge/node_modules
 # The registry that hosts the IM SDK and the lock file recording it are

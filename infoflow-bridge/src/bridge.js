@@ -1,4 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
 
 const HELP = [
@@ -12,6 +14,9 @@ const HELP = [
   "- `/help` 这份说明",
 ].join("\n");
 
+const MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024;
+const INBOUND_IMAGE_TIMEOUT_MS = 30_000;
+
 export class Bridge {
   // A double tap in the chat client is filtered by content; InfoFlow redelivering
   // the same message is filtered by id (see #alreadyHandled).
@@ -20,11 +25,12 @@ export class Bridge {
   // Enough id history to cover a redelivery burst without growing the state file.
   static SEEN_MESSAGE_LIMIT = 200;
 
-  constructor(config, sender, logger = console) {
+  constructor(config, sender, logger = console, { getImageAccessToken = null } = {}) {
     this.config = config;
     this.sender = sender;
     this.logger = logger;
     this.multica = new Multica(config.multica, logger);
+    this.getImageAccessToken = getImageAccessToken;
     this.state = this.#loadState();
   }
 
@@ -37,8 +43,9 @@ export class Bridge {
 
   // conversation: { kind: "private" | "group", id }. For a private chat the id is
   // the username to reply to; for a group it is the numeric group id.
-  async handleMessage({ conversation, user: rawUser, text, messageId }) {
-    const body = String(text ?? "").trim();
+  async handleMessage({ conversation, user: rawUser, text, messageId, images = [] }) {
+    const inboundImages = Array.isArray(images) ? images : [];
+    const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
     if (messageId && this.#alreadyHandled(messageId)) {
       this.logger.warn(`ignoring redelivered InfoFlow message ${messageId} from ${rawUser}`);
@@ -59,7 +66,7 @@ export class Bridge {
         await this.#handleCommand(conversation, user, body);
         return;
       }
-      await this.#dispatch(conversation, user, body);
+      await this.#dispatch(conversation, user, body, inboundImages);
     } catch (error) {
       this.logger.error(`handling message from ${user} failed: ${error.message}`);
       await this.reply(conversation, user, `出错了：${error.message}`);
@@ -133,7 +140,7 @@ export class Bridge {
     await this.reply(conversation, user, `不认识的命令：${command}。发 \`/help\` 看用法。`);
   }
 
-  async #dispatch(conversation, user, body) {
+  async #dispatch(conversation, user, body, images = []) {
     const repeat = this.#thread(conversation, user).lastRequest;
     if (repeat && repeat.body === body && Date.now() - repeat.at < Bridge.REPEAT_WINDOW_MS) {
       await this.reply(
@@ -145,7 +152,20 @@ export class Bridge {
     }
 
     const assignee = this.agentFor(user);
-    const issue = await this.multica.createIssue({ title: titleFrom(body), description: body, assignee });
+    const staged = await stageInboundImages(images, this.logger, this.getImageAccessToken);
+    const failureNote = staged.failed.map((entry) => "- " + entry).join("\n");
+    const description = staged.failed.length === 0 ? body : body + "\n\n图片附件处理失败：\n" + failureNote;
+    let issue;
+    try {
+      issue = await this.multica.createIssue({
+        title: titleFrom(body),
+        description,
+        assignee,
+        attachments: staged.paths,
+      });
+    } finally {
+      await staged.cleanup();
+    }
     const url = this.multica.issueUrl(issue);
     this.#remember(conversation, user, {
       lastIssue: { id: issue.id, identifier: issue.identifier, url },
@@ -263,4 +283,144 @@ function truncate(text, limit) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+export async function stageInboundImages(images, logger = console, getImageAccessToken = null) {
+  const list = Array.isArray(images) ? images.filter(Boolean) : [];
+  if (list.length === 0) return { paths: [], failed: [], cleanup: async () => {} };
+
+  const directory = await mkdtemp(join(process.cwd(), ".infoflow-images-"));
+  const paths = [];
+  const failed = [];
+  for (let index = 0; index < list.length; index += 1) {
+    try {
+      paths.push(await downloadInboundImage(list[index], directory, index + 1, getImageAccessToken));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      failed.push("第" + (index + 1) + "张图片：" + detail);
+      logger.warn("inbound image " + (index + 1) + " download failed: " + detail);
+    }
+  }
+
+  let cleaned = false;
+  return {
+    paths,
+    failed,
+    cleanup: async () => {
+      if (cleaned) return;
+      cleaned = true;
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+async function downloadInboundImage(image, directory, index, getImageAccessToken) {
+  const descriptor = image && typeof image === "object" ? image : { content: String(image ?? "") };
+  const inlineContent = descriptor.inline && typeof descriptor.content === "string" ? descriptor.content.trim() : "";
+
+  if (inlineContent !== "" && !/^https?:\/\//i.test(inlineContent)) {
+    const encoded = inlineContent.replace(/^data:image\/[^;]+;base64,/i, "");
+    return writeInboundImage(Buffer.from(encoded, "base64"), directory, index, "");
+  }
+
+  const candidates = imageUrlCandidates(descriptor);
+  if (candidates.length === 0) throw new Error("消息中没有可下载的图片地址");
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      return await fetchInboundImage(candidate, directory, index, getImageAccessToken);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError ?? new Error("图片下载失败");
+}
+
+function imageUrlCandidates(image) {
+  const fields = [
+    ["downloadurl", false],
+    ["downloadUrl", false],
+    ["imgDownloadurl", true],
+    ["imgDownloadUrl", true],
+    ["url", false],
+    ["href", false],
+  ];
+  const candidates = [];
+  const seen = new Set();
+  for (const [field, needsAuth] of fields) {
+    const value = image?.[field];
+    if (typeof value !== "string" || !/^https?:\/\//i.test(value) || seen.has(value)) continue;
+    seen.add(value);
+    candidates.push({ url: value, needsAuth });
+  }
+  if (typeof image?.content === "string" && /^https?:\/\//i.test(image.content) && !seen.has(image.content)) {
+    candidates.push({ url: image.content, needsAuth: false });
+  }
+  return candidates;
+}
+
+async function fetchInboundImage(candidate, directory, index, getImageAccessToken) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), INBOUND_IMAGE_TIMEOUT_MS);
+  try {
+    const headers = {};
+    if (candidate.needsAuth && getImageAccessToken) {
+      const token = await getImageAccessToken();
+      if (token) headers.Authorization = "Bearer-" + token;
+    }
+    const response = await fetch(candidate.url, { headers, redirect: "follow", signal: controller.signal });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+
+    const advertisedSize = Number(response.headers.get("content-length"));
+    if (Number.isFinite(advertisedSize) && advertisedSize > MAX_INBOUND_IMAGE_BYTES) {
+      throw new Error("图片超过 20MB 限制");
+    }
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0) throw new Error("返回空内容");
+    const contentType = response.headers.get("content-type") || "";
+    const prefix = bytes.subarray(0, 128).toString("utf8").trimStart().toLowerCase();
+    if (
+      contentType.toLowerCase().includes("json") ||
+      contentType.toLowerCase().includes("text/html") ||
+      prefix.startsWith("{") ||
+      prefix.startsWith("[") ||
+      prefix.startsWith("<!doctype") ||
+      prefix.startsWith("<html")
+    ) {
+      throw new Error("下载接口返回的不是图片数据");
+    }
+    return writeInboundImage(bytes, directory, index, contentType);
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("下载超时");
+    throw error instanceof Error ? error : new Error(String(error));
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function writeInboundImage(bytes, directory, index, contentType) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new Error("图片内容为空");
+  if (bytes.length > MAX_INBOUND_IMAGE_BYTES) throw new Error("图片超过 20MB 限制");
+  const extension = imageExtension(bytes, contentType);
+  const filePath = join(directory, "infoflow-image-" + String(index).padStart(2, "0") + extension);
+  await writeFile(filePath, bytes, { mode: 0o600 });
+  return filePath;
+}
+
+function imageExtension(bytes, contentType) {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) return ".png";
+  if (bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from("ffd8ff", "hex"))) return ".jpg";
+  if (bytes.subarray(0, 4).toString("ascii") === "GIF8") return ".gif";
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return ".webp";
+  if (bytes.subarray(0, 2).toString("ascii") === "BM") return ".bmp";
+  const mime = String(contentType).split(";", 1)[0].trim().toLowerCase();
+  return {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/svg+xml": ".svg",
+  }[mime] ?? ".bin";
 }

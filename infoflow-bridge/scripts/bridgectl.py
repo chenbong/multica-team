@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Starts, stops, restarts, or reports the bridge process.
+"""Manage the bridge process and keep it available after an unexpected exit.
 
-The child is put in its own session so it survives the terminal (or agent
-shell) that launched it; a plain `nohup ... &` still shares the process group
-and dies when that group is torn down.
-
-start/stop also look at whatever listens on the configured admin port, so a
-process started through another path (an older deploy script, a manual
-`node index.js`) cannot be left running stale code behind a restart that only
-looked successful.
+The watchdog owns the Node process, checks the admin port after startup, and
+restarts it with a bounded backoff. bridgectl stop terminates the watchdog first
+so an intentional stop is not immediately undone by an automatic restart.
 """
 import json
 import os
@@ -20,12 +15,17 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = Path(__file__).resolve()
 PID_FILE = ROOT / "bridge.pid"
+WATCHDOG_PID_FILE = ROOT / "bridge-watchdog.pid"
 LOG = ROOT / "logs" / "bridge.log"
 ENTRY = ROOT / "index.js"
 CONFIG = ROOT / "config.local.json"
 DEFAULT_PORT = 4180
 STOP_TIMEOUT_SECONDS = 5.0
+HEALTH_INTERVAL_SECONDS = 5.0
+STARTUP_GRACE_SECONDS = 60.0
+MAX_RESTART_DELAY_SECONDS = 60.0
 
 
 def admin_port():
@@ -35,17 +35,36 @@ def admin_port():
         return DEFAULT_PORT
 
 
+def read_pid(path):
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def process_command(pid):
+    if not pid:
+        return ""
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def alive(pid):
     return subprocess.run(["ps", "-p", str(pid)], capture_output=True).returncode == 0
 
 
 def running_pid():
-    try:
-        pid = int(PID_FILE.read_text().strip())
-    except (OSError, ValueError):
+    pid = read_pid(PID_FILE)
+    command = process_command(pid)
+    if not command or str(ENTRY) not in command:
         return None
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
-    if result.returncode != 0 or str(ENTRY) not in result.stdout:
+    return pid
+
+
+def running_watchdog_pid():
+    pid = read_pid(WATCHDOG_PID_FILE)
+    command = process_command(pid)
+    if not command or str(SCRIPT) not in command or " watchdog" not in command:
         return None
     return pid
 
@@ -97,35 +116,34 @@ def terminate(pid):
 
 def stop(quiet=False):
     stopped = []
+    watchdog = running_watchdog_pid()
+    if watchdog:
+        terminate(watchdog)
+        stopped.append(watchdog)
+
     pid = running_pid()
-    if pid:
+    if pid and pid not in stopped:
         terminate(pid)
         stopped.append(pid)
+
     PID_FILE.unlink(missing_ok=True)
+    WATCHDOG_PID_FILE.unlink(missing_ok=True)
+
     leftover = listener_pid(admin_port())
     if leftover and leftover not in stopped:
         terminate(leftover)
         stopped.append(leftover)
+
     if stopped:
         print("bridge stopped (pid " + ", ".join(str(entry) for entry in stopped) + ")")
     elif not quiet:
         print("bridge is not running")
 
 
-def start():
-    existing = running_pid()
-    if existing:
-        print(f"bridge already running (pid {existing})")
-        return
-    lingering = listener_pid(admin_port())
-    if lingering:
-        print(f"port {admin_port()} is still held by pid {lingering}; stopping it before start")
-        terminate(lingering)
+def launch(env):
     LOG.parent.mkdir(exist_ok=True)
-    env = os.environ.copy()
-    env["PATH"] = "/opt/homebrew/bin:" + env.get("PATH", "")
     with LOG.open("a") as log:
-        process = subprocess.Popen(
+        return subprocess.Popen(
             ["node", str(ENTRY)],
             cwd=ROOT,
             env=env,
@@ -134,8 +152,134 @@ def start():
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    PID_FILE.write_text(f"{process.pid}\n")
-    print(f"bridge started (pid {process.pid}), logs: {LOG}")
+
+
+def watchdog():
+    stopping = False
+    child = None
+
+    def handle_signal(_signum, _frame):
+        nonlocal stopping
+        stopping = True
+        if child is not None and child.poll() is None:
+            terminate(child.pid)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, handle_signal)
+
+    WATCHDOG_PID_FILE.write_text(str(os.getpid()))
+    env = os.environ.copy()
+    env["PATH"] = "/opt/homebrew/bin:" + env.get("PATH", "")
+    restart_delay = 1.0
+
+    try:
+        while not stopping:
+            try:
+                child = launch(env)
+            except Exception as error:
+                print("bridge launch failed: " + str(error), flush=True)
+                child = None
+                if stopping:
+                    break
+                time.sleep(restart_delay)
+                restart_delay = min(MAX_RESTART_DELAY_SECONDS, restart_delay * 2)
+                continue
+
+            PID_FILE.write_text(str(child.pid))
+            started_at = time.monotonic()
+            exit_code = None
+
+            while exit_code is None:
+                exit_code = child.poll()
+                if exit_code is not None:
+                    break
+                if stopping:
+                    terminate(child.pid)
+                    exit_code = child.wait()
+                    break
+                if (
+                    time.monotonic() - started_at >= STARTUP_GRACE_SECONDS
+                    and listener_pid(admin_port()) is None
+                ):
+                    print(
+                        "bridge health check failed: port "
+                        + str(admin_port())
+                        + " is not listening; restarting",
+                        flush=True,
+                    )
+                    terminate(child.pid)
+                    exit_code = child.wait()
+                    break
+                time.sleep(HEALTH_INTERVAL_SECONDS)
+
+            PID_FILE.unlink(missing_ok=True)
+            child = None
+            if stopping:
+                break
+
+            print(
+                "bridge exited with status "
+                + str(exit_code)
+                + "; restarting in "
+                + str(restart_delay)
+                + "s",
+                flush=True,
+            )
+            time.sleep(restart_delay)
+            restart_delay = min(MAX_RESTART_DELAY_SECONDS, restart_delay * 2)
+    finally:
+        if child is not None and child.poll() is None:
+            terminate(child.pid)
+        PID_FILE.unlink(missing_ok=True)
+        WATCHDOG_PID_FILE.unlink(missing_ok=True)
+
+
+def start():
+    watchdog_pid = running_watchdog_pid()
+    if watchdog_pid:
+        print(f"bridge watchdog already running (pid {watchdog_pid})")
+        return
+
+    existing = running_pid()
+    if existing:
+        print(f"bridge already running (pid {existing})")
+        return
+
+    lingering = listener_pid(admin_port())
+    if lingering:
+        print(f"port {admin_port()} is still held by pid {lingering}; stopping it before start")
+        terminate(lingering)
+
+    LOG.parent.mkdir(exist_ok=True)
+    env = os.environ.copy()
+    env["PATH"] = "/opt/homebrew/bin:" + env.get("PATH", "")
+    process = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "watchdog"],
+        cwd=ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    WATCHDOG_PID_FILE.write_text(str(process.pid))
+    print(f"bridge watchdog started (pid {process.pid}), logs: {LOG}")
+
+
+def status():
+    watchdog_pid = running_watchdog_pid()
+    bridge_pid = running_pid() or listener_pid(admin_port())
+    if watchdog_pid:
+        print(
+            "bridge watchdog running (pid "
+            + str(watchdog_pid)
+            + "), bridge pid "
+            + str(bridge_pid or "starting")
+        )
+    elif bridge_pid:
+        print(f"bridge running (pid {bridge_pid})")
+    else:
+        print("bridge is not running")
 
 
 action = sys.argv[1] if len(sys.argv) > 1 else "status"
@@ -146,6 +290,7 @@ elif action == "stop":
 elif action == "restart":
     stop(quiet=True)
     start()
+elif action == "watchdog":
+    watchdog()
 else:
-    pid = running_pid() or listener_pid(admin_port())
-    print(f"bridge running (pid {pid})" if pid else "bridge is not running")
+    status()

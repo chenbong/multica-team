@@ -160,7 +160,9 @@ export class RobotRuntime {
       return client.im.message.sendToUser(conversation.id, content, "md");
     };
 
-    const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger);
+    const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger, {
+      getImageAccessToken: () => client.getAccessToken(),
+    });
     const instance = {
       robot,
       client,
@@ -193,6 +195,17 @@ export class RobotRuntime {
       ...(DEFAULT_WS_CONNECT_DOMAIN ? { wsConnectDomain: DEFAULT_WS_CONNECT_DOMAIN } : {}),
     });
     instance.wsClient = wsClient;
+
+    wsClient.on("error", (event) => {
+      const error = event?.data?.error ?? event?.error ?? event;
+      const message = errorMessage(error);
+      if (instance.stopping) {
+        this.logger.warn("[" + robot.name + "] ignored InfoFlow error while stopping: " + message);
+        return;
+      }
+      instance.error = message;
+      this.logger.error("[" + robot.name + "] InfoFlow error: " + message);
+    });
 
     registerHandlers({ wsClient, bridge, robot, logger: this.logger });
     // Established connections use the SDK's reconnect loop (infinite by default).
@@ -309,7 +322,8 @@ function reconnectAttempts(wsClient) {
 }
 
 function errorMessage(error) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
+  const candidate = error?.data?.error ?? error?.error ?? error;
+  const message = candidate instanceof Error ? candidate.message : String(candidate?.message ?? candidate ?? "");
   return message || "连接失败";
 }
 
@@ -348,15 +362,53 @@ function robotConfig(base, robot) {
   };
 }
 
+export function parseGroupBlocks(blocks) {
+  const images = [];
+  const parts = [];
+
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    const type = String(block?.type ?? "").toUpperCase();
+
+    if (type === "IMAGE") {
+      images.push(block);
+      continue;
+    }
+
+    if (type === "REPLYDATA" || type === "REPLY" || type === "QUOTE") {
+      if (Array.isArray(block.replyImages)) images.push(...block.replyImages.filter(Boolean));
+    }
+
+    if (type === "AT") continue;
+
+    if (type === "LINK") {
+      parts.push(block.label ?? block.url ?? block.href ?? "");
+      continue;
+    }
+
+    parts.push(block.content ?? block.text ?? "");
+  }
+
+  return {
+    text: parts.filter(Boolean).join(" ").trim(),
+    images,
+  };
+}
 function registerHandlers({ wsClient, bridge, robot, logger }) {
-  for (const event of ["private.text", "private.markdown", "private.richtext"]) {
+  for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
       // Despite the names, FromUserId is the readable username and FromUserName is
       // a numeric uid. Replies are addressed by username.
       const user = raw.FromUserId ?? raw.FromUserName;
-      const text = raw.Content ?? raw.content ?? raw.Text ?? raw.text;
-      if (!user || !text) {
+      const rawContent = raw.Content ?? raw.content ?? raw.Text ?? raw.text;
+      const imageContent =
+        event === "private.image" && typeof rawContent === "string" ? rawContent : "";
+      const images = imageContent
+        ? [{ type: "IMAGE", inline: true, content: imageContent }]
+        : [];
+      const text = event === "private.image" ? "" : rawContent;
+      const body = String(text ?? "").trim() || (images.length > 0 ? "（图片消息，详见附件）" : "");
+      if (!user || body === "") {
         logger.warn(`[${robot.name}] ${event} without a usable sender/content:`, JSON.stringify(raw).slice(0, 600));
         return;
       }
@@ -364,13 +416,14 @@ function registerHandlers({ wsClient, bridge, robot, logger }) {
       await bridge.handleMessage({
         conversation: { kind: "private", id: user },
         user,
-        text,
+        text: body,
+        images,
         messageId: raw.MsgId ?? raw.msgId,
       });
     });
   }
 
-  for (const event of ["group.text", "group.markdown", "group.mixed"]) {
+  for (const event of ["group.text", "group.markdown", "group.mixed", "group.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
       // MESSAGE_RECEIVE is the @robot / slash-command delivery. ALL_MESSAGE_FORWARD
@@ -381,12 +434,9 @@ function registerHandlers({ wsClient, bridge, robot, logger }) {
       const header = raw.message?.header ?? {};
       const user = header.fromuserid ?? raw.fromuserid;
       const blocks = Array.isArray(raw.message?.body) ? raw.message.body : [];
-      const mentionsRobot = blocks.some((block) => block.type === "AT" && (block.robotid !== undefined || block.name));
-      const text = blocks
-        .filter((block) => block.type === "TEXT" || block.type === "MD")
-        .map((block) => block.content ?? "")
-        .join(" ")
-        .trim();
+      const mentionsRobot = blocks.some((block) => String(block?.type ?? "").toUpperCase() === "AT" && (block.robotid !== undefined || block.name));
+      const parsed = parseGroupBlocks(blocks);
+      const text = parsed.text || (parsed.images.length > 0 ? "（图片消息，详见附件）" : "");
 
       if (!groupId || !user || text === "" || !mentionsRobot) return;
       logger.log(`[${robot.name}] <- ${user} (${event} group ${groupId}): ${text.slice(0, 200)}`);
@@ -394,6 +444,7 @@ function registerHandlers({ wsClient, bridge, robot, logger }) {
         conversation: { kind: "group", id: groupId },
         user,
         text,
+        images: parsed.images,
         messageId: header.messageid ?? raw.messageid,
       });
     });

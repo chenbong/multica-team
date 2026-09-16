@@ -28,7 +28,8 @@ export class Multica {
     return this.#json(["agent", "list", "--output", "json"]);
   }
 
-  async createIssue({ title, description, assignee }) {
+  async createIssue({ title, description, assignee, attachments = [] }) {
+    const attachmentArgs = attachments.flatMap((path) => ["--attachment", path]);
     return this.#json(
       // --allow-duplicate: Multica refuses a second active issue with the same
       // title, which is right for the UI but wrong for chat, where asking the
@@ -43,6 +44,7 @@ export class Multica {
         "--assignee",
         assignee,
         "--allow-duplicate",
+        ...attachmentArgs,
         "--output",
         "json",
       ],
