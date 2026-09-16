@@ -657,6 +657,13 @@ CHANGES = {
         ),
     ],
 
+    "packages/views/onboarding/onboarding-flow.tsx": [
+        (
+'  const handleWorkspaceCreated = useCallback(\n    (ws: Workspace) => {\n      setWorkspace(ws);\n      // Deliberately NOT setCurrentWorkspace: that singleton is also written by\n      // the desktop tab system, which reclaims it whenever the new workspace\n      // has no tab group yet. Racing it sent the rest of this flow — Mika, the\n      // session, the kickoff — into the previously-active workspace. Every call\n      // from here on names its target workspace instead, and the switch happens\n      // once, on the navigation in onComplete.\n      advanceFrom("workspace");\n    },\n    [advanceFrom],\n  );',
+'  const handleWorkspaceCreated = useCallback(\n    (ws: Workspace) => {\n      if (isNewWorkspace) {\n        // Creating an additional workspace should land there immediately.\n        // Runtime and Mika setup remain available from inside the workspace;\n        // they are not a prerequisite for entering it.\n        onComplete(ws);\n        return;\n      }\n      setWorkspace(ws);\n      // Deliberately NOT setCurrentWorkspace: that singleton is also written by\n      // the desktop tab system, which reclaims it whenever the new workspace\n      // has no tab group yet. Racing it sent the rest of this flow — Mika, the\n      // session, the kickoff — into the previously-active workspace. Every call\n      // from here on names its target workspace instead, and the switch happens\n      // once, on the navigation in onComplete.\n      advanceFrom("workspace");\n    },\n    [advanceFrom, isNewWorkspace, onComplete],\n  );',
+        ),
+    ],
+
     DIALOG: [
         (
             'const INSTALL_CMD =\n'
