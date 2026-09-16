@@ -19,6 +19,7 @@ export function startAdminServer({ runtime, logger = console }) {
     allowedDomains: runtime.config.admin.allowedDomains,
     allowEmails: runtime.config.admin.allowEmails,
     send: (user, content) => runtime.sendVerification(user, content),
+    sessionPath: resolve(ROOT, "admin-sessions.json"),
     logger,
   });
   const server = createServer(async (request, response) => {

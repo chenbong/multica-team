@@ -3,3 +3,4 @@ config.local.json
 config.local.json.before-*
 state.json
 logs/
+admin-sessions.json*
