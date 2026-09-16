@@ -100,7 +100,8 @@ function daemonCommands(
   if (normalizedServerUrl && normalizedAppUrl) {
     return {
       setupCmd: `multica${p} setup self-host --server-url ${normalizedServerUrl} --app-url ${normalizedAppUrl}__RUNTIME_LINE____SHIM_LINE__`,
-      tokenCmd: `multica${p} config set server_url ${normalizedServerUrl}
+      tokenCmd: `export no_proxy="10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+multica${p} config set server_url ${normalizedServerUrl}
 multica${p} config set app_url ${normalizedAppUrl}
 multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}__RUNTIME_LINE____SHIM_LINE__
 multica${p} daemon start`,
@@ -109,7 +110,8 @@ multica${p} daemon start`,
 
   return {
     setupCmd: `multica${p} setup__RUNTIME_LINE____SHIM_LINE__`,
-    tokenCmd: `multica${p} config set server_url ${CLOUD_SERVER_URL}
+    tokenCmd: `export no_proxy="10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+multica${p} config set server_url ${CLOUD_SERVER_URL}
 multica${p} config set app_url ${CLOUD_APP_URL}
 multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}__RUNTIME_LINE____SHIM_LINE__
 multica${p} daemon start`,
@@ -140,6 +142,162 @@ NEW_CALLSITE = '''  const daemonAppUrl = useConfigStore((s) => s.daemonAppUrl);
     cliToken,
   );
 '''
+
+OLD_INSTRUCTIONS_MAIN = '''          <div>
+            <CommandStep
+              n={2}
+              label={t(($) => $.connect.step2_label)}
+              cmd={setupCmd}
+              copyAria={t(($) => $.connect.copy_aria)}
+            />
+            <p className="mt-1.5 text-micro leading-[1.55] text-muted-foreground">
+              {t(($) => $.connect.step2_hint)}
+            </p>
+          </div>
+
+          <LiveListening />
+
+          <TroubleshootingDetails tokenCmd={tokenCmd} />'''
+
+NEW_INSTRUCTIONS_MAIN = '''          <div>
+            <CommandStep
+              n={2}
+              label={t(($) => $.connect.step2_label)}
+              cmd={tokenCmd}
+              copyAria={t(($) => $.connect.copy_aria)}
+            />
+            <p className="mt-1.5 text-micro leading-[1.55] text-muted-foreground">
+              {t(($) => $.connect.token_step_hint)}
+            </p>
+            <p className="mt-1.5 text-micro leading-[1.55] text-muted-foreground">
+              {t(($) => $.connect.trouble_token_hint_prefix)}
+              <span className="font-medium text-foreground">
+                {t(($) => $.connect.trouble_token_hint_destination)}
+              </span>
+              {t(($) => $.connect.trouble_token_hint_suffix)}
+            </p>
+          </div>
+
+          <LiveListening />
+
+          <BrowserLoginDetails setupCmd={setupCmd} profile={daemonProfile} />'''
+
+OLD_BROWSER_DETAILS = '''function TroubleshootingDetails({ tokenCmd }: { tokenCmd: string }) {
+  const { t } = useT("runtimes");
+  return (
+    <details className="group rounded-lg border border-dashed">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-caption font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <ChevronRight
+          className="h-3 w-3 transition-transform group-open:rotate-90"
+          aria-hidden
+        />
+        {t(($) => $.connect.troubleshooting)}
+      </summary>
+      <div className="space-y-2 border-t px-3 pt-2.5 pb-3 text-micro leading-[1.55] text-muted-foreground">
+        <p>{t(($) => $.connect.trouble_intro)}</p>
+        <CommandStep
+          n={2}
+          label={t(($) => $.connect.step2_label)}
+          cmd={tokenCmd}
+          copyAria={t(($) => $.connect.copy_aria)}
+        />
+        <p>
+          {t(($) => $.connect.trouble_token_hint_prefix)}
+          <span className="font-medium text-foreground">
+            {t(($) => $.connect.trouble_token_hint_destination)}
+          </span>
+          {t(($) => $.connect.trouble_token_hint_suffix)}
+        </p>
+        <ul className="space-y-1">
+          <li className="flex items-center gap-1.5">
+            <span>{t(($) => $.connect.trouble_check_status)}</span>
+            {/* CLI command — literal shell string, not i18n content. */}
+            <code
+              className={cn(
+                "rounded bg-muted px-1.5 py-0.5 font-mono text-micro text-foreground",
+                CODE_LIGATURE_CLASS,
+              )}
+            >
+              {"multica daemon status"}
+            </code>
+          </li>
+          <li className="flex items-center gap-1.5">
+            <span>{t(($) => $.connect.trouble_view_logs)}</span>
+            {/* CLI command — literal shell string, not i18n content. */}
+            <code
+              className={cn(
+                "rounded bg-muted px-1.5 py-0.5 font-mono text-micro text-foreground",
+                CODE_LIGATURE_CLASS,
+              )}
+            >
+              {"multica daemon logs -f"}
+            </code>
+          </li>
+        </ul>
+      </div>
+    </details>
+  );
+}'''
+
+NEW_BROWSER_DETAILS = '''function BrowserLoginDetails({
+  setupCmd,
+  profile,
+}: {
+  setupCmd: string;
+  profile: string;
+}) {
+  const { t } = useT("runtimes");
+  // Local overlay: keep browser sign-in available without making it the
+  // default path. The token flow above works on terminal-only machines.
+  const p = profile ? ` --profile ${profile}` : "";
+  return (
+    <details className="group rounded-lg border border-dashed">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-caption font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <ChevronRight
+          className="h-3 w-3 transition-transform group-open:rotate-90"
+          aria-hidden
+        />
+        {t(($) => $.connect.browser_login)}
+      </summary>
+      <div className="space-y-2 border-t px-3 pt-2.5 pb-3 text-micro leading-[1.55] text-muted-foreground">
+        <p>{t(($) => $.connect.browser_login_intro)}</p>
+        <CommandStep
+          n={2}
+          label={t(($) => $.connect.step2_label)}
+          cmd={setupCmd}
+          copyAria={t(($) => $.connect.copy_aria)}
+        />
+        <p>{t(($) => $.connect.step2_hint)}</p>
+        <ul className="space-y-1">
+          <li className="flex items-center gap-1.5">
+            <span>{t(($) => $.connect.trouble_check_status)}</span>
+            {/* CLI command — literal shell string, not i18n content. */}
+            <code
+              className={cn(
+                "rounded bg-muted px-1.5 py-0.5 font-mono text-micro text-foreground",
+                CODE_LIGATURE_CLASS,
+              )}
+            >
+              {`multica${p} daemon status`}
+            </code>
+          </li>
+          <li className="flex items-center gap-1.5">
+            <span>{t(($) => $.connect.trouble_view_logs)}</span>
+            {/* CLI command — literal shell string, not i18n content. */}
+            <code
+              className={cn(
+                "rounded bg-muted px-1.5 py-0.5 font-mono text-micro text-foreground",
+                CODE_LIGATURE_CLASS,
+              )}
+            >
+              {`multica${p} daemon logs -f`}
+            </code>
+          </li>
+        </ul>
+      </div>
+    </details>
+  );
+}'''
 
 # Login-page branding is deployment configuration, never a literal in this
 # repository: a public clone therefore builds a stock Multica login page, and a
@@ -462,6 +620,43 @@ CHANGES = {
     "packages/core/api/client.ts": [
         ('  async issueCliToken(): Promise<{ token: string }> {\n    return this.fetch("/api/cli-token", { method: "POST" });\n  }', '  async issueCliToken(): Promise<{ token: string }> {\n    return this.fetch("/api/cli-token", { method: "POST" });\n  }\n\n  async getOrCreateDaemonBootstrapToken(): Promise<{ token: string }> {\n    return this.fetch("/api/daemon-bootstrap-token", { method: "POST" });\n  }')],
 
+    "packages/views/locales/en/runtimes.json": [
+        (
+            '    "step2_hint": "Opens a browser to sign in, then keeps the daemon running in the background.",',
+            '    "step2_hint": "Opens a browser to sign in, then keeps the daemon running in the background.",\n'
+            '    "token_step_hint": "Use a token to sign in; this works in terminal-only environments.",\n'
+            '    "browser_login": "Use browser sign-in",\n'
+            '    "browser_login_intro": "If this computer can open a browser, you can use the browser sign-in below.",',
+        ),
+    ],
+    "packages/views/locales/zh-Hans/runtimes.json": [
+        (
+            '    "step2_hint": "会打开浏览器登录，然后在后台保持守护进程运行。",',
+            '    "step2_hint": "会打开浏览器登录，然后在后台保持守护进程运行。",\n'
+            '    "token_step_hint": "使用 token 登录，适用于无法打开浏览器的终端环境。",\n'
+            '    "browser_login": "使用浏览器登录",\n'
+            '    "browser_login_intro": "如果这台电脑可以打开浏览器，也可以使用下面的方式。",',
+        ),
+    ],
+    "packages/views/locales/ja/runtimes.json": [
+        (
+            '    "step2_hint": "サインインのためにブラウザを開き、その後デーモンをバックグラウンドで実行し続けます。",',
+            '    "step2_hint": "サインインのためにブラウザを開き、その後デーモンをバックグラウンドで実行し続けます。",\n'
+            '    "token_step_hint": "トークンでサインインします。ブラウザを開けないターミナル環境でも利用できます。",\n'
+            '    "browser_login": "ブラウザでサインイン",\n'
+            '    "browser_login_intro": "このコンピュータでブラウザを開ける場合は、以下のブラウザサインインも利用できます。",',
+        ),
+    ],
+    "packages/views/locales/ko/runtimes.json": [
+        (
+            '    "step2_hint": "로그인을 위해 브라우저를 열고, 이후 데몬을 백그라운드에서 계속 실행합니다.",',
+            '    "step2_hint": "로그인을 위해 브라우저를 열고, 이후 데몬을 백그라운드에서 계속 실행합니다.",\n'
+            '    "token_step_hint": "토큰으로 로그인하며, 브라우저 없이 터미널만 있는 환경에서도 사용할 수 있습니다.",\n'
+            '    "browser_login": "브라우저로 로그인",\n'
+            '    "browser_login_intro": "이 컴퓨터에서 브라우저를 열 수 있다면 아래 브라우저 로그인을 사용할 수 있습니다.",',
+        ),
+    ],
+
     DIALOG: [
         (
             'const INSTALL_CMD =\n'
@@ -484,32 +679,12 @@ CHANGES = {
             NEW_CALLSITE,
         ),
         (
-            '          <TroubleshootingDetails tokenCmd={tokenCmd} />',
-            '          <TroubleshootingDetails tokenCmd={tokenCmd} profile={daemonProfile} />',
+            OLD_INSTRUCTIONS_MAIN,
+            NEW_INSTRUCTIONS_MAIN,
         ),
         (
-            'function TroubleshootingDetails({ tokenCmd }: { tokenCmd: string }) {\n'
-            '  const { t } = useT("runtimes");\n',
-            'function TroubleshootingDetails({\n'
-            '  tokenCmd,\n'
-            '  profile,\n'
-            '}: {\n'
-            '  tokenCmd: string;\n'
-            '  profile: string;\n'
-            '}) {\n'
-            '  const { t } = useT("runtimes");\n'
-            '  // Local overlay: the status and log commands have to carry the same\n'
-            '  // profile, or the person who just started the daemon is told it is not\n'
-            '  // running.\n'
-            '  const p = profile ? ` --profile ${profile}` : "";\n',
-        ),
-        (
-            '              {"multica daemon status"}',
-            '              {`multica${p} daemon status`}',
-        ),
-        (
-            '              {"multica daemon logs -f"}',
-            '              {`multica${p} daemon logs -f`}',
+            OLD_BROWSER_DETAILS,
+            NEW_BROWSER_DETAILS,
         ),
     ],
 }
