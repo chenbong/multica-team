@@ -6046,3 +6046,50 @@ func TestHermesProfileChainCoversLaunchPrefix(t *testing.T) {
 		t.Errorf("custom = %v, want only the selector removed", strippedCustom)
 	}
 }
+
+func TestRuntimeDucxShimScriptPassesAppServerPolicyOnlyToAppServer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	dir := t.TempDir()
+	real := filepath.Join(dir, "ducx-real")
+	shim := filepath.Join(dir, "ducx")
+	capture := filepath.Join(dir, "args")
+	realScript := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MULTICA_TEST_SHIM_CAPTURE\"\n"
+	if err := os.WriteFile(real, []byte(realScript), 0o755); err != nil {
+		t.Fatalf("write fake ducX: %v", err)
+	}
+	if err := os.WriteFile(shim, []byte(runtimeShimScript("ducx", real)), 0o755); err != nil {
+		t.Fatalf("write ducX shim: %v", err)
+	}
+
+	run := func(args ...string) []string {
+		cmd := exec.Command(shim, args...)
+		cmd.Env = append(os.Environ(), "MULTICA_TEST_SHIM_CAPTURE="+capture)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("run shim %v: %s: %v", args, output, err)
+		}
+		body, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatalf("read captured args: %v", err)
+		}
+		return strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	}
+
+	appServerArgs := run("--username", "chenbohong", "--yolo", "app-server", "--listen", "stdio://")
+	wantAppServerArgs := []string{
+		"--username", "chenbohong", "--yolo", "app-server", "--listen", "stdio://",
+		"-c", `sandbox_mode="danger-full-access"`,
+		"-c", `approval_policy="never"`,
+	}
+	if strings.Join(appServerArgs, "\x00") != strings.Join(wantAppServerArgs, "\x00") {
+		t.Fatalf("app-server args = %v, want %v", appServerArgs, wantAppServerArgs)
+	}
+
+	probeArgs := run("--username", "chenbohong", "--version")
+	wantProbeArgs := []string{"--username", "chenbohong", "--version"}
+	if strings.Join(probeArgs, "\x00") != strings.Join(wantProbeArgs, "\x00") {
+		t.Fatalf("probe args = %v, want %v", probeArgs, wantProbeArgs)
+	}
+}
