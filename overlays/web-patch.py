@@ -32,6 +32,99 @@ AGENTS_EN = "packages/views/locales/en/agents.json"
 AGENTS_ZH = "packages/views/locales/zh-Hans/agents.json"
 AGENTS_PAGE = "packages/views/agents/components/agents-page.tsx"
 SKILL_PICKER = "packages/views/agents/components/skill-picker-list.tsx"
+SIDEBAR = "packages/views/layout/app-sidebar.tsx"
+PROXY = "apps/web/proxy.ts"
+
+SIDEBAR_DRAFT_DOT = '''function DraftDot() {
+  const hasDraft = useIssueDraftStore((s) => s.hasDraft());
+  if (!hasDraft) return null;
+  return <span className="absolute top-0 right-0 size-1.5 rounded-full bg-brand" />;
+}'''
+
+SIDEBAR_MOBILE_CONTROL = '''async function copyToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // HTTP pages may not expose the Clipboard API; use the legacy fallback.
+    }
+  }
+
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.focus();
+  input.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    input.remove();
+  }
+}
+
+function MobileControlLink() {
+  const [url, setUrl] = useState<string>();
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/public-ip", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`);
+        const data = (await response.json()) as { ip?: string };
+        if (!data.ip) throw new Error("IP lookup returned no address");
+        return data.ip;
+      })
+      .then((ip) => {
+        if (!cancelled) setUrl(`http://${ip}:8004`);
+      })
+      .catch(() => {
+        // Keep the sidebar unobtrusive if DNS is temporarily unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    };
+  }, []);
+
+  const handleCopy = useCallback(async () => {
+    if (!url || !(await copyToClipboard(url))) return;
+    setCopied(true);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), 1600);
+  }, [url]);
+
+  if (!url) return null;
+  return (
+    <SidebarGroup className="mt-auto pt-4 pb-0">
+      <SidebarGroupContent>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              size="sm"
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={handleCopy}
+              title={url}
+              aria-live="polite"
+              aria-label={copied ? "已复制" : `手机控制：${url}`}
+            >
+              <span className="truncate">
+                {copied ? "已复制" : `手机控制：${url}`}
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroupContent>
+    </SidebarGroup>
+  );
+}'''
 
 # The "Add computer" dialog hands out the daemon command. A daemon started
 # without --profile writes ~/.multica/config.json, so the second Multica account
@@ -578,6 +671,56 @@ CHANGES = {
             '                      {scopeLabel}\n'
             '                    </span>\n'
             '                  </div>\n',
+        ),
+    ],
+    SIDEBAR: [
+        (
+            SIDEBAR_DRAFT_DOT,
+            SIDEBAR_DRAFT_DOT + "\n\n" + SIDEBAR_MOBILE_CONTROL,
+        ),
+        (
+            "          </SidebarGroup>\n        </SidebarContent>",
+            "          </SidebarGroup>\n\n"
+            "          <MobileControlLink />\n"
+            "        </SidebarContent>",
+        ),
+    ],
+    PROXY: [
+        (
+            "  const runtimeDestination = runtimeRewriteDestination(pathname, process.env);\n",
+            "  const runtimeDestination = pathname === \"/api/public-ip\"\n"
+            "    ? null\n"
+            "    : runtimeRewriteDestination(pathname, process.env);\n",
+        ),
+        (
+            "  // --- Root path: redirect logged-in users to their last workspace ---\n"
+            "  // The official cloud host also serves the public marketing site. Visiting\n"
+            "  // https://multica.ai/ must remain a public-site navigation even when a local\n"
+            "  // desktop/runtime session has fresh auth cookies; explicit app routes such\n"
+            "  // as /acme/issues and legacy /issues still route to the workspace app.\n"
+            "  if (\n"
+            "    pathname === \"/\" &&\n"
+            "    hasSession &&\n"
+            "    lastSlug &&\n"
+            "    !isOfficialMarketingHost(req.nextUrl.hostname)\n"
+            "  ) {\n",
+            "  // --- App deployment root: open the login page directly ---\n"
+            "  // Keep official marketing hosts on their public landing page, while this\n"
+            "  // self-hosted deployment skips the welcome page for every visitor.\n"
+            "  if (pathname === \"/\" && !isOfficialMarketingHost(req.nextUrl.hostname)) {\n",
+        ),
+        (
+            "  if (pathname === \"/\" && !isOfficialMarketingHost(req.nextUrl.hostname)) {\n"
+            "    const url = req.nextUrl.clone();\n"
+            "    url.pathname = `/${lastSlug}/issues`;\n"
+            "    return NextResponse.redirect(url);\n"
+            "  }\n",
+            "  if (pathname === \"/\" && !isOfficialMarketingHost(req.nextUrl.hostname)) {\n"
+            "    const url = req.nextUrl.clone();\n"
+            "    url.pathname = \"/login\";\n"
+            "    url.search = \"\";\n"
+            "    return NextResponse.redirect(url);\n"
+            "  }\n",
         ),
     ],
     SKILLS_EN: [
