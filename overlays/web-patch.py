@@ -662,6 +662,18 @@ CHANGES = {
 '  const handleWorkspaceCreated = useCallback(\n    (ws: Workspace) => {\n      setWorkspace(ws);\n      // Deliberately NOT setCurrentWorkspace: that singleton is also written by\n      // the desktop tab system, which reclaims it whenever the new workspace\n      // has no tab group yet. Racing it sent the rest of this flow — Mika, the\n      // session, the kickoff — into the previously-active workspace. Every call\n      // from here on names its target workspace instead, and the switch happens\n      // once, on the navigation in onComplete.\n      advanceFrom("workspace");\n    },\n    [advanceFrom],\n  );',
 '  const handleWorkspaceCreated = useCallback(\n    (ws: Workspace) => {\n      if (isNewWorkspace) {\n        // Creating an additional workspace should land there immediately.\n        // Runtime and Mika setup remain available from inside the workspace;\n        // they are not a prerequisite for entering it.\n        onComplete(ws);\n        return;\n      }\n      setWorkspace(ws);\n      // Deliberately NOT setCurrentWorkspace: that singleton is also written by\n      // the desktop tab system, which reclaims it whenever the new workspace\n      // has no tab group yet. Racing it sent the rest of this flow — Mika, the\n      // session, the kickoff — into the previously-active workspace. Every call\n      // from here on names its target workspace instead, and the switch happens\n      // once, on the navigation in onComplete.\n      advanceFrom("workspace");\n    },\n    [advanceFrom, isNewWorkspace, onComplete],\n  );',
         ),
+        (
+'  const isNewWorkspace = mode === "new_workspace";\n  const [step, setStep] = useState<OnboardingStep>(\n    isNewWorkspace ? "workspace" : "welcome",\n  );',
+'  const isNewWorkspace = mode === "new_workspace";\n  // On the web route the user has already chosen web; skip the desktop/web\n  // choice hero and start with the first useful onboarding step.\n  const [step, setStep] = useState<OnboardingStep>(\n    isNewWorkspace\n      ? "workspace"\n      : runtimeInstructions\n        ? "about_you"\n        : "welcome",\n  );',
+        ),
+        (
+'  // deliberately not saved, so every entry starts at Welcome.\n',
+'  // deliberately not saved, so each entry starts at the first step for its mode.\n',
+        ),
+        (
+'  const stepBack =\n    step === "about_you"\n      ? () => handleBack("about_you")\n      : step === "workspace"\n        ? () => handleBack("workspace")\n        : runtimeStepBack;',
+'  const stepBack =\n    step === "about_you"\n      ? isWeb\n        ? undefined\n        : () => handleBack("about_you")\n      : step === "workspace"\n        ? () => handleBack("workspace")\n        : runtimeStepBack;',
+        ),
     ],
 
     DIALOG: [
