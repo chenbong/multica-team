@@ -100,7 +100,8 @@ function daemonCommands(
   if (normalizedServerUrl && normalizedAppUrl) {
     return {
       setupCmd: `multica${p} setup self-host --server-url ${normalizedServerUrl} --app-url ${normalizedAppUrl}__RUNTIME_LINE____SHIM_LINE__`,
-      tokenCmd: `export no_proxy="10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+      tokenCmd: `export no_proxy=".duckdns.org,10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+export NO_PROXY=".duckdns.org,10.0.0.0/8\\${NO_PROXY:+,$NO_PROXY}"
 multica${p} config set server_url ${normalizedServerUrl}
 multica${p} config set app_url ${normalizedAppUrl}
 multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}__RUNTIME_LINE____SHIM_LINE__
@@ -110,7 +111,8 @@ multica${p} daemon start`,
 
   return {
     setupCmd: `multica${p} setup__RUNTIME_LINE____SHIM_LINE__`,
-    tokenCmd: `export no_proxy="10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+    tokenCmd: `export no_proxy=".duckdns.org,10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+export NO_PROXY=".duckdns.org,10.0.0.0/8\\${NO_PROXY:+,$NO_PROXY}"
 multica${p} config set server_url ${CLOUD_SERVER_URL}
 multica${p} config set app_url ${CLOUD_APP_URL}
 multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}__RUNTIME_LINE____SHIM_LINE__
