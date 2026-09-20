@@ -806,6 +806,12 @@ export default function SkillsPage() {
           a.skill.name.localeCompare(b.skill.name)
         );
       }
+      if (sortField === "usageCount") {
+        return (
+          ((a.skill.usage_count ?? 0) - (b.skill.usage_count ?? 0)) * dir ||
+          a.skill.name.localeCompare(b.skill.name)
+        );
+      }
       if (sortField === "created") {
         return (
           (Date.parse(a.skill.created_at) - Date.parse(b.skill.created_at)) *
