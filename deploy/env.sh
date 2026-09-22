@@ -16,11 +16,18 @@ API_PORT="${MULTICA_API_PORT:-8006}"
 WEB_PORT="${MULTICA_WEB_PORT:-8004}"
 BRIDGE_PORT="${MULTICA_BRIDGE_PORT:-8002}"
 PROFILE_NAME="${MULTICA_PROFILE_NAME:-multica-local}"
-DATABASE_NAME="${MULTICA_DATABASE_NAME:-multica}"
+export DATABASE_NAME="${MULTICA_DATABASE_NAME:-multica}"
 NODE_BIN_DIR="${MULTICA_NODE_BIN_DIR:-/opt/node-v24.18.0/bin}"
+PERSISTENT_NODE_BIN_DIR="${TRAIN_WORKSPACE:-}/node-v24.18.0/bin"
+if [ ! -x "$NODE_BIN_DIR/node" ] && [ -x "$PERSISTENT_NODE_BIN_DIR/node" ]; then
+  NODE_BIN_DIR="$PERSISTENT_NODE_BIN_DIR"
+fi
 
 export PATH="$NODE_BIN_DIR:/usr/local/go/bin:$PATH"
-export DATABASE_URL="postgres://multica:multica@127.0.0.1:5432/$DATABASE_NAME?sslmode=disable"
+export MULTICA_PGDATA="${MULTICA_PGDATA:-${TRAIN_WORKSPACE:-$INSTANCE_DIR}/multica-data/postgres}"
+export MULTICA_BACKUP_DIR="${MULTICA_BACKUP_DIR:-$INSTANCE_DIR/../../../multica-data/backups}"
+export MULTICA_BACKUP_INTERVAL_SECONDS="${MULTICA_BACKUP_INTERVAL_SECONDS:-1800}"
+export MULTICA_BACKUP_RETENTION_SECONDS="${MULTICA_BACKUP_RETENTION_SECONDS:-1209600}"
 export PORT=$API_PORT
 export MULTICA_BIND_HOST=0.0.0.0
 export APP_ENV=development
@@ -87,3 +94,7 @@ if [ ! -f "$SECRETS" ]; then
   } > "$SECRETS"
 fi
 . "$SECRETS"
+
+: "${MULTICA_DATABASE_PASSWORD:?Set MULTICA_DATABASE_PASSWORD in deploy/secrets.env}"
+export MULTICA_DATABASE_PASSWORD
+export DATABASE_URL="$(python3 -c 'import os; from urllib.parse import quote; print("postgres://multica:" + quote(os.environ["MULTICA_DATABASE_PASSWORD"], safe="") + "@127.0.0.1:5432/" + quote(os.environ["DATABASE_NAME"], safe="") + "?sslmode=disable")')"

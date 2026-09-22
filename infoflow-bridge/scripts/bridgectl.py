@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(__file__).resolve()
@@ -26,6 +27,31 @@ STOP_TIMEOUT_SECONDS = 5.0
 HEALTH_INTERVAL_SECONDS = 5.0
 STARTUP_GRACE_SECONDS = 60.0
 MAX_RESTART_DELAY_SECONDS = 60.0
+
+
+def bridge_environment():
+    env = os.environ.copy()
+    host_file = ROOT.parent / "deploy" / "host.env"
+    if host_file.is_file():
+        # Load deployment variables for direct bridgectl invocations as well.
+        result = subprocess.run(
+            ["bash", "-c", 'set -a; source "$1"; env -0', "bridge-env", str(host_file)],
+            env=env, capture_output=True, check=True, timeout=10,
+        )
+        env = dict(entry.split("=", 1) for entry in result.stdout.decode().split("\0") if "=" in entry)
+    node_dir = env.get("MULTICA_NODE_BIN_DIR", "/opt/homebrew/bin")
+    env["PATH"] = node_dir + ":" + env.get("PATH", "")
+    config = json.loads(CONFIG.read_text()) if CONFIG.is_file() else {}
+    urls = [env.get("INFOFLOW_BASE_URL", "")]
+    urls += [r.get("baseUrl", "") for r in config.get("robots", [])]
+    multica = config.get("multica", {})
+    urls += [multica.get("serverUrl", ""), multica.get("webUrl", "")]
+    urls += multica.get("serverUrls", [])
+    bypass = ["localhost", "127.0.0.1", "::1"]
+    bypass += [urlsplit(url).hostname for url in urls if url and urlsplit(url).hostname]
+    bypass += env.get("no_proxy", "").split(",") + env.get("NO_PROXY", "").split(",")
+    env["NO_PROXY"] = env["no_proxy"] = ",".join(dict.fromkeys(x for x in bypass if x))
+    return env
 
 
 def admin_port():
@@ -168,8 +194,7 @@ def watchdog():
         signal.signal(sig, handle_signal)
 
     WATCHDOG_PID_FILE.write_text(str(os.getpid()))
-    env = os.environ.copy()
-    env["PATH"] = "/opt/homebrew/bin:" + env.get("PATH", "")
+    env = bridge_environment()
     restart_delay = 1.0
 
     try:
@@ -251,8 +276,7 @@ def start():
         terminate(lingering)
 
     LOG.parent.mkdir(exist_ok=True)
-    env = os.environ.copy()
-    env["PATH"] = "/opt/homebrew/bin:" + env.get("PATH", "")
+    env = bridge_environment()
     process = subprocess.Popen(
         [sys.executable, str(SCRIPT), "watchdog"],
         cwd=ROOT,

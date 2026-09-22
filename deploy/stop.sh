@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 . ./env.sh
 
 python3 "$INSTANCE_DIR/infoflow-bridge/scripts/bridgectl.py" stop || true
-for name in web api; do
+for name in web api backup; do
   pidfile="$DEPLOY_DIR/logs/$name.pid"
   [ -f "$pidfile" ] || continue
   pid="$(cat "$pidfile")"
@@ -14,3 +14,4 @@ for name in web api; do
   fi
   rm -f "$pidfile"
 done
+./postgres.sh stop || true

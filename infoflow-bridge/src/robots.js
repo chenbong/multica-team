@@ -1,5 +1,7 @@
 import { Client, WSClient } from "@baidu/infoflow-sdk-nodejs";
 import { Bridge } from "./bridge.js";
+import { ReviewNotifications } from "./review-notifications.js";
+import { acknowledge } from "./reactions.js";
 import { VerificationCodeRelay } from "./codes.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
 
@@ -14,6 +16,7 @@ export class RobotRuntime {
     this.logger = logger;
     this.instances = new Map();
     this.relay = null;
+    this.reviewNotifications = new ReviewNotifications(this);
   }
 
   async sync(config = this.config) {
@@ -30,6 +33,7 @@ export class RobotRuntime {
       if (!this.instances.has(id)) await this.#start(robot);
     }
     await this.#syncRelay();
+    await this.reviewNotifications.poll();
   }
 
   status() {
@@ -108,6 +112,7 @@ export class RobotRuntime {
   }
 
   async stopAll() {
+    this.reviewNotifications.stop();
     for (const id of [...this.instances.keys()]) await this.#stop(id);
     this.relay?.stop();
     this.relay = null;
@@ -207,7 +212,7 @@ export class RobotRuntime {
       this.logger.error("[" + robot.name + "] InfoFlow error: " + message);
     });
 
-    registerHandlers({ wsClient, bridge, robot, logger: this.logger });
+    registerHandlers({ wsClient, client, bridge, robot, logger: this.logger });
     // Established connections use the SDK's reconnect loop (infinite by default).
     // Initial endpoint failures need a local retry loop because this SDK deliberately
     // does not start reconnect() after connect() rejects before the first connection.
@@ -294,6 +299,7 @@ export class RobotRuntime {
     const instance = this.instances.get(id);
     if (!instance) return;
     instance.stopping = true;
+    instance.bridge.stop();
     if (instance.retryTimer) clearTimeout(instance.retryTimer);
     instance.retryTimer = null;
     instance.nextRetryAt = null;
@@ -343,6 +349,7 @@ function fingerprint(robot) {
 function robotConfig(base, robot) {
   return {
     robotId: robot.id,
+    reviewNotifications: true,
     multica: {
       ...base.multica,
       // Each robot dispatches as its own Multica account, and links point at
@@ -393,7 +400,7 @@ export function parseGroupBlocks(blocks) {
     images,
   };
 }
-function registerHandlers({ wsClient, bridge, robot, logger }) {
+function registerHandlers({ wsClient, client, bridge, robot, logger }) {
   for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
@@ -419,6 +426,7 @@ function registerHandlers({ wsClient, bridge, robot, logger }) {
         text: body,
         images,
         messageId: raw.MsgId ?? raw.msgId,
+        acknowledge: () => acknowledge(client, raw, "private", robot.appId, logger),
       });
     });
   }
@@ -446,6 +454,7 @@ function registerHandlers({ wsClient, bridge, robot, logger }) {
         text,
         images: parsed.images,
         messageId: header.messageid ?? raw.messageid,
+        acknowledge: () => acknowledge(client, raw, "group", robot.appId, logger),
       });
     });
   }

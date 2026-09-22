@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, basename, extname } from "node:path";
 
 // Thin wrapper over the Multica CLI. The CLI carries the signed-in account, so
 // the bridge never handles a Multica credential itself — it only picks which
@@ -6,8 +9,9 @@ import { execFile } from "node:child_process";
 // (~/.multica/config.json); a named one is ~/.multica/profiles/<name>/, which is
 // what keeps one robot's account independent of whoever logged in last.
 export class Multica {
-  constructor({ cli, webUrl, workspaceSlug, workspaceId = "", profile = "" }, logger = console) {
+  constructor({ cli, webUrl, serverUrl = "", workspaceSlug, workspaceId = "", profile = "" }, logger = console) {
     this.cli = cli;
+    this.serverUrl = serverUrl;
     this.webUrl = webUrl;
     this.workspaceSlug = workspaceSlug;
     this.profile = String(profile ?? "").trim();
@@ -27,6 +31,52 @@ export class Multica {
   async listAgents() {
     return this.#json(["agent", "list", "--output", "json"]);
   }
+
+  async request(path, { method = "GET", body } = {}) {
+    if (this.profile && !/^[a-zA-Z0-9._-]+$/.test(this.profile)) throw new Error("Invalid profile");
+    const configPath = this.profile
+      ? join(homedir(), ".multica", "profiles", this.profile, "config.json")
+      : join(homedir(), ".multica", "config.json");
+    const config = JSON.parse(await readFile(configPath, "utf8"));
+    if (!config.token) throw new Error("机器人绑定账号尚未登录 Multica");
+    const headers = { Authorization: `Bearer ${config.token}`, "X-Workspace-ID": this.workspaceId || config.workspace_id };
+    const multipart = body instanceof FormData;
+    if (body !== undefined && !multipart) headers["Content-Type"] = "application/json";
+    const response = await fetch(`${(this.serverUrl || config.server_url).replace(/\/+$/, "")}${path}`, {
+      method, headers, body: body === undefined ? undefined : multipart ? body : JSON.stringify(body),
+      redirect: "error", signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) {
+      // Do not echo remote bodies, which can contain credentials or private input.
+      const error = new Error(`Multica ${method} ${path}: HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.status === 204 ? null : response.json();
+  }
+
+  createChatSession(agentId, title) {
+    return this.request("/api/chat/sessions", { method: "POST", body: { agent_id: agentId, title } });
+  }
+
+  chatSession(id) { return this.request(`/api/chat/sessions/${encodeURIComponent(id)}`); }
+  chatMessages(id) { return this.request(`/api/chat/sessions/${encodeURIComponent(id)}/messages`); }
+  chatPending(id) { return this.request(`/api/chat/sessions/${encodeURIComponent(id)}/pending-task`); }
+  sendChatMessage(id, content, attachmentIds = []) {
+    return this.request(`/api/chat/sessions/${encodeURIComponent(id)}/messages`, {
+      method: "POST", body: { content, attachment_ids: attachmentIds },
+    });
+  }
+
+  async uploadChatImage(sessionId, path) {
+    const type = { ".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" }[extname(path)] || "application/octet-stream";
+    const form = new FormData();
+    form.append("file", new Blob([await readFile(path)], { type }), basename(path));
+    form.append("chat_session_id", sessionId);
+    return this.request("/api/upload-file", { method: "POST", body: form });
+  }
+
+  getIssue(id) { return this.#json(["issue", "get", id, "--output", "json"]); }
 
   async createIssue({ title, description, assignee, attachments = [] }) {
     const attachmentArgs = attachments.flatMap((path) => ["--attachment", path]);
@@ -67,6 +117,7 @@ export class Multica {
   #json(args, stdin) {
     return new Promise((resolvePromise, reject) => {
       const scoped = [
+        ...(this.serverUrl ? ["--server-url", this.serverUrl] : []),
         ...(this.profile === "" ? [] : ["--profile", this.profile]),
         ...(this.workspaceId === "" ? [] : ["--workspace-id", this.workspaceId]),
         ...args,

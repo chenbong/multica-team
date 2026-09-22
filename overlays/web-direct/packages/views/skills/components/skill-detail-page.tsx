@@ -88,6 +88,7 @@ import { SkillScopeDialog } from "./skill-scope-dialog";
 import { RefreshSkillDialog } from "./refresh-skill-dialog";
 import { useT } from "../../i18n";
 import { ResourceLabelPicker } from "../../labels/resource-label-picker";
+import { SkillDownload } from "./skill-download";
 
 const SKILL_MD = "SKILL.md";
 
@@ -1227,6 +1228,7 @@ export function SkillDetailPage({ skillId }: { skillId: string }) {
               <UserPlus className="h-3 w-3" />
               {t(($) => $.actions.add_to_agent)}
             </Button>
+            <SkillDownload skillId={skill.id} wsId={wsId} />
             {canEdit && (
               <Tooltip>
                 <TooltipTrigger

@@ -2,15 +2,19 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
+import { ChatRelay, issueRequest } from "./chat.js";
 
 const HELP = [
   "**Multica 机器人**",
   "",
-  "发一句话 = 新建任务并派给 agent，跑完把结果发回这里；群里需要 @ 我。",
+  "普通消息是持续聊天；群里需要 @ 我。只有明确创建任务时才新建 issue。",
   "",
   "- `/agents` 列出可用 agent",
   "- `/agent <名字>` 切换你自己的默认 agent（私聊和群里共用）",
-  "- `/status` 看本会话里你最近一个任务的状态",
+  "- `/issue <内容>` 创建任务，也可说「帮我创建一个任务：内容」",
+  "- `/new` 开启新的聊天上下文",
+  "- `/status` 查询当前聊天状态（没有聊天时查询最近任务）",
+  "- `/status <任务编号>` 查询指定 issue；也可问「CBH-15 进展怎么样？」",
   "- `/help` 这份说明",
 ].join("\n");
 
@@ -32,7 +36,16 @@ export class Bridge {
     this.multica = new Multica(config.multica, logger);
     this.getImageAccessToken = getImageAccessToken;
     this.state = this.#loadState();
+    this.chat = new ChatRelay(config, this.multica,
+      async (conversation, user, content) => {
+        for (let i = 0; i < content.length; i += 3000) {
+          await this.sender(conversation, content.slice(i, i + 3000), { atUser: user });
+        }
+      },
+      (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger);
   }
+
+  stop() { this.chat.stop(); }
 
   // Inbound events normally carry the username already; a payload that only has
   // the numeric uid is mapped here so state, allow list, and replies agree.
@@ -43,7 +56,7 @@ export class Bridge {
 
   // conversation: { kind: "private" | "group", id }. For a private chat the id is
   // the username to reply to; for a group it is the numeric group id.
-  async handleMessage({ conversation, user: rawUser, text, messageId, images = [] }) {
+  async handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
@@ -62,11 +75,29 @@ export class Bridge {
     }
 
     try {
+      const issueBody = issueRequest(body);
+      if (issueBody !== null) {
+        if (!issueBody) {
+          await this.reply(conversation, user, "请提供任务内容，例如 /issue 优化推理性能。");
+          return;
+        }
+        await this.#dispatch(conversation, user, issueBody, inboundImages);
+        return;
+      }
       if (body.startsWith("/")) {
         await this.#handleCommand(conversation, user, body);
         return;
       }
-      await this.#dispatch(conversation, user, body, inboundImages);
+      const progress = body.match(/^([A-Za-z][A-Za-z0-9]*-\d+)\s*(?:的)?(?:进度|进展|状态|完成了吗|怎么样了)(?:怎么样|怎么样了|如何|呢)?[？?\s]*$/);
+      if (progress) {
+        await this.#issueStatus(conversation, user, progress[1]);
+        return;
+      }
+      if (/^(?:刚才|之前|上一个|最近)(?:的)?(?:那个)?任务(?:的)?(?:进度|进展|状态|完成了吗|怎么样了)[？?\s]*$/.test(body)) {
+        await this.#issueStatus(conversation, user, "");
+        return;
+      }
+      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge);
     } catch (error) {
       this.logger.error(`handling message from ${user} failed: ${error.message}`);
       await this.reply(conversation, user, `出错了：${error.message}`);
@@ -96,6 +127,11 @@ export class Bridge {
   async #handleCommand(conversation, user, body) {
     const [command, ...rest] = body.split(/\s+/);
     const argument = rest.join(" ").trim();
+
+    if (command === "/new") {
+      await this.chat.reset(conversation, user);
+      return;
+    }
 
     if (command === "/help") {
       await this.reply(conversation, user, HELP);
@@ -128,16 +164,32 @@ export class Bridge {
       return;
     }
     if (command === "/status") {
-      const last = this.#thread(conversation, user).lastIssue;
-      if (!last) {
-        await this.reply(conversation, user, "你在这个会话里还没有建过任务。");
-        return;
-      }
-      const run = latestRun(await this.multica.runs(last.id));
-      await this.reply(conversation, user, `${last.identifier}　${run ? run.status : "还没有执行记录"}\n${last.url}`);
+      if (!argument && await this.chat.status(conversation, user)) return;
+      await this.#issueStatus(conversation, user, argument);
       return;
     }
     await this.reply(conversation, user, `不认识的命令：${command}。发 \`/help\` 看用法。`);
+  }
+
+  async #issueStatus(conversation, user, reference) {
+    this.state = this.#loadState();
+    const last = this.#thread(conversation, user).lastIssue;
+    if (!reference && !last) {
+      await this.reply(conversation, user, "你在这个会话里还没有建过任务，可以用 /status <任务编号> 查询。");
+      return;
+    }
+    if (reference && !/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(reference)) {
+      await this.reply(conversation, user, "请输入任务编号，例如 /status CBH-15。");
+      return;
+    }
+    // Group status commands expose only the requester's last task in this thread.
+    if (conversation.kind === "group" && reference && reference.toUpperCase() !== last?.identifier?.toUpperCase()) {
+      await this.reply(conversation, user, "群内仅能查询你在当前会话创建的最近任务，其他任务请在有权限的网页版查看。");
+      return;
+    }
+    const issue = await this.multica.getIssue(reference || last.id);
+    const run = latestRun(await this.multica.runs(issue.id));
+    await this.reply(conversation, user, `${issue.identifier} ${issue.title}\n执行状态：${run?.status || "尚无执行记录"}\n${this.multica.issueUrl(issue)}`);
   }
 
   async #dispatch(conversation, user, body, images = []) {
@@ -186,6 +238,14 @@ export class Bridge {
       await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}\n${url}`);
       return;
     }
+    // The review watcher sends the binder a single cross-entry notification.
+    // Retain replies to groups/other users and runs that do not enter review.
+    if (this.config.reviewNotifications && conversation.kind === "private") {
+      try {
+        const [current, me] = await Promise.all([this.multica.getIssue(issue.id), this.multica.request("/api/me")]);
+        if ((current.status_category || current.status) === "in_review" && me.email?.split("@")[0] === user) return;
+      } catch (error) { this.logger.warn("review handoff check failed: " + error.message); }
+    }
     await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}\n\n${url}`);
   }
 
@@ -226,6 +286,7 @@ export class Bridge {
   }
 
   #remember(conversation, user, patch) {
+    this.state = this.#loadState();
     const key = this.#conversationKey(conversation);
     const record = this.state.users[user] ?? {};
     const conversations = { ...record.conversations, [key]: { ...record.conversations?.[key], ...patch } };
@@ -234,6 +295,7 @@ export class Bridge {
   }
 
   #rememberUser(user, patch) {
+    this.state = this.#loadState();
     this.state.users[user] = { ...this.state.users[user], ...patch };
     this.#persist();
   }
@@ -242,6 +304,7 @@ export class Bridge {
   // often enough that an in-memory set is not enough: a restart in between would
   // let the copy through, so the ids are persisted with the rest of the state.
   #alreadyHandled(messageId) {
+    this.state = this.#loadState();
     const id = String(messageId);
     if (this.state.seenMessageIds.includes(id)) return true;
     this.state.seenMessageIds.push(id);

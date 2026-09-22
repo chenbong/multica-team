@@ -704,7 +704,7 @@ CHANGES = {
             "    lastSlug &&\n"
             "    !isOfficialMarketingHost(req.nextUrl.hostname)\n"
             "  ) {\n",
-            "  // --- App deployment root: open the login page directly ---\n"
+            "  // --- App deployment root: render login without an HTTP redirect ---\n"
             "  // Keep official marketing hosts on their public landing page, while this\n"
             "  // self-hosted deployment skips the welcome page for every visitor.\n"
             "  if (pathname === \"/\" && !isOfficialMarketingHost(req.nextUrl.hostname)) {\n",
@@ -718,8 +718,9 @@ CHANGES = {
             "  if (pathname === \"/\" && !isOfficialMarketingHost(req.nextUrl.hostname)) {\n"
             "    const url = req.nextUrl.clone();\n"
             "    url.pathname = \"/login\";\n"
-            "    url.search = \"\";\n"
-            "    return NextResponse.redirect(url);\n"
+            "    const headers = new Headers(req.headers);\n"
+            "    headers.set(MULTICA_LOCALE_HEADER, resolveLocale(req));\n"
+            "    return NextResponse.rewrite(url, { request: { headers } });\n"
             "  }\n",
         ),
     ],
@@ -852,6 +853,9 @@ CHANGES = {
         ),
     ],
 }
+
+CHANGES[SKILLS_EN].append(('  "actions": {', '  "actions": {\n    "download": "Download",\n    "download_failed": "Could not download skill",'))
+CHANGES[SKILLS_ZH].append(('  "actions": {', '  "actions": {\n    "download": "下载",\n    "download_failed": "无法下载 skill",'))
 
 def apply_patches():
     for rel, replacements in CHANGES.items():

@@ -56,6 +56,7 @@ import { useIntentNavigate } from "../../navigation";
 import { isRefreshableOrigin, readOrigin } from "../lib/origin";
 import { RefreshSkillDialog } from "./refresh-skill-dialog";
 import { SkillScopeDialog } from "./skill-scope-dialog";
+import { SkillDownload } from "./skill-download";
 import type { SkillRow } from "./skills-page";
 
 // Shared context the row kebab and the batch toolbar both need. Assembled
@@ -692,6 +693,7 @@ export function SkillRowActions({
           }
         />
         <DropdownMenuContent align="end" className="w-52">
+          <SkillDownload skillId={row.skill.id} wsId={ctx.wsId} menu />
           <DropdownMenuItem
             onClick={() =>
               intentNavigate(

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Relays InfoFlow (Ruliu) direct messages into Multica issues and sends the agent result back.",
+  "description": "Relays InfoFlow messages into persistent Multica chats, with explicit issue creation.",
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node index.js",

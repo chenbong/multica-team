@@ -2,5 +2,7 @@ node_modules/
 config.local.json
 config.local.json.before-*
 state.json
+state.json.review-notifications.json*
+state.json.chat-*.json*
 logs/
 admin-sessions.json*

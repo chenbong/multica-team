@@ -145,6 +145,7 @@ function normalizeRobot(robot) {
     // default profile. Pinning it here is what stops a robot from following
     // whoever last ran `multica login` on this machine.
     profile: String(robot.profile ?? "").trim(),
+    boundByEmail: String(robot.boundByEmail ?? "").trim(),
     // Recorded when the robot is saved so issue links point at the workspace
     // that account actually creates issues in. workspaceId is the authoritative
     // one: an account can see several workspaces, and this is the workspace the

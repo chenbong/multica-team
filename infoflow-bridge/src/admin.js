@@ -193,6 +193,7 @@ async function route(request, response, runtime, accounts, auth, logger) {
       name,
       purpose: "task",
       profile: account.profile,
+      boundByEmail: session.email,
       workspaceId: workspace?.id ?? previous.workspaceId ?? account.workspaceId ?? "",
       workspaceSlug: workspace?.slug ?? account.workspaceSlug ?? previous.workspaceSlug ?? "",
       appId: input.appId,

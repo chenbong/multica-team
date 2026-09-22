@@ -1,19 +1,13 @@
 #!/bin/bash
-# Start the isolated API, Web and local bridge. The daemon is opt-in via
-# start-daemon.sh, so a snapshot cloned from another instance cannot execute a
-# task that was already pending there.
+# Start the isolated API, Web and local bridge. PostgreSQL lives on the
+# persistent trainer block volume; the bridge and backup worker are supervised
+# by their own process managers.
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./env.sh
 mkdir -p "$DEPLOY_DIR/logs"
 
-pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 || pg_ctlcluster 16 main start
-if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname = 'multica'\"" | grep -q 1; then
-  su - postgres -c "psql -c \"CREATE ROLE multica LOGIN PASSWORD 'multica'\"" >/dev/null
-fi
-su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname = '$DATABASE_NAME'\"" \
-  | grep -q 1 \
-  || su - postgres -c "psql -c \"CREATE DATABASE $DATABASE_NAME OWNER multica\""
+./postgres.sh start
 
 (cd "$INSTANCE_DIR/multica/server" && "$DEPLOY_DIR/bin/migrate" up) \
   >> "$DEPLOY_DIR/logs/migrate.log" 2>&1
@@ -43,7 +37,8 @@ multica["serverUrls"] = [
 multica["apiLogPath"] = "../deploy/logs/api.log"
 admin = data.setdefault("admin", {})
 admin["port"] = int(bridge_port)
-admin["publicHosts"] = [host]
+# Keep explicitly allowed addresses when refreshing the deployment hostname.
+admin["publicHosts"] = list(dict.fromkeys([host, *admin.get("publicHosts", [])]))
 data.setdefault("robots", [])
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(data, handle, indent=2, ensure_ascii=False)
@@ -70,7 +65,10 @@ start_one web "$WEB_TREE/apps/web/node_modules/.bin/next" start \
   --hostname 0.0.0.0 --port "$WEB_PORT"
 cd "$INSTANCE_DIR"
 python3 "$INSTANCE_DIR/infoflow-bridge/scripts/bridgectl.py" start
+start_one backup python3 "$DEPLOY_DIR/db-backup.py"
 
 echo "API    http://$HOST_IP:$API_PORT"
 echo "Web    http://$HOST_IP:$WEB_PORT"
 echo "Bridge http://$HOST_IP:$BRIDGE_PORT (admin page; robots and their config live in infoflow-bridge/config.local.json)"
+echo "Database data $MULTICA_PGDATA"
+echo "Database backups $MULTICA_BACKUP_DIR"

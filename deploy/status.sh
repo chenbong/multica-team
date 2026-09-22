@@ -3,7 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 . ./env.sh
 
-for name in api web; do
+./postgres.sh status
+for name in api web backup; do
   pidfile="$DEPLOY_DIR/logs/$name.pid"
   if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
     echo "$name: running (pid $(cat "$pidfile"))"
