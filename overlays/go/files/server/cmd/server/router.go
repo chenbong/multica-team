@@ -1531,6 +1531,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// no workspace in the path to gate on.
 		// --- User-scoped routes (no workspace context required) ---
 		r.Get("/api/me", h.GetMe)
+		r.With(handler.RequireHumanActor).Get("/api/me/ducc", h.GetDuccCredential)
+		r.With(handler.RequireHumanActor).Post("/api/me/ducc", h.UpdateDuccCredential)
+		r.With(handler.RequireHumanActor).Post("/api/daemon/ducc/sync", h.SyncDuccCredential)
 		r.Patch("/api/me", h.UpdateMe)
 		r.Patch("/api/me/onboarding", h.PatchOnboarding)
 		r.Post("/api/me/onboarding/complete", h.CompleteOnboarding)
@@ -2192,6 +2195,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// the strict DELETE refused with
 					// `runtime_has_active_agents` and the user confirmed.
 					r.Post("/unbind-agents-and-delete", h.UnbindAgentsAndDeleteRuntime)
+					r.Post("/delete-offline-machine", h.DeleteOfflineMachine)
 					// Legacy path for installed clients built against the
 					// archive-and-delete contract (MUL-5559 renamed the
 					// behaviour, not just the route). Same handler.

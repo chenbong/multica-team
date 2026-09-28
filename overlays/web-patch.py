@@ -827,7 +827,7 @@ CHANGES = {
             'const INSTALL_CMD =\n'
             '  "curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash";',
             'const INSTALL_CMD =\n'
-            f'  "curl -fsSL {CLI_INSTALL_URL} | bash";',
+            '  ' + json.dumps('export https_proxy=http://agent.baidu.com:8188\nexport http_proxy="$https_proxy"\n' + f'curl -fsSL {CLI_INSTALL_URL} | bash') + ';',
         ),
         (
             'import { useConfigStore } from "@multica/core/config";\n',
@@ -854,8 +854,58 @@ CHANGES = {
     ],
 }
 
-CHANGES[SKILLS_EN].append(('  "actions": {', '  "actions": {\n    "download": "Download",\n    "download_failed": "Could not download skill",'))
-CHANGES[SKILLS_ZH].append(('  "actions": {', '  "actions": {\n    "download": "下载",\n    "download_failed": "无法下载 skill",'))
+CHANGES[SKILLS_EN].append(('\n  "actions": {', '\n  "actions": {\n    "download": "Download",\n    "download_failed": "Could not download skill",'))
+CHANGES[SKILLS_ZH].append(('\n  "actions": {', '\n  "actions": {\n    "download": "下载",\n    "download_failed": "无法下载 skill",'))
+
+CHANGES["packages/core/api/client.ts"].append((
+    '  async deleteRuntime(runtimeId: string): Promise<void> {',
+    '''  async deleteOfflineMachine(runtimeId: string, runtimeIds: string[], agentIds: string[]): Promise<void> {
+    await this.fetch(`/api/runtimes/${runtimeId}/delete-offline-machine`, {
+      method: "POST",
+      body: JSON.stringify({ expected_runtime_ids: runtimeIds, expected_active_agent_ids: agentIds }),
+    });
+  }
+
+  async deleteRuntime(runtimeId: string): Promise<void> {'''))
+CHANGES.setdefault("packages/core/runtimes/mutations.ts", []).append((
+    'export function useDeleteRuntime(wsId: string) {',
+    '''export function useDeleteOfflineMachine(wsId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({runtimeId, runtimeIds, agentIds}: {runtimeId: string; runtimeIds: string[]; agentIds: string[]}) => api.deleteOfflineMachine(runtimeId, runtimeIds, agentIds),
+    onSettled: () => {
+      qc.invalidateQueries({queryKey: runtimeKeys.all(wsId)});
+      qc.invalidateQueries({queryKey: workspaceKeys.agents(wsId)});
+      qc.invalidateQueries({queryKey: agentTaskSnapshotKeys.all(wsId)});
+    },
+  });
+}
+
+export function useDeleteRuntime(wsId: string) {'''))
+for locale, labels in {
+    "zh-Hans": {"button":"删除电脑", "title":"删除电脑：{{name}}", "description":"将从数据库删除当前工作区中这台电脑的 {{count}} 个运行时实例。保留共享运行时配置及其他电脑。", "effects":"绑定的用户智能体将解绑，保留配置、聊天和任务历史；未完成运行会取消，受影响的自动化会暂停。内部系统智能体按现有清理规则移除。", "confirm_unbind":"我确认解绑以上智能体，并取消相关未完成运行。", "reconnect":"如果该电脑的 daemon 再次连接，电脑可能重新出现在列表中。", "cancel":"取消", "success":"电脑及其运行时已删除", "failed":"删除失败，请关闭弹窗后重试", "deleting":"删除中..."},
+    "en": {"button":"Delete computer", "title":"Delete computer: {{name}}", "description":"Delete this computer's {{count}} runtime instances from the current workspace database. Shared profiles and other computers are retained.", "effects":"User agents are unbound; their settings, chats and task history are retained. Unfinished runs are cancelled and affected automations paused. Internal system agents follow existing cleanup rules.", "confirm_unbind":"I confirm unbinding these agents and cancelling their unfinished runs.", "reconnect":"The computer may reappear if its daemon reconnects.", "cancel":"Cancel", "success":"Computer and runtimes deleted", "failed":"Deletion failed. Close the dialog and try again.", "deleting":"Deleting..."}
+}.items():
+    CHANGES.setdefault(f"packages/views/locales/{locale}/runtimes.json", []).append((
+        '{\n  "page": {', '{\n  "machine_delete": ' + json.dumps(labels, ensure_ascii=False) + ',\n  "page": {'))
+
+CHANGES["packages/core/api/client.ts"].extend([
+    ('import { configStore } from "../config";', 'import { configStore } from "../config";\nimport { DuccStatusSchema, emptyDuccStatus, type DuccStatus } from "./ducc-schema";'),
+    ('  async deleteRuntime(runtimeId: string): Promise<void> {', '''  async getDuccCredential(): Promise<DuccStatus> {
+    return parseWithFallback<DuccStatus>(await this.fetch("/api/me/ducc"), DuccStatusSchema, emptyDuccStatus, {endpoint:"GET /api/me/ducc"});
+  }
+  async updateDuccCredential(input: {action:"enable"|"import"|"remove"; enabled?:boolean; daemon_id?:string}): Promise<void> {
+    await this.fetch("/api/me/ducc", {method:"POST", body:JSON.stringify(input)});
+  }
+  async deleteRuntime(runtimeId: string): Promise<void> {''')])
+CHANGES.setdefault("packages/core/runtimes/index.ts",[]).append(('export * from "./access";', 'export * from "./access";\nexport * from "./ducc";'))
+CHANGES[DIALOG] = [(before, after.replace('multica${p} daemon start', 'multica${p} ducc setup\nmultica${p} daemon start')) for before,after in CHANGES[DIALOG]]
+for locale, labels in {
+ "zh-Hans":{"title":"ducc 登录凭据","status":"托管状态","scope":"仅用于本人账号，跨工作区共用；凭据内容不会在页面展示。","loading":"加载中...","unavailable":"凭据服务暂不可用","pending":"等待所选电脑导入","imported":"已导入（来源端 CLI 认证检查通过）","not_imported":"尚未导入","source":"来源电脑","auto":"自动准备 ducc","auto_desc":"启用后，从本人电脑自动导入登录凭据；添加新电脑时自动安装 ducc，并在凭据缺失时下发。已有文件不会被覆盖。","computers":"我的电脑","computers_desc":"按电脑去重，包含所有工作区。离线电脑等待重新连接；旧版 daemon 需要升级。","upgrade":"需要升级 daemon","offline":"离线","state_unknown":"待检查","state_missing":"未找到本人凭据","state_present":"已找到凭据","state_ready":"认证检查通过","state_invalid":"凭据无法验证，请在电脑上重新登录","state_installing":"正在安装 ducc","state_failed":"安装失败，请检查网络与安装权限","import_button":"从此电脑导入","no_computers":"尚无可检测的电脑","remove":"移除托管凭据","remove_desc":"仅移除服务端副本并关闭自动同步，不会删除或注销已经下发到电脑上的凭据。","import_confirm":"从 {{name}} 导入本人账号的凭据。验证通过后将更新服务端版本，不覆盖其他电脑已有的凭据。","cancel":"取消","confirm":"确认","saved":"设置已更新","failed":"操作失败，请稍后重试"},
+ "en":{"title":"ducc credentials","status":"Stored credential","scope":"Personal account only, shared across your workspaces. Credential contents are never displayed.","loading":"Loading...","unavailable":"Credential service unavailable","pending":"Waiting for the selected computer","imported":"Imported (source CLI authentication check passed)","not_imported":"Not imported","source":"Source computer","auto":"Prepare ducc automatically","auto_desc":"Import your credential from your computers. New computers install ducc and receive the credential if missing. Existing files are never overwritten.","computers":"My computers","computers_desc":"Deduplicated across workspaces. Offline computers wait until connected; older daemons need an upgrade.","upgrade":"Daemon upgrade required","offline":"Offline","state_unknown":"Waiting for check","state_missing":"Personal credential missing","state_present":"Credential found","state_ready":"Authentication check passed","state_invalid":"Credential could not be verified; log in on the computer","state_installing":"Installing ducc","state_failed":"Installation failed; check network and permissions","import_button":"Import from computer","no_computers":"No computers available","remove":"Remove stored credential","remove_desc":"Remove only the server copy and disable automatic sync. Credentials already delivered to computers are not removed or revoked.","import_confirm":"Import your credential from {{name}}. Successful validation updates the server version, without overwriting existing credentials on other computers.","cancel":"Cancel","confirm":"Confirm","saved":"Settings updated","failed":"Operation failed; please retry"}
+}.items():
+    path=f"packages/views/locales/{locale}/settings.json"
+    CHANGES.setdefault(path,[]).append(('  "page": {', '  "ducc": '+json.dumps(labels,ensure_ascii=False)+',\n  "page": {'))
 
 def apply_patches():
     for rel, replacements in CHANGES.items():

@@ -34,11 +34,11 @@ def main() -> None:
     for override in sorted(FILES.rglob("*.go")):
         rel = override.relative_to(FILES)
         source = UPSTREAM / rel
-        if not source.is_file():
+        if not source.is_file() and not source.parent.is_dir():
             raise SystemExit(f"overlay target is absent from upstream: {rel}")
         mapping[str(source)] = str(override)
         manifest[str(rel)] = {
-            "source_sha256": sha256(source),
+            "source_sha256": sha256(source) if source.is_file() else None,
             "overlay_sha256": sha256(override),
         }
 
