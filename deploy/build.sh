@@ -57,6 +57,10 @@ if [ ! -x "$WEB_TREE/apps/web/node_modules/.bin/next" ]; then
 fi
 
 cd "$WEB_TREE/apps/web"
+if [ -f compat/package-lock.json ]; then
+  (cd compat && npm ci --ignore-scripts --no-audit --no-fund)
+  node --test compat/test.cjs
+fi
 NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$INSTANCE_DIR/overlays/font-mock.cjs" \
 REMOTE_API_URL="$REMOTE_API_URL" \
 FRONTEND_ORIGIN="$FRONTEND_ORIGIN" \

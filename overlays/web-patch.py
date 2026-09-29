@@ -193,22 +193,38 @@ function daemonCommands(
   if (normalizedServerUrl && normalizedAppUrl) {
     return {
       setupCmd: `multica${p} setup self-host --server-url ${normalizedServerUrl} --app-url ${normalizedAppUrl}__RUNTIME_LINE____SHIM_LINE__`,
-      tokenCmd: `export no_proxy=".duckdns.org,10.0.0.0/8\\${no_proxy:+,$no_proxy}"
-export NO_PROXY=".duckdns.org,10.0.0.0/8\\${NO_PROXY:+,$NO_PROXY}"
+      tokenCmd: `# 配置直连范围：BOS 下载源、平台域名和内网 IP
+export no_proxy=".bcebos.com,.duckdns.org,10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+export NO_PROXY="$no_proxy"
+
+# 安装 Multica CLI（GitHub 下载使用代理）
+${INSTALL_CMD}
+
+# 配置平台地址并登录
 multica${p} config set server_url ${normalizedServerUrl}
 multica${p} config set app_url ${normalizedAppUrl}
-multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}__RUNTIME_LINE____SHIM_LINE__
+multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}
+
+# 配置运行时及兼容包装__RUNTIME_LINE____SHIM_LINE__
 multica${p} daemon start`,
     };
   }
 
   return {
     setupCmd: `multica${p} setup__RUNTIME_LINE____SHIM_LINE__`,
-    tokenCmd: `export no_proxy=".duckdns.org,10.0.0.0/8\\${no_proxy:+,$no_proxy}"
-export NO_PROXY=".duckdns.org,10.0.0.0/8\\${NO_PROXY:+,$NO_PROXY}"
+    tokenCmd: `# 配置直连范围：BOS 下载源、平台域名和内网 IP
+export no_proxy=".bcebos.com,.duckdns.org,10.0.0.0/8\\${no_proxy:+,$no_proxy}"
+export NO_PROXY="$no_proxy"
+
+# 安装 Multica CLI（GitHub 下载使用代理）
+${INSTALL_CMD}
+
+# 配置平台地址并登录
 multica${p} config set server_url ${CLOUD_SERVER_URL}
 multica${p} config set app_url ${CLOUD_APP_URL}
-multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}__RUNTIME_LINE____SHIM_LINE__
+multica${p} login --token ${cliToken || "<YOUR_TOKEN>"}
+
+# 配置运行时及兼容包装__RUNTIME_LINE____SHIM_LINE__
 multica${p} daemon start`,
   };
 }
@@ -256,8 +272,8 @@ OLD_INSTRUCTIONS_MAIN = '''          <div>
 
 NEW_INSTRUCTIONS_MAIN = '''          <div>
             <CommandStep
-              n={2}
-              label={t(($) => $.connect.step2_label)}
+              n={1}
+              label={t(($) => $.connect.combined_label)}
               cmd={tokenCmd}
               copyAria={t(($) => $.connect.copy_aria)}
             />
@@ -275,7 +291,7 @@ NEW_INSTRUCTIONS_MAIN = '''          <div>
 
           <LiveListening />
 
-          <BrowserLoginDetails setupCmd={setupCmd} profile={daemonProfile} />'''
+          {/* Token-only onboarding: browser sign-in entry removed. */}'''
 
 OLD_BROWSER_DETAILS = '''function TroubleshootingDetails({ tokenCmd }: { tokenCmd: string }) {
   const { t } = useT("runtimes");
@@ -899,7 +915,7 @@ CHANGES["packages/core/api/client.ts"].extend([
   }
   async deleteRuntime(runtimeId: string): Promise<void> {''')])
 CHANGES.setdefault("packages/core/runtimes/index.ts",[]).append(('export * from "./access";', 'export * from "./access";\nexport * from "./ducc";'))
-CHANGES[DIALOG] = [(before, after.replace('multica${p} daemon start', 'multica${p} ducc setup\nmultica${p} daemon start')) for before,after in CHANGES[DIALOG]]
+CHANGES[DIALOG] = [(before, after.replace('multica${p} daemon start', '# 准备 ducc：按平台设置自动安装、下发缺失的凭据\nmultica${p} ducc setup\n\n# 将安装目录加入当前终端 PATH，并配置 ducc 模型\nexport PATH="$HOME/.baidu-cc/baidu-cc/bin:$HOME/.comate/baidu-cc/bin:$PATH"\nducc config model \'Opus 4.8\'\n\n# 启动守护进程，连接平台\nmultica${p} daemon start')) for before,after in CHANGES[DIALOG]]
 for locale, labels in {
  "zh-Hans":{"title":"ducc 登录凭据","status":"托管状态","scope":"仅用于本人账号，跨工作区共用；凭据内容不会在页面展示。","loading":"加载中...","unavailable":"凭据服务暂不可用","pending":"等待所选电脑导入","imported":"已导入（来源端 CLI 认证检查通过）","not_imported":"尚未导入","source":"来源电脑","auto":"自动准备 ducc","auto_desc":"启用后，从本人电脑自动导入登录凭据；添加新电脑时自动安装 ducc，并在凭据缺失时下发。已有文件不会被覆盖。","computers":"我的电脑","computers_desc":"按电脑去重，包含所有工作区。离线电脑等待重新连接；旧版 daemon 需要升级。","upgrade":"需要升级 daemon","offline":"离线","state_unknown":"待检查","state_missing":"未找到本人凭据","state_present":"已找到凭据","state_ready":"认证检查通过","state_invalid":"凭据无法验证，请在电脑上重新登录","state_installing":"正在安装 ducc","state_failed":"安装失败，请检查网络与安装权限","import_button":"从此电脑导入","no_computers":"尚无可检测的电脑","remove":"移除托管凭据","remove_desc":"仅移除服务端副本并关闭自动同步，不会删除或注销已经下发到电脑上的凭据。","import_confirm":"从 {{name}} 导入本人账号的凭据。验证通过后将更新服务端版本，不覆盖其他电脑已有的凭据。","cancel":"取消","confirm":"确认","saved":"设置已更新","failed":"操作失败，请稍后重试"},
  "en":{"title":"ducc credentials","status":"Stored credential","scope":"Personal account only, shared across your workspaces. Credential contents are never displayed.","loading":"Loading...","unavailable":"Credential service unavailable","pending":"Waiting for the selected computer","imported":"Imported (source CLI authentication check passed)","not_imported":"Not imported","source":"Source computer","auto":"Prepare ducc automatically","auto_desc":"Import your credential from your computers. New computers install ducc and receive the credential if missing. Existing files are never overwritten.","computers":"My computers","computers_desc":"Deduplicated across workspaces. Offline computers wait until connected; older daemons need an upgrade.","upgrade":"Daemon upgrade required","offline":"Offline","state_unknown":"Waiting for check","state_missing":"Personal credential missing","state_present":"Credential found","state_ready":"Authentication check passed","state_invalid":"Credential could not be verified; log in on the computer","state_installing":"Installing ducc","state_failed":"Installation failed; check network and permissions","import_button":"Import from computer","no_computers":"No computers available","remove":"Remove stored credential","remove_desc":"Remove only the server copy and disable automatic sync. Credentials already delivered to computers are not removed or revoked.","import_confirm":"Import your credential from {{name}}. Successful validation updates the server version, without overwriting existing credentials on other computers.","cancel":"Cancel","confirm":"Confirm","saved":"Settings updated","failed":"Operation failed; please retry"}
@@ -941,6 +957,29 @@ CHANGES[DIALOG].extend([
 
 for locale,label in {"en":"Registration failed","zh-Hans":"注册失败"}.items():
     CHANGES[f"packages/views/locales/{locale}/runtimes.json"].append(('    "tagline":', '    "registration_failed": '+json.dumps(label,ensure_ascii=False)+',\n    "tagline":'))
+
+CHANGES[DIALOG].append(('''          <CommandStep
+            n={1}
+            label={t(($) => $.connect.step1_label)}
+            cmd={INSTALL_CMD}
+            copyAria={t(($) => $.connect.copy_aria)}
+          />
+
+          <div>''', '''          {/* One copyable block installs the CLI and starts the daemon. */}
+          <div>'''))
+for locale, label, old, new in [
+    ("zh-Hans", "安装并启动 Multica", "在要添加的电脑上运行这两条命令。守护进程一上线，这里就会自动识别。", "在要添加的电脑上复制运行以下整组命令。守护进程一上线，这里就会自动识别。"),
+    ("en", "Install and start Multica", "Run these two commands on the computer you want to add. We'll detect it the moment the daemon comes online.", "Copy and run this command block on the computer you want to add. We'll detect it the moment the daemon comes online."),
+]:
+    CHANGES[f"packages/views/locales/{locale}/runtimes.json"].extend([
+        (json.dumps(old, ensure_ascii=False), json.dumps(new, ensure_ascii=False)),
+        ('    "step1_label":', '    "combined_label": '+json.dumps(label, ensure_ascii=False)+',\n    "step1_label":'),
+    ])
+
+CHANGES[DIALOG].extend([
+    (NEW_BROWSER_DETAILS, '// Browser sign-in instructions are not shown in this deployment.'),
+    ('  const { setupCmd, tokenCmd } = daemonCommands(\n', '  const { tokenCmd } = daemonCommands(\n'),
+])
 
 def apply_patches():
     for rel, replacements in CHANGES.items():

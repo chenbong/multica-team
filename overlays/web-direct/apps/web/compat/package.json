@@ -1,0 +1,13 @@
+{
+  "name": "multica-web-compat",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Build-time legacy WebView CSS with feature-gated modern styles",
+  "dependencies": {
+    "postcss": "8.5.26",
+    "postcss-preset-env": "11.5.4",
+    "postcss-value-parser": "4.2.0",
+    "css-has-pseudo": "8.0.1",
+    "core-js": "3.49.0"
+  }
+}
