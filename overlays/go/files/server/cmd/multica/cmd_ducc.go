@@ -22,7 +22,7 @@ func init() {
 		if err != nil {
 			return err
 		}
-		if err = daemon.PrepareDucc(cmd.Context(), resolveDaemonServerURL(cmd, profile), cfg.Token, id, version); err != nil {
+		if err = daemon.PrepareDucc(cmd.Context(), resolveDaemonServerURL(cmd, profile), cfg.Token, id, version, func(message string) { fmt.Fprintln(cmd.OutOrStdout(), message) }); err != nil {
 			return err
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "ducc preparation finished; check your profile settings for credential status")

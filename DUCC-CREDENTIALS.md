@@ -40,6 +40,13 @@ is bounded by a timeout and serialized per OS home. Linux and macOS are
 supported by this preparation implementation; other platforms return a status
 error. Automatic updates of an already-installed ducc are not performed.
 
+Interactive setup prints fixed stage messages, with elapsed-time updates every
+10 seconds during installation. Installer output is still withheld to avoid
+credential leakage. On Unix, installer/auth helpers run in their own process
+group and timeout cancellation kills that group; inherited output pipes also
+have a bounded wait. Installation is limited to five minutes and authentication
+checks to 45 seconds. These progress messages do not run in background sync.
+
 Database migrations 464–466 add user credential and daemon capability state;
 the user and owner/daemon unique indexes are separate concurrent migrations.
 Back up the database with `deploy/secrets.env`, whose
