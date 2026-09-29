@@ -904,8 +904,43 @@ for locale, labels in {
  "zh-Hans":{"title":"ducc 登录凭据","status":"托管状态","scope":"仅用于本人账号，跨工作区共用；凭据内容不会在页面展示。","loading":"加载中...","unavailable":"凭据服务暂不可用","pending":"等待所选电脑导入","imported":"已导入（来源端 CLI 认证检查通过）","not_imported":"尚未导入","source":"来源电脑","auto":"自动准备 ducc","auto_desc":"启用后，从本人电脑自动导入登录凭据；添加新电脑时自动安装 ducc，并在凭据缺失时下发。已有文件不会被覆盖。","computers":"我的电脑","computers_desc":"按电脑去重，包含所有工作区。离线电脑等待重新连接；旧版 daemon 需要升级。","upgrade":"需要升级 daemon","offline":"离线","state_unknown":"待检查","state_missing":"未找到本人凭据","state_present":"已找到凭据","state_ready":"认证检查通过","state_invalid":"凭据无法验证，请在电脑上重新登录","state_installing":"正在安装 ducc","state_failed":"安装失败，请检查网络与安装权限","import_button":"从此电脑导入","no_computers":"尚无可检测的电脑","remove":"移除托管凭据","remove_desc":"仅移除服务端副本并关闭自动同步，不会删除或注销已经下发到电脑上的凭据。","import_confirm":"从 {{name}} 导入本人账号的凭据。验证通过后将更新服务端版本，不覆盖其他电脑已有的凭据。","cancel":"取消","confirm":"确认","saved":"设置已更新","failed":"操作失败，请稍后重试"},
  "en":{"title":"ducc credentials","status":"Stored credential","scope":"Personal account only, shared across your workspaces. Credential contents are never displayed.","loading":"Loading...","unavailable":"Credential service unavailable","pending":"Waiting for the selected computer","imported":"Imported (source CLI authentication check passed)","not_imported":"Not imported","source":"Source computer","auto":"Prepare ducc automatically","auto_desc":"Import your credential from your computers. New computers install ducc and receive the credential if missing. Existing files are never overwritten.","computers":"My computers","computers_desc":"Deduplicated across workspaces. Offline computers wait until connected; older daemons need an upgrade.","upgrade":"Daemon upgrade required","offline":"Offline","state_unknown":"Waiting for check","state_missing":"Personal credential missing","state_present":"Credential found","state_ready":"Authentication check passed","state_invalid":"Credential could not be verified; log in on the computer","state_installing":"Installing ducc","state_failed":"Installation failed; check network and permissions","import_button":"Import from computer","no_computers":"No computers available","remove":"Remove stored credential","remove_desc":"Remove only the server copy and disable automatic sync. Credentials already delivered to computers are not removed or revoked.","import_confirm":"Import your credential from {{name}}. Successful validation updates the server version, without overwriting existing credentials on other computers.","cancel":"Cancel","confirm":"Confirm","saved":"Settings updated","failed":"Operation failed; please retry"}
 }.items():
+    labels.update({"choose_computer": "选择来源电脑", "computers": "来源电脑", "import_button": "导入凭据到平台"} if locale=="zh-Hans" else {"choose_computer": "Choose a source computer", "computers": "Source computer", "import_button": "Import credential to platform"})
     path=f"packages/views/locales/{locale}/settings.json"
     CHANGES.setdefault(path,[]).append(('  "page": {', '  "ducc": '+json.dumps(labels,ensure_ascii=False)+',\n  "page": {'))
+
+CHANGES[DIALOG].extend([
+ ('import { runtimeKeys } from "@multica/core/runtimes/queries";', 'import { runtimeKeys, runtimeListOptions } from "@multica/core/runtimes/queries";\nimport { hasOnlineRegistration, findNewConnectedRuntime } from "./connection-result";'),
+ ('  const newRuntimeIdRef = useRef<string | null>(null);', '''  const newRuntimeIdRef = useRef<string | null>(null);
+  const userId = useAuthStore((state) => state.user?.id);
+  const knownComputersRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    knownComputersRef.current = null;
+    void qc.fetchQuery({ ...runtimeListOptions(wsId), staleTime: 0 }).then(rows => {
+      if (!cancelled) knownComputersRef.current = new Set(rows.map(row => row.daemon_id).filter((id): id is string => !!id));
+    }).catch(() => { /* Keep instructions visible if the baseline is unavailable. */ });
+    return () => { cancelled = true; knownComputersRef.current = null; };
+  }, [qc, wsId, userId]);'''),
+ ('''      if (step !== "instructions") return;
+      qc.invalidateQueries({ queryKey: runtimeKeys.all(wsId) });
+      const p = payload as Record<string, unknown> | null;
+      if (p?.runtime_id && typeof p.runtime_id === "string") {
+        newRuntimeIdRef.current = p.runtime_id;
+      }
+      setStep("success");''', '''      const known = knownComputersRef.current;
+      if (step !== "instructions" || !known || !hasOnlineRegistration(payload)) return;
+      void qc.fetchQuery({ ...runtimeListOptions(wsId), staleTime: 0 }).then(rows => {
+        if (knownComputersRef.current !== known || newRuntimeIdRef.current) return;
+        const connected = findNewConnectedRuntime(rows, known, wsId, userId);
+        if (!connected) return;
+        newRuntimeIdRef.current = connected.id;
+        setStep("success");
+      }).catch(() => { /* A notification alone is never proof of connection. */ });'''),
+ ('    [step, qc, wsId],', '    [step, qc, wsId, userId],'),
+])
+
+for locale,label in {"en":"Registration failed","zh-Hans":"注册失败"}.items():
+    CHANGES[f"packages/views/locales/{locale}/runtimes.json"].append(('    "tagline":', '    "registration_failed": '+json.dumps(label,ensure_ascii=False)+',\n    "tagline":'))
 
 def apply_patches():
     for rel, replacements in CHANGES.items():

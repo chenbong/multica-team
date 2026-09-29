@@ -717,9 +717,14 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("daemon registered", "workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID, "runtimes_count", len(resp))
 
-	h.publish(protocol.EventDaemonRegister, req.WorkspaceID, "system", "", map[string]any{
-		"runtimes": resp,
-	})
+	// Failed-profile placeholder rows are not a successful computer connection.
+	// Do not notify clients of an empty registration, including older dialogs
+	// that interpret every daemon:register event as a newly connected computer.
+	if len(resp) > 0 {
+		h.publish(protocol.EventDaemonRegister, req.WorkspaceID, "system", "", map[string]any{
+			"runtimes": resp,
+		})
+	}
 
 	repoResp := workspaceReposResponse(req.WorkspaceID, ws.Repos, ws.Settings)
 

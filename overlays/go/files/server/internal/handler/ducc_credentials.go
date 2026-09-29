@@ -47,9 +47,9 @@ func (h *Handler) GetDuccCredential(w http.ResponseWriter, r *http.Request) {
 	}
 	var enabled, imported bool
 	var version int64
-	var source, pending string
+	var source, sourceName, pending string
 	var at *time.Time
-	if err := h.DB.QueryRow(r.Context(), `SELECT enabled,sealed IS NOT NULL,version,source_daemon,pending_daemon,imported_at FROM ducc_credential WHERE user_id=$1`, id).Scan(&enabled, &imported, &version, &source, &pending, &at); err != nil {
+	if err := h.DB.QueryRow(r.Context(), `SELECT c.enabled,c.sealed IS NOT NULL,c.version,c.source_daemon,c.pending_daemon,c.imported_at,coalesce(s.name,'') FROM ducc_credential c LEFT JOIN ducc_machine s ON s.user_id=c.user_id AND s.daemon_id=c.source_daemon WHERE c.user_id=$1`, id).Scan(&enabled, &imported, &version, &source, &pending, &at, &sourceName); err != nil {
 		writeError(w, 500, "status unavailable")
 		return
 	}
@@ -58,9 +58,9 @@ func (h *Handler) GetDuccCredential(w http.ResponseWriter, r *http.Request) {
  FROM agent_runtime r WHERE r.owner_id=$1 AND r.daemon_id IS NOT NULL AND r.runtime_mode='local'
  AND EXISTS(SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=$1)
  GROUP BY r.daemon_id)
- SELECT coalesce(c.daemon_id,s.daemon_id),coalesce(c.name,s.name),s.last_seen_at,s.client_version,s.installed,s.credential_state,s.error_code
- FROM computers c FULL JOIN ducc_machine s ON s.daemon_id=c.daemon_id AND s.user_id=$1
- WHERE c.daemon_id IS NOT NULL OR s.user_id=$1 ORDER BY coalesce(c.name,s.name)`, id)
+ SELECT c.daemon_id,c.name,s.last_seen_at,s.client_version,s.installed,s.credential_state,s.error_code
+ FROM computers c LEFT JOIN ducc_machine s ON s.daemon_id=c.daemon_id AND s.user_id=$1
+ ORDER BY c.name`, id)
 	if err != nil {
 		writeError(w, 500, "computer list unavailable")
 		return
@@ -82,7 +82,7 @@ func (h *Handler) GetDuccCredential(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "computer status unavailable")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"username": name, "enabled": enabled, "imported": imported, "version": version, "source_daemon": source, "pending_daemon": pending, "imported_at": at, "machines": machines})
+	writeJSON(w, 200, map[string]any{"username": name, "enabled": enabled, "imported": imported, "version": version, "source_daemon": source, "source_name": sourceName, "pending_daemon": pending, "imported_at": at, "machines": machines})
 }
 
 func (h *Handler) UpdateDuccCredential(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +105,7 @@ func (h *Handler) UpdateDuccCredential(w http.ResponseWriter, r *http.Request) {
 		_, err = h.DB.Exec(r.Context(), `UPDATE ducc_credential SET enabled=$2,request_id='',pending_daemon='',updated_at=now() WHERE user_id=$1`, id, req.Enabled)
 	case "import":
 		var allowed bool
-		err = h.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM ducc_machine WHERE user_id=$1 AND daemon_id=$2 AND last_seen_at>now()-interval '2 minutes')`, id, req.Daemon).Scan(&allowed)
+		err = h.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM ducc_machine s WHERE s.user_id=$1 AND s.daemon_id=$2 AND s.installed AND s.last_seen_at>now()-interval '2 minutes' AND EXISTS(SELECT 1 FROM agent_runtime r JOIN member m ON m.workspace_id=r.workspace_id AND m.user_id=$1 WHERE r.owner_id=$1 AND r.daemon_id=s.daemon_id AND r.runtime_mode='local'))`, id, req.Daemon).Scan(&allowed)
 		if err != nil || !allowed {
 			writeError(w, 409, "computer offline, unsupported or not owned by you")
 			return

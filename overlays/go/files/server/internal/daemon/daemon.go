@@ -373,11 +373,12 @@ type repoCacheBackend interface {
 
 // Daemon is the local agent runtime that polls for and executes tasks.
 type Daemon struct {
-	cfg        Config
-	client     *Client
-	repoCache  repoCacheBackend
-	skillCache *SkillBundleCache
-	logger     *slog.Logger
+	registrationFailures map[string]registrationFailure // guarded by mu
+	cfg                  Config
+	client               *Client
+	repoCache            repoCacheBackend
+	skillCache           *SkillBundleCache
+	logger               *slog.Logger
 
 	mu           sync.Mutex
 	workspaces   map[string]*workspaceState
@@ -2667,6 +2668,11 @@ func (d *Daemon) registerRuntimesForWorkspaceBatchLocked(ctx context.Context, wo
 	// means the fetch failed and the caller must keep whatever signature was
 	// previously cached on the workspaceState.
 	profileSig := d.appendProfileRuntimes(ctx, workspaceID, &runtimes, &failedProfiles)
+	fingerprintData, _ := json.Marshal([]any{runtimes, failedProfiles})
+	fingerprint := string(fingerprintData)
+	if !d.registrationRetryAllowed(workspaceID, fingerprint, time.Now()) {
+		return nil, profileSig, errRegistrationCoolingDown
+	}
 
 	if len(runtimes) == 0 && len(failedProfiles) == 0 {
 		// profileSig is still meaningful even when nothing resolves: the
@@ -2690,8 +2696,10 @@ func (d *Daemon) registerRuntimesForWorkspaceBatchLocked(ctx context.Context, wo
 
 	resp, err := d.client.Register(ctx, req)
 	if err != nil {
+		d.recordRegistrationResult(workspaceID, fingerprint, false, time.Now())
 		return nil, "", fmt.Errorf("register runtimes: %w", err)
 	}
+	d.recordRegistrationResult(workspaceID, fingerprint, len(resp.Runtimes) > 0, time.Now())
 	if len(resp.Runtimes) == 0 && len(failedProfiles) == 0 {
 		return nil, "", fmt.Errorf("register runtimes: empty response")
 	}
@@ -2831,6 +2839,13 @@ func (d *Daemon) appendProfileRuntimes(ctx context.Context, workspaceID string, 
 		}
 		if resolved == "" {
 			r, err := lookPath(profile.CommandName)
+			if err != nil && profile.CommandName == "ducc" {
+				if home, homeErr := os.UserHomeDir(); homeErr == nil {
+					if installed := duccInstalledExecutable(home); installed != "" {
+						r, err = installed, nil
+					}
+				}
+			}
 			if err != nil {
 				if discovered, ok := d.agents()[profile.ProtocolFamily]; ok && discovered.Command == profile.CommandName && discovered.Path != "" {
 					resolved = discovered.Path

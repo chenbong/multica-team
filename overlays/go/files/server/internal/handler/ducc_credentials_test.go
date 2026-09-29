@@ -49,6 +49,29 @@ func TestDuccCredentialIsolationAndRevocation(t *testing.T) {
 	if strings.Contains(status.Body.String(), "test-secret") {
 		t.Fatal("browser received secret")
 	}
+	var metadata struct {
+		Machines   []map[string]any `json:"machines"`
+		SourceName string           `json:"source_name"`
+	}
+	if err := json.Unmarshal(status.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.Machines) != 0 || metadata.SourceName != "Test computer" {
+		t.Fatal("unregistered test computer leaked into choices or provenance was lost")
+	}
+	call(testHandler.UpdateDuccCredential, map[string]any{"action": "import", "daemon_id": "test-daemon"}, 409)
+	runtimeID := createCascadeFixtureRuntime(t, ctx, "Registered source")
+	if _, err := testPool.Exec(ctx, `UPDATE agent_runtime SET runtime_mode='local',daemon_id='test-daemon' WHERE id=$1`, runtimeID); err != nil {
+		t.Fatal(err)
+	}
+	registered := testutil.Call(t, testHandler.GetDuccCredential, newRequest("GET", "/api/me/ducc", nil)).Want(200)
+	if err := json.Unmarshal(registered.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.Machines) != 1 {
+		t.Fatal("registered owned computer missing")
+	}
+	call(testHandler.UpdateDuccCredential, map[string]any{"action": "import", "daemon_id": "test-daemon"}, 204)
 	call(testHandler.SyncDuccCredential, upload, 409)
 	download := map[string]any{"daemon_id": "new-daemon", "name": "New computer", "client_version": "test", "phase": "download", "installed": true, "state": "missing", "expected_version": 1}
 	got := call(testHandler.SyncDuccCredential, download, 200)

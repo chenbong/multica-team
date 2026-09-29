@@ -77,6 +77,12 @@ func duccExecutable(home string) string {
 	if path, err := exec.LookPath("ducc"); err == nil {
 		return path
 	}
+	return duccInstalledExecutable(home)
+}
+
+// Shared by preparation and daemon profile registration; does not rely on a
+// parent shell re-reading PATH after the installer edits its startup files.
+func duccInstalledExecutable(home string) string {
 	for _, path := range []string{filepath.Join(home, ".baidu-cc/baidu-cc/bin/ducc"), filepath.Join(home, ".comate/baidu-cc/bin/ducc")} {
 		if s, e := os.Stat(path); e == nil && !s.IsDir() && s.Mode()&0111 != 0 {
 			return path

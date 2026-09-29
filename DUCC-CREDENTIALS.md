@@ -47,6 +47,15 @@ group and timeout cancellation kills that group; inherited output pipes also
 have a bounded wait. Installation is limited to five minutes and authentication
 checks to 45 seconds. These progress messages do not run in background sync.
 
+Daemon profile registration uses the same known ducc install directories as
+preparation when PATH cannot resolve `ducc`. This matters because setup is a
+separate process and cannot export PATH changes into its caller's shell.
+Registrations with no usable runtime back off by 15, 30, 60 and then 120 seconds
+per workspace; a changed executable/profile payload bypasses the cooldown.
+The server no longer broadcasts an empty registration as a successful
+connection. The add-computer dialog snapshots existing computers and confirms
+a new, online, user-owned computer against the API before showing success.
+
 Database migrations 464–466 add user credential and daemon capability state;
 the user and owner/daemon unique indexes are separate concurrent migrations.
 Back up the database with `deploy/secrets.env`, whose

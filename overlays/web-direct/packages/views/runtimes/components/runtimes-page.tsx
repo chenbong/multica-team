@@ -461,6 +461,11 @@ function MachineRow({ machine }: { machine: RuntimeMachine }) {
   const Icon = machine.section === "cloud" ? Cloud : Monitor;
   const locator = machine.id;
   const busyCount = machine.runningCount + machine.queuedCount;
+  const registrationErrors = machine.runtimes
+    .filter((runtime) => runtime.metadata?.runtime_profile_registration_error === true)
+    .map((runtime) => String(runtime.metadata?.runtime_profile_failure_reason ?? ""))
+    .filter(Boolean);
+  const registrationFailed = machine.onlineCount === 0 && registrationErrors.length > 0;
   const body = (
     <>
       <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-background">
@@ -491,7 +496,9 @@ function MachineRow({ machine }: { machine: RuntimeMachine }) {
 
       <span className="hidden w-36 shrink-0 items-center gap-1.5 text-caption md:flex">
         <HealthIcon health={machine.health} />
-        <span>{healthLabel(machine.health)}</span>
+        <span title={registrationFailed ? registrationErrors.join("\n") : undefined}>
+          {registrationFailed ? t(($) => $.page.registration_failed) : healthLabel(machine.health)}
+        </span>
       </span>
       <span className="hidden w-40 shrink-0 flex-col gap-1 lg:flex">
         <span className="text-caption text-muted-foreground">
