@@ -44,19 +44,19 @@ func sanitizeNullBytes(s string) string {
 // --- Response structs ---
 
 type SkillResponse struct {
-	ID          string  `json:"id"`
-	WorkspaceID string  `json:"workspace_id"`
-	WorkspaceName string `json:"workspace_name,omitempty"`
-	Scope       string  `json:"scope"`
-	OwnerUserID *string `json:"owner_user_id,omitempty"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	Content     string  `json:"content"`
-	Config      any     `json:"config"`
-	CreatedBy   *string `json:"created_by"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
-	UsageCount  int64   `json:"usage_count"`
+	ID            string  `json:"id"`
+	WorkspaceID   string  `json:"workspace_id"`
+	WorkspaceName string  `json:"workspace_name,omitempty"`
+	Scope         string  `json:"scope"`
+	OwnerUserID   *string `json:"owner_user_id,omitempty"`
+	Name          string  `json:"name"`
+	Description   string  `json:"description"`
+	Content       string  `json:"content"`
+	Config        any     `json:"config"`
+	CreatedBy     *string `json:"created_by"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
+	UsageCount    int64   `json:"usage_count"`
 }
 
 // SkillSummaryResponse is the list-endpoint shape: everything SkillResponse
@@ -65,21 +65,26 @@ type SkillResponse struct {
 // links (GH multica-ai/multica#2174). Detail endpoints still return the full
 // SkillResponse with content.
 type SkillSummaryResponse struct {
-	ID          string  `json:"id"`
-	WorkspaceID string  `json:"workspace_id"`
-	WorkspaceName string `json:"workspace_name,omitempty"`
-	Scope       string  `json:"scope"`
-	OwnerUserID *string `json:"owner_user_id,omitempty"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	Config      any     `json:"config"`
-	CreatedBy   *string `json:"created_by"`
-	CreatedAt   string  `json:"created_at"`
-	UpdatedAt   string  `json:"updated_at"`
-	UsageCount  int64   `json:"usage_count"`
+	ID            string  `json:"id"`
+	WorkspaceID   string  `json:"workspace_id"`
+	WorkspaceName string  `json:"workspace_name,omitempty"`
+	Scope         string  `json:"scope"`
+	OwnerUserID   *string `json:"owner_user_id,omitempty"`
+	Name          string  `json:"name"`
+	Description   string  `json:"description"`
+	Config        any     `json:"config"`
+	CreatedBy     *string `json:"created_by"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
+	UsageCount    int64   `json:"usage_count"`
 	// Enabled is only populated for agent-scoped skill responses. Workspace
 	// skill lists describe the skill itself, so they omit assignment state.
 	Enabled *bool `json:"enabled,omitempty"`
+	// Labels are bulk-attached by ListSkills so the client can filter
+	// without an N+1 round-trip per row. Pointer + omitempty: ListSkills
+	// always sets a non-nil slice (empty when none). Other summary
+	// producers leave this nil so the field is omitted.
+	Labels *[]LabelResponse `json:"labels,omitempty"`
 }
 
 // AgentSkillSummary is the still-narrower shape used for skills embedded in
@@ -385,12 +390,19 @@ func (h *Handler) loadSkillForUser(w http.ResponseWriter, r *http.Request, id st
 
 func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 	workspaceID := h.resolveWorkspaceID(r)
+	wsUUID := parseUUID(workspaceID)
 
-	skills, err := h.Queries.ListSkillSummariesByWorkspace(r.Context(), db.ListSkillSummariesByWorkspaceParams{WorkspaceID: parseUUID(workspaceID), OwnerUserID: parseUUID(requestUserID(r))})
+	skills, err := h.Queries.ListSkillSummariesByWorkspace(r.Context(), db.ListSkillSummariesByWorkspaceParams{WorkspaceID: wsUUID, OwnerUserID: parseUUID(requestUserID(r))})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list skills")
 		return
 	}
+
+	ids := make([]pgtype.UUID, len(skills))
+	for i, s := range skills {
+		ids[i] = s.ID
+	}
+	labelsMap := h.labelsBySkill(r.Context(), wsUUID, ids)
 
 	resp := make([]SkillSummaryResponse, len(skills))
 	for i, s := range skills {
@@ -398,9 +410,46 @@ func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 			s.ID, s.WorkspaceID, s.Name, s.Description, s.Config,
 			s.CreatedBy, s.CreatedAt, s.UpdatedAt, s.Scope, s.OwnerUserID, s.UsageCount, s.WorkspaceName,
 		)
+		// Own a non-nil slice so JSON is `labels: []` (not `null`/omitted).
+		// append(nil, xs...) keeps a nil header when xs is empty.
+		labels := append([]LabelResponse{}, labelsMap[resp[i].ID]...)
+		resp[i].Labels = &labels
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// labelsBySkill bulk-loads labels for the given skill IDs and returns a map
+// keyed by skill UUID string. On error or empty input, returns an empty map —
+// label rendering is non-critical and we'd rather serve skills without labels
+// than fail the whole list call.
+func (h *Handler) labelsBySkill(ctx context.Context, wsUUID pgtype.UUID, skillIDs []pgtype.UUID) map[string][]LabelResponse {
+	out := map[string][]LabelResponse{}
+	if len(skillIDs) == 0 {
+		return out
+	}
+	rows, err := h.Queries.ListLabelsForSkills(ctx, db.ListLabelsForSkillsParams{
+		SkillIds:    skillIDs,
+		WorkspaceID: wsUUID,
+	})
+	if err != nil {
+		slog.Warn("ListLabelsForSkills failed", "error", err)
+		return out
+	}
+	for _, r := range rows {
+		skillID := uuidToString(r.SkillID)
+		out[skillID] = append(out[skillID], LabelResponse{
+			ID:           uuidToString(r.ID),
+			WorkspaceID:  uuidToString(r.WorkspaceID),
+			ResourceType: r.ResourceType,
+			Name:         r.Name,
+			Description:  r.Description,
+			Color:        r.Color,
+			CreatedAt:    timestampToString(r.CreatedAt),
+			UpdatedAt:    timestampToString(r.UpdatedAt),
+		})
+	}
+	return out
 }
 
 func (h *Handler) SearchSkills(w http.ResponseWriter, r *http.Request) {

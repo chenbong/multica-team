@@ -1574,7 +1574,7 @@ func (q *Queries) UpsertPluginSecret(ctx context.Context, arg UpsertPluginSecret
 const upsertPluginSkill = `-- name: UpsertPluginSkill :one
 INSERT INTO skill (workspace_id, name, description, content, config, created_by, plugin_installation_id)
 VALUES ($1, $2, $3, $4, '{}'::jsonb, $6, $5)
-ON CONFLICT (workspace_id, name) DO UPDATE SET
+ON CONFLICT (workspace_id, name) WHERE scope = 'workspace' DO UPDATE SET
     description = EXCLUDED.description,
     content = EXCLUDED.content,
     updated_at = now()

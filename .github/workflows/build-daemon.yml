@@ -38,14 +38,22 @@ jobs:
           cache-dependency-path: multica/server/go.sum
 
       - name: Prepare the Go overlay manifest
-        run: python3 overlays/prepare.py
+        run: |
+          python3 overlays/prepare.py
+          python3 overlays/prepare.py --check
 
       - name: Compile-check the overlaid packages
         working-directory: multica/server
+        env:
+          DATABASE_URL: postgres://overlay:overlay@127.0.0.1:1/overlay?sslmode=disable&connect_timeout=1
+          MULTICA_RUN_REAL_AGENT_SMOKE: "0"
         run: |
           set -euo pipefail
-          go test -overlay="$GITHUB_WORKSPACE/overlays/go-overlay.json" -run '^$' \
-            ./cmd/server ./internal/daemon/... ./internal/handler \
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          cd "$workspace/multica/server"
+          export GOFLAGS="-overlay=$workspace/overlays/go-overlay.json -mod=readonly"
+          go test -run '^$' \
+            ./cmd/server ./cmd/multica ./internal/cli ./internal/daemon/... ./internal/handler \
             ./internal/service ./pkg/agent ./pkg/db/generated
 
       - name: Fail if the build touched the upstream checkout
@@ -86,9 +94,12 @@ jobs:
           cache-dependency-path: multica/server/go.sum
 
       - name: Prepare the Go overlay manifest
-        run: python3 overlays/prepare.py
+        run: |
+          python3 overlays/prepare.py
+          python3 overlays/prepare.py --check
 
       - name: Build the CLI and daemon
+        id: build
         working-directory: multica/server
         env:
           GOOS: ${{ matrix.goos }}
@@ -97,38 +108,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          cd "$workspace/multica/server"
+          export GOFLAGS="-overlay=$workspace/overlays/go-overlay.json -mod=readonly"
           suffix=""
           if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
-          # Version basis: the newest v* tag on this repository, else on the
-          # submodule, else the upstream sha. Nothing here may abort the step —
-          # a tagless shallow submodule checkout is the normal case.
+          # Branch builds follow the pinned upstream release, never an older
+          # overlay tag from the parent repository. A tagless checkout uses its SHA.
           parent_rev="$(git -C ../.. rev-parse --short HEAD)"
           upstream_commit="$(git -C .. rev-parse --short HEAD)"
-          base_version=""
-          for dir in ../.. ..; do
-            candidate="$(git -C "$dir" describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)"
-            if [ -n "$candidate" ]; then
-              base_version="${candidate#v}"
-              break
-            fi
-          done
+          upstream_tag="$(git -C .. describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)"
+          base_version="${upstream_tag#v}"
           if [ -z "$base_version" ]; then
             base_version="$upstream_commit"
           fi
-          # A tagged build is already named by its own tag; only branch builds
-          # carry the extra overlay marker.
+          # Preserve the fork's release naming and reject a plain upstream tag.
+          # Upstream auto-update treats x.y.z as eligible for replacement;
+          # overlay suffixes keep that automatic path disabled.
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-overlay\.[0-9]+$ ]]; then
+              echo "daemon release tags must use v<upstream-version>-overlay.<number>" >&2
+              exit 1
+            fi
             version="${GITHUB_REF_NAME#v}"
+            if [ "${version%-overlay.*}" != "$base_version" ]; then
+              echo "release tag $GITHUB_REF_NAME does not match pinned upstream $upstream_tag" >&2
+              exit 1
+            fi
           else
             version="${base_version}-overlay.${parent_rev}"
           fi
-          out="$GITHUB_WORKSPACE/dist/multica-$GOOS-$GOARCH$suffix"
-          mkdir -p "$GITHUB_WORKSPACE/dist"
+          out="$workspace/dist/multica-$GOOS-$GOARCH$suffix"
+          mkdir -p "$workspace/dist"
           go build \
-            -overlay="$GITHUB_WORKSPACE/overlays/go-overlay.json" \
             -trimpath \
-            -ldflags "-s -w -X main.version=${version} -X main.commit=${upstream_commit}-overlay -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -ldflags "-s -w -X main.version=${version} -X main.commit=${upstream_commit}-overlay.${parent_rev} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -o "$out" ./cmd/multica
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           echo "built $out as ${version}"
           ls -l "$out"
 
@@ -143,23 +159,33 @@ jobs:
         env:
           GOOS_TARGET: ${{ matrix.goos }}
           GOARCH_TARGET: ${{ matrix.goarch }}
+          BUILD_VERSION: ${{ steps.build.outputs.version }}
         run: |
           set -euo pipefail
           cd dist
+          # Keep local macOS packaging identical to the Linux release runner.
+          export COPYFILE_DISABLE=1
           suffix=""
+          mkdir -p pkg
+          cp ../multica/LICENSE ../multica/NOTICE pkg/
           if [ "$GOOS_TARGET" = "windows" ]; then
             suffix=".exe"
-            mkdir -p pkg
             cp "multica-${GOOS_TARGET}-${GOARCH_TARGET}${suffix}" "pkg/multica${suffix}"
-            zip -q -j "multica_${GOOS_TARGET}_${GOARCH_TARGET}.zip" "pkg/multica${suffix}"
+            zip -q -j "multica_${GOOS_TARGET}_${GOARCH_TARGET}.zip" "pkg/multica${suffix}" pkg/LICENSE pkg/NOTICE
+            cp "multica_${GOOS_TARGET}_${GOARCH_TARGET}.zip" "multica-cli-${BUILD_VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.zip"
             rm -rf pkg
           else
-            mkdir -p pkg
             cp "multica-${GOOS_TARGET}-${GOARCH_TARGET}${suffix}" "pkg/multica${suffix}"
-            tar -czf "multica_${GOOS_TARGET}_${GOARCH_TARGET}.tar.gz" -C pkg "multica${suffix}"
+            tar -czf "multica_${GOOS_TARGET}_${GOARCH_TARGET}.tar.gz" -C pkg "multica${suffix}" LICENSE NOTICE
+            cp "multica_${GOOS_TARGET}_${GOARCH_TARGET}.tar.gz" "multica-cli-${BUILD_VERSION}-${GOOS_TARGET}-${GOARCH_TARGET}.tar.gz"
             rm -rf pkg
           fi
           ls -l
+
+      - name: Fail if the build touched the upstream checkout
+        run: |
+          set -euo pipefail
+          test -z "$(git -C multica status --porcelain)"
 
       - name: Upload the artifacts
         uses: actions/upload-artifact@v4
@@ -169,7 +195,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [verify-overlay, build]
     runs-on: ubuntu-latest
     permissions:
@@ -186,7 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum multica_* > checksums.txt
+          sha256sum multica_* multica-cli-* > checksums.txt
           cat checksums.txt
 
       - name: Publish the release
@@ -194,5 +220,6 @@ jobs:
         with:
           files: |
             dist/multica_*
+            dist/multica-cli-*
             dist/checksums.txt
           generate_release_notes: true

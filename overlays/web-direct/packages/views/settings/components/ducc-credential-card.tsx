@@ -22,7 +22,7 @@ export function DuccCredentialCard(){
  const selected=data?.machines.find(m=>m.daemon_id===selectedId);
  const options=(data?.machines??[]).map(m=>({value:m.daemon_id,label:m.name}));
  const machineStatus=(m:NonNullable<typeof selected>)=>!m.supported?t($=>$.ducc.upgrade):!m.online?t($=>$.ducc.offline):states[m.state||"unknown"]||t($=>$.ducc.state_unknown);
- return <SettingsSection title={t($=>$.ducc.title)}><SettingsCard>
+ return <SettingsSection anchor="ducc" title={t($=>$.ducc.title)} scope="account"><SettingsCard>
   <SettingsRow label={t($=>$.ducc.status)} description={t($=>$.ducc.scope)}>
    <div className="space-y-1 text-body">
     <p>{query.isError||data?.available===false?t($=>$.ducc.unavailable):query.isPending?t($=>$.ducc.loading):data?.pending_daemon?t($=>$.ducc.pending):data?.imported?t($=>$.ducc.imported):t($=>$.ducc.not_imported)}</p>

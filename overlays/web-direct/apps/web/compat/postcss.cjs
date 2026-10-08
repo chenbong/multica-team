@@ -62,18 +62,11 @@ function legacyPrimitives(root) {
 // opaque token. Generate inherited RGB channels for each light/dark token so
 // transparency works without hard-coding the theme or changing element opacity.
 function legacyAlphaColors(root) {
-  const wanted=new Set();
   const mix=/color-mix\(in (?:oklab|srgb|lab),\s*var\((--[\w-]+)\)\s+([\d.]+)%,\s*transparent\)/g;
-  root.walkDecls(d=>{for(const m of d.value.matchAll(mix))wanted.add(m[1]);});
-  let changed=true;
-  while(changed){changed=false;root.walkDecls(d=>{
-    if(!wanted.has(d.prop))return;
-    const alias=d.value.match(/^var\((--[\w-]+)\)$/);
-    if(alias&&!wanted.has(alias[1])){wanted.add(alias[1]);changed=true;}
-  });}
-  const available=new Set();
   root.walkDecls(d=>{
-    if(!wanted.has(d.prop))return;
+    // Route CSS may reference a token declared only in the root stylesheet.
+    // Export channels for every color token, not just local color-mix users.
+    if(!d.prop.startsWith('--') || d.prop.endsWith('-mc-rgb'))return;
     let channels;
     const alias=d.value.match(/^var\((--[\w-]+)\)$/);
     const hex=d.value.match(/^#([a-f\d]{3}|[a-f\d]{6})$/i);
@@ -83,9 +76,9 @@ function legacyAlphaColors(root) {
     else if(rgb)channels=rgb.slice(1,4).join(',');
     else if(d.value==='white')channels='255,255,255';
     else if(d.value==='black')channels='0,0,0';
-    if(channels){d.cloneAfter({prop:d.prop+'-mc-rgb',value:channels});available.add(d.prop);}
+    if(channels)d.cloneAfter({prop:d.prop+'-mc-rgb',value:channels});
   });
-  root.walkDecls(d=>{d.value=d.value.replace(mix,(full,token,percent)=>available.has(token)?'rgba(var('+token+'-mc-rgb), '+Number(percent)/100+')':full);});
+  root.walkDecls(d=>{d.value=d.value.replace(mix,(full,token,percent)=>'rgba(var('+token+'-mc-rgb), '+Number(percent)/100+')');});
   root.walkAtRules('supports',rule=>{
     if(!/^\(color:\s*color-mix\(/.test(rule.params))return;
     let unsupported=false;rule.walkDecls(d=>{if(/color-mix\(|oklch\(|oklab\(/.test(d.value))unsupported=true;});

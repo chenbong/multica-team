@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const CONFIG_PATH = resolve(ROOT, "config.local.json");
+const CONFIG_PATH = resolve(process.env.INFOFLOW_CONFIG_PATH || resolve(ROOT, "config.local.json"));
 // Every deployment target is a configuration value, never a literal: this
 // repository is published publicly, so hostnames, registries and the e-mail
 // domains allowed to log in live in config.local.json / the environment
@@ -56,7 +56,10 @@ export function loadConfig() {
       infoflowConsoleUrl: String(file.admin?.infoflowConsoleUrl ?? "").trim().replace(/\/+$/, ""),
     },
     multica,
-    robots: migrateRobots(file).map(normalizeRobot),
+    robots: migrateRobots(file).map(normalizeRobot).map(robot =>
+      process.env.INFOFLOW_STANDBY === "true" && robot.purpose !== "verification"
+        ? { ...robot, enabled: false }
+        : robot),
     // Group ids that receive a copy of every verification message sent by the
     // shared verification robot. The robot must already be a member of each
     // group; a group that rejects the message never blocks the direct send.
@@ -68,7 +71,7 @@ export function loadConfig() {
     migratedFromLegacy: !Array.isArray(file.robots) && Boolean(file.infoflow?.appKey),
     pollIntervalMs: file.pollIntervalMs ?? 5000,
     pollTimeoutMs: file.pollTimeoutMs ?? 30 * 60 * 1000,
-    statePath: resolve(ROOT, "state.json"),
+    statePath: resolve(process.env.INFOFLOW_STATE_PATH || resolve(ROOT, "state.json")),
   };
 }
 

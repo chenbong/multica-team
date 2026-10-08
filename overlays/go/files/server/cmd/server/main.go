@@ -17,16 +17,19 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/database"
 	"github.com/multica-ai/multica/server/internal/dbreader"
 	"github.com/multica-ai/multica/server/internal/dbstartup"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
 	"github.com/multica-ai/multica/server/internal/logger"
+	"github.com/multica-ai/multica/server/internal/maintenance"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/profiling"
 	"github.com/multica-ai/multica/server/internal/realtime"
 	"github.com/multica-ai/multica/server/internal/scheduler"
+	"github.com/multica-ai/multica/server/internal/selfhosttelemetry"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/featureflag"
@@ -39,14 +42,14 @@ var (
 	commit  = "unknown"
 )
 
-func newNamedRedisClient(base *redis.Options, suffix string) *redis.Client {
+func newNamedRedisClient(base *redis.UniversalOptions, suffix string) redis.UniversalClient {
 	opts := *base
 	if envBool("REDIS_DISABLE_CLIENT_NAME", false) {
 		opts.ClientName = ""
 	} else {
 		opts.ClientName = redisClientName(opts.ClientName, suffix)
 	}
-	return redis.NewClient(&opts)
+	return redis.NewUniversalClient(&opts)
 }
 
 // newClaimRedisClient is a named client that honours its callers' context
@@ -63,7 +66,7 @@ func newNamedRedisClient(base *redis.Options, suffix string) *redis.Client {
 // Hence a dedicated client rather than the flag on the shared relay client:
 // setting it there would change the timeout behaviour of every publish that
 // runs through it, which is a far wider blast radius than this store needs.
-func newClaimRedisClient(base *redis.Options, suffix string) *redis.Client {
+func newClaimRedisClient(base *redis.UniversalOptions, suffix string) redis.UniversalClient {
 	opts := *base
 	opts.ContextTimeoutEnabled = true
 	return newNamedRedisClient(&opts, suffix)
@@ -79,21 +82,7 @@ func redisClientName(existing, suffix string) string {
 	return "multica-api:" + suffix
 }
 
-func channelLeaseRedisURLFromEnv() string {
-	if dedicated := strings.TrimSpace(os.Getenv("CHANNEL_WS_LEASE_REDIS_URL")); dedicated != "" {
-		return dedicated
-	}
-	return strings.TrimSpace(os.Getenv("REDIS_URL"))
-}
-
-func realtimeRelayRedisURLFromEnv() string {
-	if dedicated := strings.TrimSpace(os.Getenv("REALTIME_RELAY_REDIS_URL")); dedicated != "" {
-		return dedicated
-	}
-	return strings.TrimSpace(os.Getenv("REDIS_URL"))
-}
-
-func closeRedisClient(label string, client *redis.Client) {
+func closeRedisClient(label string, client redis.UniversalClient) {
 	if client == nil {
 		return
 	}
@@ -133,6 +122,13 @@ func realtimeRelayModeFromEnv() string {
 		slog.Warn("invalid env var, using default", "name", "REALTIME_RELAY_MODE", "value", raw, "default", defaultMode)
 		return defaultMode
 	}
+}
+
+func validateRealtimeRelayMode(mode string, clusterMode bool) error {
+	if clusterMode && mode != "sharded" {
+		return fmt.Errorf("REALTIME_RELAY_MODE=%s is incompatible with REDIS_CLUSTER_MODE=true; use sharded mode", mode)
+	}
+	return nil
 }
 
 func envPositiveInt(name string, def int) int {
@@ -199,6 +195,25 @@ func parseLLMMaxRetries(raw string) (*llm.RetryOverride, error) {
 		return nil, fmt.Errorf("must not be negative, got %d (use 0 to disable retries)", v)
 	}
 	return override, nil
+}
+
+// parseLLMDisableThinking turns the raw MULTICA_LLM_DISABLE_THINKING value
+// into the bool llm.Config.DisableThinking expects. It follows the
+// parseLLMMaxRetries contract: unset is a valid state (the knob stays off),
+// and anything that does not read as a deliberate true/false stops the boot
+// instead of being coerced — a typo'd "ture" that silently did nothing would
+// leave an operator debugging latency the configuration claims to remove.
+func parseLLMDisableThinking(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return false, nil
+	case "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("must be a boolean (true/false or 1/0), got %q", raw)
+	}
 }
 
 func envPositiveInt64(name string, def int64) int64 {
@@ -311,6 +326,10 @@ func newMainHTTPServer(addr string, handler http.Handler) *http.Server {
 
 func main() {
 	logger.Init()
+	// Read the opt-out before constructing any telemetry dependency. In the
+	// disabled case no collector or HTTP client is ever created.
+	telemetryConfig := selfhosttelemetry.ConfigFromDoNotTrack(os.Getenv("DO_NOT_TRACK"))
+	selfhosttelemetry.LogStartupStatus(slog.Default(), telemetryConfig)
 	// Warn about missing configuration
 	if err := jwtSecretBootError(os.Getenv("JWT_SECRET"), os.Getenv("APP_ENV")); err != nil {
 		slog.Error(
@@ -406,6 +425,7 @@ func main() {
 		}
 	}
 
+	standby := envBool("MULTICA_STANDBY", false)
 	bus := events.New()
 	hub := realtime.NewHub()
 	go hub.Run()
@@ -430,17 +450,18 @@ func main() {
 	// is the sole broadcaster and the server stays single-node (legacy).
 	// Runtime local-skill stores and realtime relay traffic use separate Redis
 	// clients so blocking stream consumers cannot starve request-path Redis
-	// operations. Channel leases are initialized separately below so production
-	// can point them at a dedicated no-eviction Redis instance.
+	// operations. Channel leases are initialized separately below from the same
+	// global Redis configuration.
 	relayCtx, relayCancel := context.WithCancel(context.Background())
 	var broadcaster realtime.Broadcaster = hub
-	var storeRedis *redis.Client
-	var channelLeaseRedis *redis.Client
-	var relayWriteRedis *redis.Client
-	var wecomClaimRedis *redis.Client
-	var relayReadRedis *redis.Client
-	var shardedReadRedis *redis.Client
-	var legacyReadRedis *redis.Client
+	var storeRedis redis.UniversalClient
+	var storeRedisPoolSize int
+	var channelLeaseRedis redis.UniversalClient
+	var relayWriteRedis redis.UniversalClient
+	var wecomClaimRedis redis.UniversalClient
+	var relayReadRedis redis.UniversalClient
+	var shardedReadRedis redis.UniversalClient
+	var legacyReadRedis redis.UniversalClient
 	var relay realtime.ManagedRelay
 	// stopRelay halts the relay readers and drains the WeCom dispatcher. It is
 	// called from the shutdown BODY, before the channel supervisor is torn
@@ -476,25 +497,34 @@ func main() {
 		closeRedisClient("store", storeRedis)
 	}()
 	sharedRedisURL := strings.TrimSpace(os.Getenv("REDIS_URL"))
-	relayRedisURL := realtimeRelayRedisURLFromEnv()
-	if (sharedRedisURL != "" || relayRedisURL != "") && envBool("REDIS_DISABLE_CLIENT_NAME", false) {
+	redisClusterMode := envBool("REDIS_CLUSTER_MODE", false)
+	// Main parses shared options instead of using database.NewRedisClient so it
+	// can create separate role-specific pools. Request-path clients must also
+	// survive a transient startup outage; relay and lease components own their
+	// existing bounded readiness probes and failure policies.
+	if sharedRedisURL != "" && envBool("REDIS_DISABLE_CLIENT_NAME", false) {
 		slog.Info("redis: CLIENT SETNAME disabled (REDIS_DISABLE_CLIENT_NAME=true) for managed Redis compatibility")
 	}
 	if sharedRedisURL != "" {
-		if opts, err := redis.ParseURL(sharedRedisURL); err != nil {
+		if opts, err := database.NewRedisOptions(database.RedisConfig{URL: sharedRedisURL, ClusterMode: redisClusterMode}); err != nil {
 			slog.Error("invalid REDIS_URL — request-path Redis features disabled", "error", err)
 		} else {
 			storeRedis = newNamedRedisClient(opts, "store")
+			storeRedisPoolSize = opts.PoolSize
 		}
 	}
-	if relayRedisURL != "" {
-		opts, err := redis.ParseURL(relayRedisURL)
+	if sharedRedisURL != "" && !standby {
+		opts, err := database.NewRedisOptions(database.RedisConfig{URL: sharedRedisURL, ClusterMode: redisClusterMode})
 		if err != nil {
-			slog.Error("invalid realtime relay Redis URL — falling back to in-memory hub", "error", err)
+			slog.Error("invalid REDIS_URL — realtime relay falling back to in-memory hub", "error", err)
 		} else {
+			relayMode := realtimeRelayModeFromEnv()
+			if err := validateRealtimeRelayMode(relayMode, redisClusterMode); err != nil {
+				slog.Error("invalid realtime relay configuration", "error", err)
+				os.Exit(1)
+			}
 			relayWriteRedis = newNamedRedisClient(opts, "realtime-write")
 
-			relayMode := realtimeRelayModeFromEnv()
 			relayConfig := shardedRelayConfigFromEnv()
 			switch relayMode {
 			case "legacy":
@@ -544,15 +574,10 @@ func main() {
 			// silently misses it.
 			relay.Start(relayCtx)
 			broadcaster = realtime.NewDualWriteBroadcaster(hub, relay)
-			storePoolSize := 0
-			if storeRedis != nil {
-				storePoolSize = storeRedis.Options().PoolSize
-			}
 			slog.Info(
 				"realtime: Redis relay enabled",
 				"node_id", relay.NodeID(),
 				"mode", relayMode,
-				"dedicated_instance", strings.TrimSpace(os.Getenv("REALTIME_RELAY_REDIS_URL")) != "",
 				"shards", relayConfig.Shards,
 				"stream_max_len", relayConfig.StreamMaxLen,
 				"replay_grace", relayConfig.ReplayGrace.String(),
@@ -561,19 +586,20 @@ func main() {
 				"stream_ttl_enabled", relayConfig.StreamTTLEnabled,
 				"xread_count", relayConfig.ReadCount,
 				"xread_block", relayConfig.ReadBlock.String(),
-				"store_pool_size", storePoolSize,
+				"store_pool_size", storeRedisPoolSize,
 				"realtime_write_pool_size", opts.PoolSize,
 				"realtime_read_pool_size", opts.PoolSize,
 			)
 		}
+	} else if standby {
+		slog.Info("standby validation mode: realtime relay and outbound replay are disabled")
 	} else {
-		slog.Info("realtime: REDIS_URL and REALTIME_RELAY_REDIS_URL are unset — using in-memory hub (single-node mode)")
+		slog.Info("realtime: REDIS_URL is unset — using in-memory hub (single-node mode)")
 	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("CHANNEL_WS_LEASE_BACKEND")), "redis") {
-		leaseRedisURL := channelLeaseRedisURLFromEnv()
-		if leaseRedisURL == "" {
-			slog.Error("channel leases: CHANNEL_WS_LEASE_REDIS_URL and REDIS_URL are unset")
-		} else if opts, err := redis.ParseURL(leaseRedisURL); err != nil {
+		if sharedRedisURL == "" {
+			slog.Error("channel leases: REDIS_URL is unset")
+		} else if opts, err := database.NewRedisOptions(database.RedisConfig{URL: sharedRedisURL, ClusterMode: redisClusterMode}); err != nil {
 			slog.Error("channel leases: invalid Redis URL; supervisor will fail closed", "error", err)
 		} else {
 			channelLeaseRedis = newNamedRedisClient(opts, "channel-lease")
@@ -581,7 +607,10 @@ func main() {
 	}
 	registerListeners(bus, broadcaster)
 
-	analyticsClient := analytics.NewFromEnv()
+	var analyticsClient analytics.Client = analytics.NoopClient{}
+	if !standby {
+		analyticsClient = analytics.NewFromEnv()
+	}
 	defer analyticsClient.Close()
 
 	queries := db.New(pool)
@@ -648,6 +677,14 @@ func main() {
 		readRecorder = dbRoutingMetrics
 	}
 
+	// Same contract for the thinking-off hint: an unparseable value must stop
+	// the boot rather than read as "disabled" and look configured.
+	llmDisableThinking, err := parseLLMDisableThinking(os.Getenv("MULTICA_LLM_DISABLE_THINKING"))
+	if err != nil {
+		slog.Error("invalid MULTICA_LLM_DISABLE_THINKING", "error", err)
+		os.Exit(1)
+	}
+
 	r, h := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
 		HTTPMetrics:         httpMetrics,
 		BusinessMetrics:     businessMetrics,
@@ -661,6 +698,7 @@ func main() {
 		FeatureFlags:        flags,
 		HeartbeatScheduler:  heartbeatScheduler,
 		LLMMaxRetries:       llmMaxRetries,
+		LLMDisableThinking:  llmDisableThinking,
 	})
 	var replicaQueries *db.Queries
 	if replicaPool != nil {
@@ -678,10 +716,25 @@ func main() {
 
 	srv := newMainHTTPServer(os.Getenv("MULTICA_BIND_HOST")+":"+port, r)
 	profilingServer := profiling.NewServer()
+	maintenanceServer, maintenanceErr := maintenance.NewServer(os.Getenv("MAINTENANCE_PORT"), maintenance.NewService(pool, maintenance.StatusCategory{}))
+	if maintenanceErr != nil {
+		slog.Error("maintenance listener disabled", "error", maintenanceErr)
+	}
 
 	// Start background workers.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	autopilotCtx, autopilotCancel := context.WithCancel(context.Background())
+	// Migration validation must not replay copied schedules or outbound work.
+	// HTTP remains available; promotion requires an explicit environment change.
+	if standby {
+		sweepCancel()
+		autopilotCancel()
+		slog.Warn("standby validation mode: background workers and schedules are disabled")
+	}
+	var telemetryWorker *selfhosttelemetry.Worker
+	if !standby {
+		telemetryWorker = selfhosttelemetry.New(pool, version, telemetryConfig, slog.Default())
+	}
 	// Reuse the router's services here. In particular, the router wires the
 	// EmptyClaim cache into TaskService; constructing a second TaskService for
 	// scheduled Autopilot dispatch would send the daemon wakeup without bumping
@@ -712,6 +765,9 @@ func main() {
 	// work, so there is no separate queue TTL to tune: a busy runtime keeps its
 	// backlog, and a departed one retires everything it owned at once.
 	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus, runtimeReconnectGrace)
+	if telemetryWorker != nil {
+		go telemetryWorker.Run(sweepCtx)
+	}
 	go runDelegatedFailureRecoverySweeper(sweepCtx, taskSvc)
 	// Seven-day runtime retention does not share the 30-second liveness tick:
 	// its bounded transactions run independently once per hour, so a slow GC
@@ -785,6 +841,15 @@ func main() {
 	// not fit). Crash recovery, occurrence-level idempotency, lease
 	// theft, and retry are all reused from the manager + sys_cron_executions
 	// — there is no separate goroutine for scheduled Autopilot anymore.
+	if err := schedulerMgr.Register(scheduler.SearchIndexChangePruneJob(queries)); err != nil {
+		slog.Warn("scheduler: failed to register search index change prune job", "error", err)
+	}
+	if err := schedulerMgr.Register(scheduler.IssueWakeupJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
+		slog.Error("scheduler: register issue wakeups", "error", err)
+	}
+	if err := schedulerMgr.Register(scheduler.ChildEventSweepJob(&service.IssueWakeupService{Tasks: taskSvc})); err != nil {
+		slog.Error("scheduler: register child-done sweep", "error", err)
+	}
 	if err := schedulerMgr.Register(scheduler.AutopilotScheduleDispatchJob(pool, queries, autopilotSvc)); err != nil {
 		slog.Warn("scheduler: failed to register autopilot_schedule_dispatch job", "error", err)
 	}
@@ -802,6 +867,15 @@ func main() {
 			slog.Info("metrics server starting", "addr", metricsConfig.Addr)
 			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("metrics server disabled after startup error", "error", err)
+			}
+		}()
+	}
+
+	if maintenanceServer != nil {
+		go func() {
+			slog.Info("maintenance server starting", "addr", maintenanceServer.Addr)
+			if err := maintenanceServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("maintenance listener disabled", "error", err)
 			}
 		}()
 	}
@@ -839,6 +913,17 @@ func main() {
 	// finds no socket to deliver over.
 	shutdownSequence{
 		StopAutopilot: autopilotCancel,
+		DrainMaintenance: func() {
+			if maintenanceServer == nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 16*time.Second)
+			defer cancel()
+			if err := maintenanceServer.Shutdown(ctx); err != nil {
+				slog.Error("maintenance shutdown interrupted", "error", err)
+				_ = maintenanceServer.Close()
+			}
+		},
 		DrainHTTP: func() {
 			apiShutdownCtx, apiShutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := srv.Shutdown(apiShutdownCtx); err != nil {

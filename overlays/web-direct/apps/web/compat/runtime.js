@@ -1,5 +1,5 @@
 import cssHasPseudo from './node_modules/css-has-pseudo/dist/browser.mjs';
-import './node_modules/core-js/actual/structured-clone.js';
+import './es-builtins.cjs';
 
 // Loaded by Next instrumentation-client before hydration. Core-js preserves native
 // structuredClone when it is usable, and supports cycles, Map, Set and typed arrays.

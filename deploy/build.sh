@@ -20,11 +20,14 @@ cd "$INSTANCE_DIR/multica/server"
 go test -overlay="$OVERLAY_JSON" -run '^$' \
   ./cmd/server ./internal/daemon/... ./internal/handler ./internal/service ./pkg/agent ./pkg/db/generated
 COMMIT="$(git -C "$INSTANCE_DIR/multica" rev-parse --short HEAD)"
+UPSTREAM_TAG="$(git -C "$INSTANCE_DIR/multica" describe --tags --match 'v[0-9]*' --abbrev=0 2>/dev/null || true)"
+CLI_BASE_VERSION="${UPSTREAM_TAG#v}"
+CLI_VERSION="${CLI_BASE_VERSION:-$COMMIT}-overlay"
 go build -overlay="$OVERLAY_JSON" \
   -ldflags "-X main.commit=$COMMIT-overlay" \
   -o "$DEPLOY_DIR/bin/server" ./cmd/server
 go build -overlay="$OVERLAY_JSON" \
-  -ldflags "-X main.version=0.4.42-overlay -X main.commit=$COMMIT-overlay" \
+  -ldflags "-X main.version=$CLI_VERSION -X main.commit=$COMMIT-overlay" \
   -o "$DEPLOY_DIR/bin/multica" ./cmd/multica
 go build -o "$DEPLOY_DIR/bin/migrate" ./cmd/migrate
 

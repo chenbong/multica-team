@@ -21,3 +21,12 @@ infoflow-bridge/package-lock.json
 overlays/go-overlay.json
 overlays/upstream.json
 __pycache__/
+# Local build output, upgrade evidence and private deployment snapshots.
+/build/
+/dist/
+overlays/go/.v061-port-*/
+overlays/go/.pg-plugin-*/
+overlays/go/overlay.json
+scripts/v061-db-*.json
+scripts/v061-db-migrate
+scripts/v061-db-probe
