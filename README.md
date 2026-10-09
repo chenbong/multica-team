@@ -66,6 +66,40 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
     「添加电脑」下发的命令同样可以预置这一行（`deploy/host.env` 里的
     `MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS=ducc`），用户复制即可，无需在每台机器上手工维护脚本。
 
+## 可选：OneAPI 模型目录
+
+API 服务可为 `ducc`（Claude 协议）和 `ducx`（Codex 协议）的模型下拉框直接查询 OneAPI，
+无需升级或重启 daemon。普通 Claude、Codex 和其他自定义运行时继续走原来的模型发现流程。
+配置仅影响模型目录，不改变智能体推理时使用的账号、网关或已保存的模型。
+
+在 API 服务的私有环境配置中设置：
+
+```bash
+MULTICA_ONEAPI_CATALOG_URL=https://gateway.example.com/v1/models
+MULTICA_ONEAPI_CATALOG_TOKEN_FILE=/run/secrets/oneapi-catalog.token
+MULTICA_ONEAPI_CATALOG_PROTOCOLS_FILE=/etc/multica/model-protocols.json
+```
+
+令牌文件必须是仅当前服务账号可读的普通文件（例如 `0600`），不可放入代码仓库。
+目录请求只使用 HTTPS、禁用重定向及代理，不把令牌或上游错误正文返回网页。
+未配置目录 URL 时，功能保持关闭。
+若精简镜像缺少系统 CA，可用 `MULTICA_ONEAPI_CATALOG_CA_FILE` 指定可信的 PEM 根证书文件；
+该信任配置仅作用于模型目录客户端，始终保留证书与主机名校验。
+
+模型名称实时来自 `/v1/models`，缓存 5 分钟，模型选择器的刷新按钮会主动重新查询。
+当接口没有返回 `supported_endpoint_types` 时，通过外部 JSON 清单声明已确认的协议：
+
+```json
+{"messages":["documented-messages-model"],"responses":["documented-responses-model"]}
+```
+
+`ducc` 使用 Messages 列表，`ducx` 使用 Responses 列表；Chat Completions 兼容不等于
+Responses 兼容。最终选项是实时模型名称与对应协议清单的交集，不按品牌推断。
+协议清单与令牌文件修改后，下次目录请求即可读取新内容；未知协议模型仍可手动输入。
+若上游提供明确的协议元数据，则优先使用该元数据，包括明确的不兼容结果。
+查询失败会显示错误并保留手动输入，不覆盖已有模型，也不会用目录猜测思考强度或服务等级。
+目录存在及协议兼容不代表该模型实时健康、每个用户都有调用权限，或工具调用等能力均已验证。
+
 ## 快速开始
 
 ```bash

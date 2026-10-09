@@ -66,6 +66,13 @@ jobs:
           export GOFLAGS="-overlay=$workspace/overlays/go-overlay.json -mod=readonly"
           go test ./internal/daemon -run 'Test(Ducc|Ducx|RunDucxSetupCommand|PrepareDucxRuntimeWithoutShellReload)' -count=1
 
+      - name: Test OneAPI catalog with isolated HTTP and credential fixtures
+        working-directory: multica/server
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          go test -overlay="$workspace/overlays/go-overlay.json" ./pkg/agent -run '^TestOneAPI' -count=1
+
       - name: Fail if the build touched the upstream checkout
         run: |
           set -euo pipefail

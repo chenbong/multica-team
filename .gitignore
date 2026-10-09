@@ -30,3 +30,5 @@ overlays/go/overlay.json
 scripts/v061-db-*.json
 scripts/v061-db-migrate
 scripts/v061-db-probe
+# Model-catalog credentials belong only in the deployment's protected config.
+**/oneapi-catalog.token
