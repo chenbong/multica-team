@@ -65,6 +65,10 @@ func TestOneAPIRuntimeCatalogEndpoint(t *testing.T) {
 			if got.Status != ModelListCompleted || !got.Supported || len(got.Models) != 1 || got.Models[0].ID != tc.protocol+"-fixture" {
 				t.Fatalf("wrong catalog: %+v", got)
 			}
+			thinking := got.Models[0].Thinking
+			if thinking == nil || len(thinking.SupportedLevels) != 5 || thinking.SupportedLevels[4].Value != "max" || thinking.DefaultLevel != "" {
+				t.Fatalf("gateway thinking picker missing or overriding the CLI default: %+v", thinking)
+			}
 			testutil.Call(t, h.InitiateListModels, request("?force=true")).Want(200).JSON(&got)
 			if len(catalog.calls) != 2 || catalog.calls[0] != tc.protocol || !catalog.forced[1] {
 				t.Fatal("refresh ignored")

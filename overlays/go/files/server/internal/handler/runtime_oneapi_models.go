@@ -63,11 +63,18 @@ func (h *Handler) serveOneAPIModelCatalog(w http.ResponseWriter, r *http.Request
 	}
 	reply.Models = make([]ModelEntry, 0, len(result.Models))
 	for _, model := range result.Models {
-		reply.Models = append(reply.Models, ModelEntry{ID: model.ID, Label: model.Label, Provider: model.Provider})
+		entry := ModelEntry{ID: model.ID, Label: model.Label, Provider: model.Provider}
+		if thinking := agent.OneAPIThinking(rt.Provider); thinking != nil {
+			entry.Thinking = &ModelThinking{}
+			for _, level := range thinking.SupportedLevels {
+				entry.Thinking.SupportedLevels = append(entry.Thinking.SupportedLevels, ThinkingLevel{Value: level.Value, Label: level.Label})
+			}
+		}
+		reply.Models = append(reply.Models, entry)
 	}
 	reply.Cached, reply.CachedAt = result.Cached, &result.StoredAt
 	// Keep gateway discovery separate from the daemon's capability cache:
-	// a list of model names cannot attest CLI-specific effort or service tiers.
+	// the gateway picker policy does not attest CLI-specific service tiers.
 	writeJSON(w, http.StatusOK, reply)
 	return true
 }

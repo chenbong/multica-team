@@ -676,7 +676,7 @@ func catalogLoader(ctx context.Context, providerType string, cmd Command) func()
 // daemon's pre-execution guard and the server's UpdateAgent gate can
 // share the same source of truth.
 func ValidateThinkingLevel(ctx context.Context, providerType string, cmd Command, model, value string) (bool, error) {
-	return ValidateThinkingLevelWith(catalogLoader(ctx, providerType, cmd), providerType, model, value)
+	return ValidateRuntimeThinkingLevelWith(catalogLoader(ctx, providerType, cmd), providerType, cmd, model, value)
 }
 
 // ValidateThinkingLevelWith is ValidateThinkingLevel over a caller-supplied
