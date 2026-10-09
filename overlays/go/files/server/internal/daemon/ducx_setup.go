@@ -84,7 +84,21 @@ func runDucxSetupCommand(ctx context.Context, executable, username string, args 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, append([]string{"--username", username}, args...)...)
+	commandArgs := append([]string{"--username", username}, args...)
+	// The wrapper recognizes `config model` only as the leading subcommand.
+	// It writes HOME-local settings without authenticating. Doctor still needs
+	// the explicit account so another user's default login is never selected.
+	if len(args) == 3 && args[0] == "config" && args[1] == "model" {
+		commandArgs = args
+	}
+	cmd := exec.CommandContext(ctx, executable, commandArgs...)
+	// Installer shell edits are not inherited. Include sibling helpers without
+	// changing this process's PATH or requiring a shell configuration reload.
+	commandPath := filepath.Dir(executable)
+	if inheritedPath := os.Getenv("PATH"); inheritedPath != "" {
+		commandPath += string(os.PathListSeparator) + inheritedPath
+	}
+	cmd.Env = append(cmd.Environ(), "PATH="+commandPath)
 	configureDuccProcess(cmd)
 	var out ducxBoundedOutput
 	cmd.Stdout, cmd.Stderr = &out, io.Discard

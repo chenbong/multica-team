@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -241,5 +242,125 @@ func TestDucxOutputIsBounded(t *testing.T) {
 	data := make([]byte, ducxOutputLimit+10)
 	if n, err := out.Write(data); n != len(data) || err != nil || !out.truncated || out.Len() != ducxOutputLimit {
 		t.Fatal("output limit failed")
+	}
+}
+
+func TestRunDucxSetupCommandArguments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Baidu runtime installation supports Unix hosts only")
+	}
+	executable := filepath.Join(t.TempDir(), "ducx")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"wrapper model configuration", []string{"config", "model", "gpt-6-sol"}, "config\nmodel\ngpt-6-sol\n"},
+		{"account-scoped authentication", []string{"doctor", "--json"}, "--username\nalice\ndoctor\n--json\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runDucxSetupCommand(context.Background(), executable, "alice", tc.args)
+			if err != nil || string(out) != tc.want {
+				t.Fatalf("args = %q, want %q; err = %v", out, tc.want, err)
+			}
+		})
+	}
+}
+
+func TestPrepareDucxRuntimeWithoutShellReload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Baidu runtime installation supports Unix hosts only")
+	}
+	home := t.TempDir()
+	bin := filepath.Join(home, ".baidu-cx", "baidu-cx", "bin")
+	if err := os.MkdirAll(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Resolve only test-created executables; never inspect a user's installed CLI.
+	emptyPath := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", emptyPath)
+	if err := writeDuccCredential(home, "alice", []byte("fixture-login")); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+set -eu
+case "$1" in
+  config)
+    [ "$#" = 3 ] && [ "$2" = model ]
+    printf '{"model":"%s"}' "$3" > "$HOME/.baidu-cx/user.json"
+    ;;
+  --username)
+    [ "$#" = 4 ] && [ "$2" = alice ] && [ "$3" = doctor ] && [ "$4" = --json ]
+    ducx-fixture-helper
+    ;;
+  *) exit 23 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "ducx"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	helper := "#!/bin/sh\nprintf '%s\\n' '" + readyDucxDoctor + "'\n"
+	if err := os.WriteFile(filepath.Join(bin, "ducx-fixture-helper"), []byte(helper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultDucxSetupOps()
+	ops.install = func(context.Context, string, func(string)) error {
+		t.Fatal("standard installation was not found without PATH")
+		return nil
+	}
+	if err := prepareDucxRuntime(context.Background(), home, "alice", nil, ops); err != nil {
+		t.Fatal(err)
+	}
+	if model, err := configuredDucxModel(home); err != nil || model != ducxDefaultModel {
+		t.Fatalf("model = %q; err = %v", model, err)
+	}
+	writeDucxFixture(t, home, "user.json", `{"model":"keep-existing-model"}`)
+	if err := prepareDucxRuntime(context.Background(), home, "alice", nil, ops); err != nil {
+		t.Fatal(err)
+	}
+	if model, err := configuredDucxModel(home); err != nil || model != "keep-existing-model" {
+		t.Fatalf("existing model changed: %q; err = %v", model, err)
+	}
+	if os.Getenv("PATH") != emptyPath {
+		t.Fatal("setup changed the parent process PATH")
+	}
+}
+
+func TestRunDucxSetupCommandRedactsFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Baidu runtime installation supports Unix hosts only")
+	}
+	executable := filepath.Join(t.TempDir(), "ducx")
+	script := "#!/bin/sh\nprintf private-output\nprintf private-error >&2\nexit 1\n"
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runDucxSetupCommand(context.Background(), executable, "alice", []string{"config", "model", ducxDefaultModel})
+	if len(out) != 0 || err == nil || err.Error() != "ducx_command_failed" {
+		t.Fatal("child output leaked or failure hidden")
+	}
+	out, err = runDucxSetupCommand(context.Background(), executable, "../bob", []string{"config", "model", ducxDefaultModel})
+	if len(out) != 0 || err == nil || err.Error() != "ducx_invalid_identity_or_executable" {
+		t.Fatal("invalid account accepted")
+	}
+}
+
+func TestRunDucxSetupCommandEmptyPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Baidu runtime installation supports Unix hosts only")
+	}
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "ducx")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf '%s' \"$PATH\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+	out, err := runDucxSetupCommand(context.Background(), executable, "alice", []string{"config", "model", ducxDefaultModel})
+	if err != nil || string(out) != dir {
+		t.Fatalf("empty PATH gained an unintended search directory: %q; err = %v", out, err)
 	}
 }

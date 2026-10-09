@@ -56,6 +56,16 @@ jobs:
             ./cmd/server ./cmd/multica ./internal/cli ./internal/daemon/... ./internal/handler \
             ./internal/service ./pkg/agent ./pkg/db/generated
 
+      - name: Test ducc and ducx preparation with fixture CLIs
+        working-directory: multica/server
+        env:
+          MULTICA_RUN_REAL_AGENT_SMOKE: "0"
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          export GOFLAGS="-overlay=$workspace/overlays/go-overlay.json -mod=readonly"
+          go test ./internal/daemon -run 'Test(Ducc|Ducx|RunDucxSetupCommand|PrepareDucxRuntimeWithoutShellReload)' -count=1
+
       - name: Fail if the build touched the upstream checkout
         run: |
           set -euo pipefail

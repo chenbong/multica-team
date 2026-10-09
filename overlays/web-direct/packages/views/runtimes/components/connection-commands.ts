@@ -59,24 +59,24 @@ export NO_PROXY="$no_proxy"
 export https_proxy="http://agent.baidu.com:8188"
 export http_proxy="$https_proxy"`;
   const path = windows
-    ? '$env:PATH = "$env:USERPROFILE\\.baidu-cc\\baidu-cc\\bin;$env:USERPROFILE\\.comate\\baidu-cc\\bin;$env:PATH"'
-    : 'export PATH="$HOME/.baidu-cc/baidu-cc/bin:$HOME/.comate/baidu-cc/bin:$PATH"';
+    ? '$env:PATH = "$env:USERPROFILE\\.baidu-cc\\baidu-cc\\bin;$env:USERPROFILE\\.comate\\baidu-cc\\bin;$env:USERPROFILE\\.baidu-cx\\baidu-cx\\bin;$env:USERPROFILE\\.comate\\baidu-cx\\bin;$env:PATH"'
+    : 'export PATH="$HOME/.baidu-cc/baidu-cc/bin:$HOME/.comate/baidu-cc/bin:$HOME/.baidu-cx/baidu-cx/bin:$HOME/.comate/baidu-cx/bin:$PATH"';
 
-  return `# 1. 配置网络并安装 Multica CLI / Configure network and install Multica CLI
+  return `# 1. 配置网络并安装 Multica CLI
 ${network}
 
 ${install}
 
-# 2. 配置平台地址并登录 / Configure platform URLs and sign in
+# 2. 配置平台地址并登录
 ${cli} config set server_url ${quote(serverUrl)}
 ${cli} config set app_url ${quote(appUrl)}
 ${cli} login --token ${quote(options.token || "<YOUR_TOKEN>")}
-# 3. 配置运行时并准备 ducc / Configure runtimes and prepare ducc
-${defaults ? `\n${defaults}\n` : ""}
-${cli} ducc setup
+
+# 3. 配置运行时并准备 ducc、ducx
+${defaults ? `${defaults}\n\n` : ""}${cli} ducc setup
 ${path}
 ducc config model 'Opus 4.8'
 
-# 4. 启动守护进程，连接平台 / Start the daemon and connect
+# 4. 启动守护进程，连接平台
 ${cli} daemon start`;
 }
