@@ -8,8 +8,8 @@ import (
 )
 
 func init() {
-	command := &cobra.Command{Use: "ducc", Short: "Prepare the current user's ducc runtime"}
-	command.AddCommand(&cobra.Command{Use: "setup", Short: "Install ducc if needed and synchronize your own login credential", RunE: func(cmd *cobra.Command, args []string) error {
+	command := &cobra.Command{Use: "ducc", Short: "Prepare the current user's ducc and ducx runtimes"}
+	command.AddCommand(&cobra.Command{Use: "setup", Short: "Prepare ducc and ducx using your shared login credential", RunE: func(cmd *cobra.Command, args []string) error {
 		profile := resolveProfile(cmd)
 		cfg, err := cli.LoadCLIConfigForProfile(profile)
 		if err != nil {
@@ -25,7 +25,7 @@ func init() {
 		if err = daemon.PrepareDucc(cmd.Context(), resolveDaemonServerURL(cmd, profile), cfg.Token, id, version, func(message string) { fmt.Fprintln(cmd.OutOrStdout(), message) }); err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), "ducc preparation finished; check your profile settings for credential status")
+		fmt.Fprintln(cmd.OutOrStdout(), "Runtime preparation finished; credential policy and provider check results are shown above")
 		return nil
 	}})
 	rootCmd.AddCommand(command)

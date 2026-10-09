@@ -3135,9 +3135,9 @@ func (d *Daemon) appendProfileRuntimes(ctx context.Context, workspaceID string, 
 		}
 		if resolved == "" {
 			r, err := lookPath(profile.CommandName)
-			if err != nil && profile.CommandName == "ducc" {
+			if err != nil && (profile.CommandName == "ducc" || profile.CommandName == "ducx") {
 				if home, homeErr := os.UserHomeDir(); homeErr == nil {
-					if installed := duccInstalledExecutable(home); installed != "" {
+					if installed := installedBaiduExecutable(home, profile.CommandName); installed != "" {
 						r, err = installed, nil
 					}
 				}

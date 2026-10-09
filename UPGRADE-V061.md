@@ -24,7 +24,7 @@ python3 overlays/prepare.py --check
 python3 scripts/v061-web-patch-test.py
 ```
 
-The Go build uses the version from `multica/server/go.mod` and 48 source overlays.
+The Go build uses the version from `multica/server/go.mod` and 50 source overlays.
 The frontend uses a separate staging tree and checked patches rather than editing
 the submodule. Optional branding remains deployment configuration.
 

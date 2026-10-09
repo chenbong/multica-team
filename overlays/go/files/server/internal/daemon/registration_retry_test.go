@@ -32,34 +32,40 @@ func TestRegistrationRetryBackoff(t *testing.T) {
 	}
 }
 
-func TestRegistrationFindsInstalledDuccWithoutParentPATH(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("MULTICA_DAEMON_RUNTIME_SHIMS", "")
-	stubLookPath(t, map[string]string{})
-	t.Cleanup(stubAgentVersion(t))
-	profiles := []RuntimeProfile{{ID: "ducc-profile", WorkspaceID: "ws-1", DisplayName: "ducc", ProtocolFamily: "claude", CommandName: "ducc", Enabled: true}}
-	fx := newProfileRegisterFixture(t, profiles, http.StatusOK)
-	fx.daemon.cfg.Agents = map[string]AgentEntry{}
-	first, _, err := fx.daemon.registerRuntimesForWorkspaceBatchLocked(context.Background(), "ws-1", nil)
-	if err != nil || len(first.Runtimes) != 0 {
-		t.Fatalf("expected failed profile placeholder: %v", err)
-	}
-	if _, _, err = fx.daemon.registerRuntimesForWorkspaceBatchLocked(context.Background(), "ws-1", nil); !errors.Is(err, errRegistrationCoolingDown) {
-		t.Fatalf("expected cooldown, got %v", err)
-	}
-	path := filepath.Join(home, ".baidu-cc/baidu-cc/bin/ducc")
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(path, []byte("#!/bin/sh\necho 2.1.258.6\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	next, _, err := fx.daemon.registerRuntimesForWorkspaceBatchLocked(context.Background(), "ws-1", nil)
-	if err != nil || len(next.Runtimes) != 1 {
-		t.Fatalf("new ducc not detected without PATH: %v", err)
-	}
-	if len(fx.sentFailures) != 0 || len(fx.sentRuntimes) != 1 {
-		t.Fatal("ducc still registered as failed")
+func TestRegistrationFindsInstalledBaiduRuntimesWithoutParentPATH(t *testing.T) {
+	for _, spec := range []struct{ command, product, protocol string }{
+		{"ducc", "baidu-cc", "claude"}, {"ducx", "baidu-cx", "codex"},
+	} {
+		t.Run(spec.command, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("MULTICA_DAEMON_RUNTIME_SHIMS", "")
+			stubLookPath(t, map[string]string{})
+			t.Cleanup(stubAgentVersion(t))
+			profiles := []RuntimeProfile{{ID: "fixture-profile", WorkspaceID: "ws-1", DisplayName: spec.command, ProtocolFamily: spec.protocol, CommandName: spec.command, Enabled: true}}
+			fx := newProfileRegisterFixture(t, profiles, http.StatusOK)
+			fx.daemon.cfg.Agents = map[string]AgentEntry{}
+			first, _, err := fx.daemon.registerRuntimesForWorkspaceBatchLocked(context.Background(), "ws-1", nil)
+			if err != nil || len(first.Runtimes) != 0 {
+				t.Fatalf("expected failed profile placeholder: %v", err)
+			}
+			if _, _, err = fx.daemon.registerRuntimesForWorkspaceBatchLocked(context.Background(), "ws-1", nil); !errors.Is(err, errRegistrationCoolingDown) {
+				t.Fatalf("expected cooldown, got %v", err)
+			}
+			path := filepath.Join(home, "."+spec.product, spec.product, "bin", spec.command)
+			if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(path, []byte("#!/bin/sh\necho 2.1.258.6\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			next, _, err := fx.daemon.registerRuntimesForWorkspaceBatchLocked(context.Background(), "ws-1", nil)
+			if err != nil || len(next.Runtimes) != 1 {
+				t.Fatalf("new ducc not detected without PATH: %v", err)
+			}
+			if len(fx.sentFailures) != 0 || len(fx.sentRuntimes) != 1 {
+				t.Fatal("ducc still registered as failed")
+			}
+		})
 	}
 }

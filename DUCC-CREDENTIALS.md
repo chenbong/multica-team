@@ -5,8 +5,10 @@ opt-in automatic-preparation switch. Computers are deduplicated across the
 owner's workspaces; older daemons are shown as requiring an upgrade.
 
 New clients run `multica --profile <name> ducc setup` after Multica login and
-before `daemon start`. This avoids depending on an already-registered ducc
-runtime to install ducc. The daemon additionally polls once per minute for
+before `daemon start`. The command name remains compatible and now prepares
+both ducc and ducx when the account's automatic-preparation switch is enabled.
+This avoids depending on an already-registered runtime to install its CLI.
+The daemon additionally polls once per minute for
 manual imports and missing local credentials. Existing valid files are never
 overwritten. Automatic preparation defaults to off per user.
 
@@ -70,3 +72,40 @@ Validation covers cross-user refusal, task-token refusal, no plaintext in
 metadata/storage, revoked/stale imports, file preservation, symlink/path
 rejection, redirect refusal and malformed frontend responses. Tests use only
 fixture executables and an isolated database; real provider tests are separate.
+
+## DUCX preparation (v0.6.1-overlay.2)
+
+After the existing DUCC credential flow succeeds, explicit `ducc setup`:
+
+1. Resolves ducx from PATH or the standard `.baidu-cx/baidu-cx/bin/ducx` and
+   `.comate/baidu-cx/bin/ducx` locations. If missing, it runs the official
+   `https://baidu-cc-client.bj.bcebos.com/baidu-cx/install.sh` installer.
+   Existing binaries are not upgraded or removed.
+2. Requires the same shared `.comate/login-user/<server-resolved-user>` file;
+   there is no second credential store or credential transfer API.
+3. Preserves a configured model in `.baidu-cx/user.json` or native
+   `.baidu-cx/config.toml`. Only when neither supplies a model does it run
+   `ducx --username <user> config model 'gpt-6-sol'`, then verify the result.
+   Malformed, oversized or symlinked configuration fails closed.
+4. Runs `ducx --username <user> doctor --json` and checks
+   `checks["auth.credentials"].status == "ok"`. Unrelated overall/CDN warnings
+   do not fail this check. Missing/unsupported auth reports and command failures
+   do. This checks provider authentication readiness, not token validity on a
+   remote service or permission to invoke a particular model; no model task runs.
+
+Subprocess output is bounded and never logged. Model/auth helpers have 45-second
+limits with Unix process-group cancellation. Installers are bounded at five
+minutes with periodic progress. Repeated setup preserves credentials, installed
+versions and existing models. Simultaneous DUCX preparations are serialized.
+Profile registration also resolves DUCX's install directories without requiring
+the parent shell to run `source` or modify PATH.
+
+Continuous background credential synchronization retains its existing behavior;
+it does not repeatedly install DUCX, rewrite models or run its diagnostic. Run
+the explicit preparation command on each new computer. DUCX stages and failures
+are shown in CLI output; the current profile-settings page still reports the
+shared DUCC credential metadata, not a new per-provider dashboard.
+
+The platform's explicitly selected agent model still takes precedence over the
+CLI default. Publishing a new release does not restart installed daemons or
+retroactively prepare existing computers.

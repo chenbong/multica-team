@@ -83,12 +83,7 @@ func duccExecutable(home string) string {
 // Shared by preparation and daemon profile registration; does not rely on a
 // parent shell re-reading PATH after the installer edits its startup files.
 func duccInstalledExecutable(home string) string {
-	for _, path := range []string{filepath.Join(home, ".baidu-cc/baidu-cc/bin/ducc"), filepath.Join(home, ".comate/baidu-cc/bin/ducc")} {
-		if s, e := os.Stat(path); e == nil && !s.IsDir() && s.Mode()&0111 != 0 {
-			return path
-		}
-	}
-	return ""
+	return installedBaiduExecutable(home, "ducc")
 }
 
 func duccCredentialDir(home, username string) (string, error) {
@@ -216,25 +211,35 @@ func checkDuccAuth(ctx context.Context, executable, username string) bool {
 }
 
 func installDucc(ctx context.Context, progress func(string)) error {
-	emitDuccProgress(progress, "正在下载 ducc 安装脚本...")
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		return errors.New("unsupported_os")
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return errors.New("install_failed")
 	}
-	lock := filepath.Join(home, ".multica-ducc-install-lock")
+	return installBaiduRuntime(ctx, home, "ducc", duccInstaller, progress)
+}
+
+func installBaiduRuntime(ctx context.Context, home, name, installer string, progress func(string)) error {
+	if name != "ducc" && name != "ducx" {
+		return errors.New("unsupported_runtime")
+	}
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return errors.New("unsupported_os")
+	}
+	emitDuccProgress(progress, "正在下载 "+name+" 安装脚本...")
+	lock := filepath.Join(home, ".multica-"+name+"-install-lock")
 	if info, e := os.Stat(lock); e == nil && time.Since(info.ModTime()) > 10*time.Minute {
 		_ = os.Remove(lock)
 	}
-	if err = os.Mkdir(lock, 0700); err != nil {
+	if err := os.Mkdir(lock, 0700); err != nil {
 		return errors.New("install_failed")
 	}
 	defer os.Remove(lock)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", duccInstaller, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", installer, nil)
+	if err != nil || req.URL.Scheme != "https" {
+		return errors.New("invalid_installer_url")
+	}
 	hc := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(r *http.Request, _ []*http.Request) error {
 		if r.URL.Scheme != "https" {
 			return errors.New("insecure_redirect")
@@ -258,9 +263,9 @@ func installDucc(ctx context.Context, progress func(string)) error {
 	cmd.Stdin = bytes.NewReader(script)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	if err := runDuccWithProgress(ctx, cmd, progress); err != nil {
+	if err := runBaiduRuntimeWithProgress(ctx, cmd, name, progress); err != nil {
 		if ctx.Err() != nil {
-			return errors.New("ducc installation timed out after 5 minutes; check network/proxy and retry")
+			return fmt.Errorf("%s installation timed out after 5 minutes; check network/proxy and retry", name)
 		}
 		return errors.New("install_failed")
 	}
@@ -276,7 +281,11 @@ func emitDuccProgress(progress func(string), message string) {
 // Emit fixed progress messages only; installer output can contain private data.
 // A single caller goroutine writes progress, including on timeout/cancellation.
 func runDuccWithProgress(ctx context.Context, cmd *exec.Cmd, progress func(string)) error {
-	emitDuccProgress(progress, "正在安装 ducc（首次下载可能需要几分钟，最多等待 5 分钟）...")
+	return runBaiduRuntimeWithProgress(ctx, cmd, "ducc", progress)
+}
+
+func runBaiduRuntimeWithProgress(ctx context.Context, cmd *exec.Cmd, name string, progress func(string)) error {
+	emitDuccProgress(progress, "正在安装 "+name+"（首次下载可能需要几分钟，最多等待 5 分钟）...")
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -290,14 +299,14 @@ func runDuccWithProgress(ctx context.Context, cmd *exec.Cmd, progress func(strin
 		case err := <-done:
 			return err
 		case <-ticker.C:
-			emitDuccProgress(progress, fmt.Sprintf("ducc 仍在安装，已等待 %d 秒...", int(time.Since(started).Seconds())))
+			emitDuccProgress(progress, fmt.Sprintf("%s 仍在安装，已等待 %d 秒...", name, int(time.Since(started).Seconds())))
 		case <-ctx.Done():
 			return <-done
 		}
 	}
 }
 
-func prepareDuccOnce(ctx context.Context, c *Client, daemonID, version string, allowInstall bool, progress func(string)) error {
+func prepareDuccOnce(ctx context.Context, c *Client, daemonID, version string, allowInstall, includeDucx bool, progress func(string)) error {
 	emitDuccProgress(progress, "正在连接 Multica，检查 ducc 准备策略...")
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -311,7 +320,7 @@ func prepareDuccOnce(ctx context.Context, c *Client, daemonID, version string, a
 		return err
 	}
 	if !reply.Enabled && reply.RequestID == "" {
-		emitDuccProgress(progress, "未启用自动准备 ducc，本次跳过安装和凭据同步。")
+		emitDuccProgress(progress, "未启用自动准备运行时，本次跳过安装和凭据同步。")
 		return nil
 	}
 	emitDuccProgress(progress, "正在检查本机 ducc 和当前账号的登录凭据...")
@@ -407,7 +416,16 @@ func prepareDuccOnce(ctx context.Context, c *Client, daemonID, version string, a
 			emitDuccProgress(progress, "平台尚无可下发的凭据，请在个人资料页先导入凭据。")
 		}
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if req.Error != "" {
+		return errors.New(req.Error)
+	}
+	if includeDucx && allowInstall && reply.Enabled {
+		return prepareDucxRuntime(ctx, home, reply.Username, progress, defaultDucxSetupOps())
+	}
+	return nil
 }
 
 // PrepareDucc is used before daemon startup, so an absent runtime cannot block
@@ -415,14 +433,15 @@ func prepareDuccOnce(ctx context.Context, c *Client, daemonID, version string, a
 func PrepareDucc(ctx context.Context, serverURL, token, daemonID, version string, progress func(string)) error {
 	c := NewClient(strings.TrimRight(serverURL, "/"))
 	c.SetToken(token)
-	return prepareDuccOnce(ctx, c, daemonID, version, true, progress)
+	return prepareDuccOnce(ctx, c, daemonID, version, true, true, progress)
 }
 
 func (d *Daemon) duccCredentialLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
-		if err := prepareDuccOnce(ctx, d.client, d.cfg.DaemonID, d.cfg.CLIVersion, true, nil); err != nil {
+		// Credential sync remains continuous; install/configure ducx only in explicit setup.
+		if err := prepareDuccOnce(ctx, d.client, d.cfg.DaemonID, d.cfg.CLIVersion, true, false, nil); err != nil {
 			d.logger.Debug("ducc credential preparation deferred", "code", err.Error())
 		}
 		select {
