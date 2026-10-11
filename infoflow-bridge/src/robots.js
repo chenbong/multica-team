@@ -3,7 +3,8 @@ import { Bridge } from "./bridge.js";
 import { ReviewNotifications } from "./review-notifications.js";
 import { acknowledge } from "./reactions.js";
 import { VerificationCodeRelay } from "./codes.js";
-import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
+import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, ROOT, robotIsComplete } from "./config.js";
+import { GroupDirectory, atUsers, formatGroupContext, parseGroupBlocks } from "./group-context.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5000;
 const MAX_INITIAL_RECONNECT_DELAY_MS = 120000;
@@ -153,10 +154,15 @@ export class RobotRuntime {
       baseUrl: robot.baseUrl,
     });
 
+    const groups = new GroupDirectory(client.im.group, this.logger);
+
     const send = async (conversation, content, options = {}) => {
       if (conversation.kind === "group") {
         const body = [];
-        if (options.atUser) body.push({ type: "AT", atall: false, atuserids: [options.atUser] });
+        // Besides the asker, anyone the reply writes as @userid is mentioned,
+        // provided they are in the group (unknown member list: the asker only).
+        const ids = atUsers(options.atUser, content, await groups.members(conversation.id));
+        if (ids.length > 0) body.push({ type: "AT", atall: false, atuserids: ids });
         body.push({ type: "MD", content });
         return client.im.message.sendToGroupWithOptions({ groupId: conversation.id, msgtype: "MD", body });
       }
@@ -212,7 +218,7 @@ export class RobotRuntime {
       this.logger.error("[" + robot.name + "] InfoFlow error: " + message);
     });
 
-    registerHandlers({ wsClient, client, bridge, robot, logger: this.logger });
+    registerHandlers({ wsClient, client, bridge, robot, groups, logger: this.logger });
     // Established connections use the SDK's reconnect loop (infinite by default).
     // Initial endpoint failures need a local retry loop because this SDK deliberately
     // does not start reconnect() after connect() rejects before the first connection.
@@ -369,38 +375,7 @@ function robotConfig(base, robot) {
   };
 }
 
-export function parseGroupBlocks(blocks) {
-  const images = [];
-  const parts = [];
-
-  for (const block of Array.isArray(blocks) ? blocks : []) {
-    const type = String(block?.type ?? "").toUpperCase();
-
-    if (type === "IMAGE") {
-      images.push(block);
-      continue;
-    }
-
-    if (type === "REPLYDATA" || type === "REPLY" || type === "QUOTE") {
-      if (Array.isArray(block.replyImages)) images.push(...block.replyImages.filter(Boolean));
-    }
-
-    if (type === "AT") continue;
-
-    if (type === "LINK") {
-      parts.push(block.label ?? block.url ?? block.href ?? "");
-      continue;
-    }
-
-    parts.push(block.content ?? block.text ?? "");
-  }
-
-  return {
-    text: parts.filter(Boolean).join(" ").trim(),
-    images,
-  };
-}
-function registerHandlers({ wsClient, client, bridge, robot, logger }) {
+function registerHandlers({ wsClient, client, bridge, robot, groups, logger }) {
   for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
@@ -448,6 +423,10 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
 
       if (!groupId || !user || text === "" || !mentionsRobot) return;
       logger.log(`[${robot.name}] <- ${user} (${event} group ${groupId}): ${text.slice(0, 200)}`);
+      const personAt = blocks.filter((block) => String(block?.type ?? "").toUpperCase() === "AT" && block.robotid === undefined);
+      // The inbound shape of a person mention is undocumented; log it so it can be
+      // checked against parseGroupBlocks.
+      if (personAt.length > 0) logger.log(`[${robot.name}] AT blocks: ${JSON.stringify(personAt).slice(0, 600)}`);
       await bridge.handleMessage({
         conversation: { kind: "group", id: groupId },
         user,
@@ -455,6 +434,12 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
         images: parsed.images,
         messageId: header.messageid ?? raw.messageid,
         acknowledge: () => acknowledge(client, raw, "group", robot.appId, logger),
+        // Fetched only when the message is forwarded to chat, not for commands.
+        groupContext: async () => {
+          const [info, members] = await Promise.all([groups.info(groupId), groups.members(groupId)]);
+          const sendCommand = `node ${ROOT}/scripts/infoflow-send.js --robot ${robot.id}`;
+          return { groupId, info, members, sender: user, mentions: parsed.mentions, sendCommand };
+        },
       });
     });
   }

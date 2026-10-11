@@ -156,5 +156,6 @@ credentials.
 
 ## Not covered yet
 
-Group chats, streaming work cards, media, binding 如流 users to Multica members (today the issue
-is created as the CLI's signed-in user), and restart after reboot.
+Streaming work cards, media, binding 如流 users to Multica members (today the issue is created
+as the CLI's signed-in user), and restart after reboot. Group chats are covered; `CHAT.md` describes
+the group context passed to the agent and how replies @ group members.

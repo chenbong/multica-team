@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { formatGroupContext } from "./group-context.js";
 
 // Only a leading, explicit creation request is routed to the issue workflow.
 // Mentions, quoted instructions, progress questions and negations remain chat.
@@ -48,7 +49,7 @@ export class ChatRelay {
     });
   }
 
-  async send(conversation, user, text, images, agentName, acknowledge = null) {
+  async send(conversation, user, text, images, agentName, acknowledge = null, groupContext = null) {
     const key = this.key(conversation, user);
     return this.serial(key, async () => {
       const agents = await this.multica.listAgents();
@@ -72,7 +73,8 @@ export class ChatRelay {
       }
       const staged = await this.stageImages(images);
       const attachmentIds = [];
-      let content = text;
+      const grouped = await this.withGroupContext(thread, text, groupContext);
+      let content = grouped.content;
       try {
         for (const path of staged.paths) {
           const attachment = await this.multica.uploadChatImage(thread.id, path);
@@ -86,6 +88,7 @@ export class ChatRelay {
         const sent = await this.multica.sendChatMessage(thread.id, content, attachmentIds);
         if (!sent.task_id) throw new Error("聊天已提交但缺少执行 ID，请到网页版确认，不要重复发送");
         this.state.pending[sent.task_id] = { sessionId: thread.id, conversation, user, at: Date.now() };
+        if (grouped.digest) thread.membersDigest = grouped.digest;
         this.save();
         if (attachmentIds.some((id) => !(sent.attachment_ids || []).includes(id))) {
           await this.reply(conversation, user, "消息已发送，但部分图片未绑定成功，请到网页版检查附件。");
@@ -96,6 +99,22 @@ export class ChatRelay {
         if (!reacted) await this.reply(conversation, user, sent.queued ? "消息已加入当前聊天队列。" : "收到，正在回复…");
       } finally { await staged.cleanup(); }
     });
+  }
+
+  // A group message is prefixed with who sent it, in which group, and whom it
+  // @-mentions. The member list is repeated only when it changed since the last
+  // message in this chat; the session already holds the earlier copy.
+  async withGroupContext(thread, text, groupContext) {
+    if (!groupContext) return { content: text, digest: null };
+    let context;
+    try { context = await groupContext(); }
+    catch (error) { this.logger.warn("group context failed: " + error.message); return { content: text, digest: null }; }
+    const digest = Array.isArray(context.members)
+      ? createHash("sha256").update(JSON.stringify([...context.members].sort())).digest("hex").slice(0, 16)
+      : null;
+    const fresh = digest !== null && thread.membersDigest !== digest;
+    const content = formatGroupContext({ ...context, members: fresh ? context.members : null }) + "\n\n" + text;
+    return { content, digest: fresh ? digest : null };
   }
 
   async status(conversation, user) {

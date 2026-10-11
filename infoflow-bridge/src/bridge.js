@@ -56,7 +56,7 @@ export class Bridge {
 
   // conversation: { kind: "private" | "group", id }. For a private chat the id is
   // the username to reply to; for a group it is the numeric group id.
-  async handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null }) {
+  async handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, groupContext = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
@@ -97,7 +97,7 @@ export class Bridge {
         await this.#issueStatus(conversation, user, "");
         return;
       }
-      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge);
+      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge, groupContext);
     } catch (error) {
       this.logger.error(`handling message from ${user} failed: ${error.message}`);
       await this.reply(conversation, user, `出错了：${error.message}`);
