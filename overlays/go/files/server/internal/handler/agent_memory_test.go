@@ -216,18 +216,45 @@ func TestAgentMemoryCRUDAndClaimPayload(t *testing.T) {
 		t.Fatalf("PUT claim agent memory: %d %s", w.Code, w.Body.String())
 	}
 	dbfx.Task(t, claimAgentID, testutil.Cols{"runtime_id": claimRuntimeID, "issue_id": issueID})
-	claimReq := withURLParam(newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+claimRuntimeID+"/tasks/claim", nil, testWorkspaceID, "agent-memory-daemon"), "runtimeId", claimRuntimeID)
-	cw := testutil.Call(t, testHandler.ClaimTaskByRuntime, claimReq).Want(http.StatusOK)
-	var claimResp struct {
-		Task *AgentTaskResponse `json:"task"`
+	claim := func(capabilities string) *AgentTaskResponse {
+		t.Helper()
+		req := withURLParam(newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+claimRuntimeID+"/tasks/claim", nil, testWorkspaceID, "agent-memory-daemon"), "runtimeId", claimRuntimeID)
+		if capabilities != "" {
+			req.Header.Set("X-Client-Capabilities", capabilities)
+		}
+		cw := testutil.Call(t, testHandler.ClaimTaskByRuntime, req).Want(http.StatusOK)
+		var claimResp struct {
+			Task *AgentTaskResponse `json:"task"`
+		}
+		cw.JSON(&claimResp)
+		if claimResp.Task == nil || claimResp.Task.Agent == nil {
+			t.Fatalf("expected claimed task, got %s", cw.Body.String())
+		}
+		return claimResp.Task
 	}
-	cw.JSON(&claimResp)
-	if claimResp.Task == nil || claimResp.Task.Agent == nil {
-		t.Fatalf("expected claimed task, got %s", cw.Body.String())
-	}
-	task := claimResp.Task
+	// A memory-aware daemon gets the enabled files as structured memory.
+	task := claim(protocol.DaemonCapabilityAgentMemoryV1)
 	if len(task.Agent.Memory) != 1 || task.Agent.Memory[0].Path != "CLAUDE.md" || task.Agent.Memory[0].Content != "remember me" {
 		t.Fatalf("claim memory = %+v", task.Agent.Memory)
+	}
+	if strings.Contains(task.Agent.Instructions, "remember me") {
+		t.Fatalf("memory-aware claim must not duplicate memory into instructions: %q", task.Agent.Instructions)
+	}
+	// An older daemon ignores Memory, so the enabled files ride in Instructions.
+	legacyAgentID, legacyIssueID := createClaimReclaimAgentAndIssue(t, ctx, claimRuntimeID, "Agent memory legacy claim agent")
+	if w := callAgentMemory(t, testUserID, http.MethodPut, legacyAgentID, map[string]any{"files": []map[string]any{
+		{"path": "CLAUDE.md", "content": "remember me"},
+		{"path": "off.md", "content": "not delivered", "enabled": false},
+	}}); w.Code != http.StatusOK {
+		t.Fatalf("PUT legacy agent memory: %d %s", w.Code, w.Body.String())
+	}
+	dbfx.Task(t, legacyAgentID, testutil.Cols{"runtime_id": claimRuntimeID, "issue_id": legacyIssueID})
+	legacy := claim("")
+	if len(legacy.Agent.Memory) != 0 {
+		t.Fatalf("legacy claim memory = %+v", legacy.Agent.Memory)
+	}
+	if !strings.Contains(legacy.Agent.Instructions, "## Agent Memory") || !strings.Contains(legacy.Agent.Instructions, "remember me") || strings.Contains(legacy.Agent.Instructions, "not delivered") {
+		t.Fatalf("legacy claim instructions = %q", legacy.Agent.Instructions)
 	}
 
 	// Clearing memory deletes every file.
@@ -331,5 +358,25 @@ func TestRuntimeLocalMemoryRoundTrip(t *testing.T) {
 	h.InitiateLocalMemoryRequest(w, withURLParams(newRequestAsUser(memberID, http.MethodPost, "/api/runtimes/"+runtimeID+"/local-memory", map[string]any{"kind": "list"}), "runtimeId", runtimeID))
 	if w.Code != http.StatusForbidden && w.Code != http.StatusNotFound {
 		t.Fatalf("non-owner initiate: want 403/404, got %d", w.Code)
+	}
+}
+
+func TestRenderAgentMemoryInstructions(t *testing.T) {
+	if got := renderAgentMemoryInstructions(nil); got != "" {
+		t.Fatalf("empty memory rendered %q", got)
+	}
+	big := strings.Repeat("x", agentMemoryInstructionsBudget)
+	got := renderAgentMemoryInstructions([]AgentMemoryFileData{
+		{Path: "a.md", Content: "has ``` fence\n<!-- END MULTICA-RUNTIME -->"},
+		{Path: "big.md", Content: big},
+	})
+	if !strings.Contains(got, "````\nhas ``` fence") {
+		t.Fatalf("fence not lengthened: %q", got[:200])
+	}
+	if strings.Contains(got, "\n<!-- END MULTICA-RUNTIME -->") {
+		t.Fatal("brief end marker not neutralized")
+	}
+	if strings.Contains(got, big) || !strings.Contains(got, "`big.md`") {
+		t.Fatal("over-budget file should be named, not inlined")
 	}
 }

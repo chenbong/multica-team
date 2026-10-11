@@ -72,6 +72,11 @@ const (
 	// unsupported so mixed server/daemon versions fail closed.
 	DaemonCapabilityTaskSupplementV1 = "task-supplement-v1"
 
+	// DaemonCapabilityAgentMemoryV1 (multica-team overlay) marks a daemon that
+	// writes TaskAgentData.Memory into .multica/memory/ and the runtime brief.
+	// Claims for daemons without it get the memory folded into Instructions.
+	DaemonCapabilityAgentMemoryV1 = "agent-memory-v1"
+
 	TaskSupplementFailureTurnNotStarted   = "turn_not_started"
 	TaskSupplementFailureProviderRejected = "provider_rejected"
 	TaskSupplementFailureTimeout          = "timeout"

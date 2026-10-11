@@ -2590,7 +2590,19 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			message: "failed to load agent memory",
 		}
 	}
-	resp.Agent.Memory = memory
+	if requestHasClientCapability(r, protocol.DaemonCapabilityAgentMemoryV1) {
+		resp.Agent.Memory = memory
+	} else if section := renderAgentMemoryInstructions(memory); section != "" {
+		// A daemon without agent-memory support drops the Memory field, but it
+		// always renders Instructions into the runtime brief.
+		if strings.TrimSpace(resp.Agent.Instructions) == "" {
+			resp.Agent.Instructions = section
+		} else {
+			resp.Agent.Instructions = resp.Agent.Instructions + "\n\n" + section
+		}
+		slog.Info("task claim: daemon lacks agent-memory support; memory folded into instructions",
+			"task_id", uuidToString(task.ID), "agent_id", uuidToString(task.AgentID), "files", len(memory))
+	}
 	if !claimResponseAgentIdentityMatches(resp) {
 		responseAgentID := ""
 		if resp.Agent != nil {

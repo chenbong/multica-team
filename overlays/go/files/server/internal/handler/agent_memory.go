@@ -402,3 +402,69 @@ func (h *Handler) loadAgentMemoryForClaim(ctx context.Context, agentID pgtype.UU
 	}
 	return out, nil
 }
+
+// agentMemoryInstructionsBudget bounds how much memory is folded into
+// Instructions for daemons that cannot materialize memory files. It matches
+// the daemon's own inline budget; a file is inlined whole or not at all.
+const agentMemoryInstructionsBudget = 48 << 10
+
+// renderAgentMemoryInstructions renders memory as an "## Agent Memory"
+// section for daemons that predate agent-memory-v1. Those daemons have no
+// .multica/memory/ copy, so files beyond the budget can only be named.
+func renderAgentMemoryInstructions(files []AgentMemoryFileData) string {
+	if len(files) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Agent Memory\n\n")
+	b.WriteString("Your owner configured the memory below for you: durable notes, preferences and context carried across runs. Use it as background knowledge; the current task's instructions win when they conflict. When something should be remembered for future runs, say so in your final reply so the owner can update the agent's Memory tab.\n")
+	used := 0
+	var omitted []string
+	for _, f := range files {
+		content := neutralizeBriefMarkers(f.Content)
+		if used+len(content) > agentMemoryInstructionsBudget {
+			omitted = append(omitted, f.Path)
+			continue
+		}
+		used += len(content)
+		fence := markdownFence(content)
+		fmt.Fprintf(&b, "\n### `%s`\n\n%s\n%s\n%s\n", f.Path, fence, strings.TrimRight(content, "\n"), fence)
+	}
+	if len(omitted) > 0 {
+		b.WriteString("\nThese memory files were too large to include on this machine's Multica version and are not available in this run: ")
+		for i, p := range omitted {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "`%s`", p)
+		}
+		b.WriteString(".\n")
+	}
+	return b.String()
+}
+
+// neutralizeBriefMarkers keeps memory text from closing or reopening the
+// daemon's managed brief block.
+func neutralizeBriefMarkers(s string) string {
+	s = strings.ReplaceAll(s, "<!-- BEGIN MULTICA-RUNTIME", "<!-- (memory) BEGIN MULTICA-RUNTIME")
+	return strings.ReplaceAll(s, "<!-- END MULTICA-RUNTIME", "<!-- (memory) END MULTICA-RUNTIME")
+}
+
+// markdownFence returns a backtick fence longer than any backtick run in s.
+func markdownFence(s string) string {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	if longest < 3 {
+		return "```"
+	}
+	return strings.Repeat("`", longest+1)
+}
