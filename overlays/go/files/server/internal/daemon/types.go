@@ -226,6 +226,16 @@ type AgentData struct {
 	// daemon decodes provider-specific fields (e.g. openclaw mode +
 	// gateway endpoint, see issue #3260); other backends ignore it.
 	RuntimeConfig json.RawMessage `json:"runtime_config,omitempty"`
+	// Memory is the agent's memory file set (multica-team overlay). It is
+	// written under .multica/memory/ and rendered into the runtime brief.
+	Memory []AgentMemoryFileData `json:"memory,omitempty"`
+}
+
+// AgentMemoryFileData is one agent memory file from the claim payload.
+type AgentMemoryFileData struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Source  string `json:"source,omitempty"`
 }
 
 // DisabledRuntimeSkillData is the task-wire identity of one runtime-local

@@ -1205,6 +1205,9 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if len(ack.PendingLocalSkillImports) > 0 {
 		resp["pending_local_skill_imports"] = ack.PendingLocalSkillImports
 	}
+	if len(ack.PendingLocalMemory) > 0 {
+		resp["pending_local_memory"] = ack.PendingLocalMemory
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1516,6 +1519,8 @@ func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, suppor
 			slog.Warn("local skill import HasPending failed", "error", probeErr, "runtime_id", runtimeID)
 		}
 	}
+
+	ack.PendingLocalMemory = h.popPendingLocalMemory(ctx, runtimeID)
 
 	return ack, m, nil
 }
@@ -2573,6 +2578,19 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		skills = append(skills, builtinSkills...)
 		resp.Agent.Skills = skills
 	}
+	// Agent memory (multica-team overlay). Fail closed like skills: running
+	// without the memory the user configured is a silent behavior change.
+	memory, err := h.loadAgentMemoryForClaim(r.Context(), task.AgentID)
+	if err != nil {
+		slog.Error("task claim: agent memory load failed; preserving task for redelivery",
+			"task_id", uuidToString(task.ID), "agent_id", uuidToString(task.AgentID), "error", err)
+		return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, &claimBuildFailure{
+			outcome: "error_memory_load",
+			status:  http.StatusInternalServerError,
+			message: "failed to load agent memory",
+		}
+	}
+	resp.Agent.Memory = memory
 	if !claimResponseAgentIdentityMatches(resp) {
 		responseAgentID := ""
 		if resp.Agent != nil {

@@ -81,6 +81,20 @@ type AgentMcpServer struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type AgentMemoryFile struct {
+	ID              pgtype.UUID        `json:"id"`
+	AgentID         pgtype.UUID        `json:"agent_id"`
+	Path            string             `json:"path"`
+	Content         string             `json:"content"`
+	Source          string             `json:"source"`
+	SourceRuntimeID pgtype.UUID        `json:"source_runtime_id"`
+	SourcePath      string             `json:"source_path"`
+	Enabled         bool               `json:"enabled"`
+	UpdatedBy       pgtype.UUID        `json:"updated_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
 type AgentRuntime struct {
 	ID             pgtype.UUID        `json:"id"`
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`

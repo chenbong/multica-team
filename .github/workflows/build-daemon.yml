@@ -74,6 +74,14 @@ jobs:
           go test -overlay="$workspace/overlays/go-overlay.json" ./pkg/agent -run '^TestOneAPI' -count=1
           go test -overlay="$workspace/overlays/go-overlay.json" ./internal/daemon -run '^TestOneAPIThinking' -count=1
 
+      - name: Test agent memory discovery and brief injection
+        working-directory: multica/server
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          go test -overlay="$workspace/overlays/go-overlay.json" ./internal/daemon -run '^Test(DiscoverAndReadRuntimeLocalMemory|HandleLocalMemoryReportsReadResult|MemorySegment)$' -count=1
+          go test -overlay="$workspace/overlays/go-overlay.json" ./internal/daemon/execenv -run 'AgentMemory' -count=1
+
       - name: Fail if the build touched the upstream checkout
         run: |
           set -euo pipefail

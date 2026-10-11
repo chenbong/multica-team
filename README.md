@@ -65,6 +65,24 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
     名单之外的命令一个字节都不变（`ducx` 这类本来就正常的 CLI 完全不受影响），名单为空则不生成任何包装器。
     「添加电脑」下发的命令同样可以预置这一行（`deploy/host.env` 里的
     `MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS=ducc`），用户复制即可，无需在每台机器上手工维护脚本。
+13. **智能体记忆（Memory）**。智能体页「能力 → 记忆」可以为每个智能体维护一组 Markdown/文本记忆文件，
+    三种来源都只改本地草稿，点「保存」才整体落库（`PUT /api/agents/{id}/memory`）：
+    - **手动编辑**：新建文件、改路径、编辑/预览内容、删除；
+    - **本地上传**：从浏览器选择 `.md`/`.markdown`/`.mdc`/`.txt` 文件，二进制和超限文件会被拒绝；
+    - **从运行时机器导入**：选择自己的一台在线本地运行时，daemon 列出机器上已知位置的记忆/指令文件
+      （`~/.claude/CLAUDE.md`、`~/.claude/projects/*/memory/**`、`~/.codex/AGENTS.md`、`~/.codex/memories/*`、
+      `~/.gemini/GEMINI.md`、`~/.qwen/QWEN.md`、`~/.config/opencode/AGENTS.md`、`~/.kiro/steering/*`、
+      Hermes `memories/*` 等），勾选后读取内容加入草稿。读取只认 daemon 自己发现的 key，服务端无法让 daemon
+      读任意路径；列表与读取都仅限运行时所有者（`POST/GET /api/runtimes/{id}/local-memory`）。
+
+    读写记忆沿用环境变量的权限规则：智能体所有者或工作区 owner/admin，智能体身份一律拒绝。限制为每个智能体
+    64 个文件、单文件 256 KiB、合计 1 MiB。每次领取任务时记忆随 claim 下发，daemon 写到工作目录
+    `.multica/memory/`（走 sidecar manifest，本地目录模式下任务结束会清理），并在运行时简报
+    （CLAUDE.md / AGENTS.md）里加一节 `## Agent Memory`：48 KiB 以内整份内联，其余只列路径。
+    智能体对这些副本的修改不会回写。每个文件有独立的启用开关（列表里另有「全部启用 / 全部停用」）：
+    停用的文件仍保存在记忆页，但领取任务时不会下发。数据库侧对应 `migrations/467_agent_memory_file`。
+    服务端与 Web 随 `main` 部署即可编辑记忆；**「从运行时导入」和「任务里带上记忆」需要客户端升级到包含该功能的
+    CLI/daemon 版本**——旧 daemon 会忽略记忆字段，导入请求约 45 秒后以超时提示升级。
 
 ## 可选：OneAPI 模型目录
 
@@ -194,6 +212,7 @@ Next.js 没有 overlay 机制，所以采用"临时树 + 脚本补丁"的方式�
 
 - `001_user_daemon_bootstrap_token`：`user` 表新增 daemon 引导令牌字段
 - `457_skill_scope` … `463_skill_team_scope`：Skill 多级别（个人 / 项目 / 团队）与统计相关的索引、字段
+- `467_agent_memory_file`：智能体记忆文件表（随智能体级联删除）
 
 `overlays/sql/` 里放的是 sqlc 查询定义；对应的 `server/pkg/db/generated/*.go` 生成结果
 同时以完整文件形式放在 `overlays/go/files/` 中，两者要一起改。

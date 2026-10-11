@@ -4625,6 +4625,13 @@ func (d *Daemon) handleHeartbeatActions(ctx context.Context, runtimeID string, r
 			go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
 		}
 	}
+	if len(resp.PendingLocalMemory) > 0 {
+		if rt := d.findRuntime(runtimeID); rt != nil {
+			for _, pending := range resp.PendingLocalMemory {
+				go d.handleLocalMemory(ctx, *rt, pending)
+			}
+		}
+	}
 }
 
 // handlePendingWorkHint reacts to a server-pushed daemon:pending_work frame by
@@ -7813,6 +7820,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		AgentName:                        agentName,
 		AgentInstructions:                instructions,
 		AgentSkills:                      convertSkillsForEnv(skills),
+		AgentMemory:                      convertAgentMemoryForEnv(task.Agent.Memory),
 		DisabledRuntimeSkills:            disabledRuntimeSkills,
 		Repos:                            convertReposForEnv(task.Repos),
 		ProjectID:                        task.ProjectID,
