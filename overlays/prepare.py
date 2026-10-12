@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import runpy
 
 HERE = Path(__file__).resolve().parent
 TEAM = HERE.parent
@@ -55,6 +56,20 @@ def main() -> None:
             "source_sha256": sha256(source) if source.is_file() else None,
             "overlay_sha256": sha256(override),
         }
+
+    # Small checked SQL-constant edits avoid vendoring thousands of unchanged
+    # SQLc lines. They retain the same non-invasive build overlay boundary.
+    guards = runpy.run_path(str(HERE / "issue-transfer-sql.py"))
+    for rel, text in guards["generated"](UPSTREAM, FILES):
+        source = UPSTREAM / rel
+        override = HERE / ".generated" / rel
+        mapping[str(source)] = str(override)
+        manifest[rel] = {"source_sha256": sha256(source), "overlay_sha256": hashlib.sha256(text.encode()).hexdigest()}
+        if not args.check:
+            override.parent.mkdir(parents=True, exist_ok=True)
+            override.write_text(text)
+        elif not override.is_file() or override.read_text() != text:
+            raise SystemExit(f"generated SQL overlay missing or stale: {rel}; rerun prepare.py")
 
     if not mapping:
         raise SystemExit("no Go overlay files found")

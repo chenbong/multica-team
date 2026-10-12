@@ -19,6 +19,7 @@ infoflow-bridge/node_modules
 infoflow-bridge/.npmrc
 infoflow-bridge/package-lock.json
 overlays/go-overlay.json
+overlays/.generated/
 overlays/upstream.json
 __pycache__/
 # Local build output, upgrade evidence and private deployment snapshots.

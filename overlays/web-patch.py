@@ -6,6 +6,7 @@ verified restore, and a repeated application never replaces those originals.
 """
 import json
 import os
+import runpy
 import sys
 from pathlib import Path
 
@@ -865,6 +866,9 @@ CHANGES.setdefault("packages/views/common/cli-install-command.test.tsx", []).app
     '    expect(screen.getByText(CLI_INSTALL_COMMANDS.macosLinux)).toBeInTheDocument();\n'
     '  });\n',
 ))
+
+
+runpy.run_path(str(HERE / "issue-transfer-patch.py"))["extend"](CHANGES)
 
 
 def apply_patches():

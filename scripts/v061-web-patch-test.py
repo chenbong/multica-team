@@ -127,6 +127,22 @@ class FrontendPatches(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to patch a repository checkout", result.stderr)
 
+    def test_issue_transfer_wiring_is_complete(self):
+        self.apply()
+        menu = (self.target / "packages/views/issues/actions/issue-actions-dropdown.tsx").read_text()
+        self.assertIn('role === "owner" || role === "admin"', menu)
+        self.assertIn("<IssueTransferDialog", menu)
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        self.assertIn("/transfer-preview", client)
+        self.assertIn("IssueTransferPlanSchema", client)
+        events = (self.target / "packages/core/realtime/use-realtime-sync.ts").read_text()
+        self.assertIn('ws.on("issue:workspace_changed"', events)
+        self.assertIn("unsubIssueTransferred();", events)
+        for locale in ("en", "zh-Hans"):
+            copy = json.loads((self.target / f"packages/views/locales/{locale}/issues.json").read_text())
+            self.assertTrue(copy["transfer"]["warning"])
+            self.assertTrue(copy["transfer"]["block_unknown"])
+
     def test_brand_is_checked_idempotent_and_keeps_bot_identity(self):
         self.apply()
         command = ["node", str(ROOT / "deploy/apply-brand.cjs"), str(self.target)]
