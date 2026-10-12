@@ -3,53 +3,94 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Multica智能体 绑定 如流机器人</title>
+<title>Team Mesh 如流机器人管理</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif; margin: 0; padding: 32px; max-width: 940px; }
+  :root {
+    color-scheme: light;
+    --page-bg: #ffffff; --surface: #ffffff; --text: #111827; --muted: #4b5563;
+    --border: #e5e7eb; --control-border: #6b7280; --field-bg: #ffffff;
+    --button-bg: #ffffff; --button-hover: #f3f4f6; --button-active: #e5e7eb;
+    --primary-bg: #1d4ed8; --primary-hover: #1e40af; --primary-text: #ffffff;
+    --disabled-bg: #f3f4f6; --disabled-text: #4b5563;
+    --link: #1d4ed8; --focus: #2563eb; --code-bg: #f3f4f6;
+    --success-text: #047857; --success-bg: #ecfdf5; --success-border: #6ee7b7;
+    --info-text: #1d4ed8; --info-bg: #eff6ff; --info-border: #93c5fd;
+    --warning-text: #854d0e; --warning-bg: #fffbeb; --warning-border: #fcd34d;
+    --danger-text: #b91c1c; --danger-bg: #fef2f2; --danger-border: #fca5a5;
+    --toast-bg: #111827; --toast-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page-bg: #0f172a; --surface: #111c2e; --text: #e5e7eb; --muted: #a6b4c8;
+      --border: #334155; --control-border: #64748b; --field-bg: #0b1220;
+      --button-bg: #1e293b; --button-hover: #334155; --button-active: #475569;
+      --primary-bg: #60a5fa; --primary-hover: #93c5fd; --primary-text: #0f172a;
+      --disabled-bg: #243244; --disabled-text: #a6b4c8;
+      --link: #93c5fd; --focus: #93c5fd; --code-bg: #243244;
+      --success-text: #6ee7b7; --success-bg: #073b32; --success-border: #10b981;
+      --info-text: #bfdbfe; --info-bg: #172e55; --info-border: #60a5fa;
+      --warning-text: #fde68a; --warning-bg: #422e10; --warning-border: #d97706;
+      --danger-text: #fca5a5; --danger-bg: #451a24; --danger-border: #f87171;
+      --toast-bg: #e5e7eb; --toast-text: #111827;
+    }
+  }
+  html { background: var(--page-bg); color: var(--text); }
+  body { font: 15px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif; margin: 0; padding: 32px; max-width: 940px; background: var(--page-bg); color: var(--text); }
   h1 { font-size: 20px; margin: 0 0 4px; }
-  p.lede { color: #6b7280; margin: 0 0 24px; }
-  section { border: 1px solid #e5e7eb; border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
-  label { display: block; font-size: 13px; color: #6b7280; margin: 12px 0 4px; }
-  input[type=text], input[type=password], select { width: 100%; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; box-sizing: border-box; }
+  p.lede { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input[type=text], input[type=password], select { width: 100%; padding: 8px 10px; border: 1px solid var(--control-border); border-radius: 8px; font: inherit; box-sizing: border-box; background: var(--field-bg); color: var(--text); }
+  input::placeholder { color: var(--muted); opacity: 1; }
+  input:-webkit-autofill { -webkit-text-fill-color: var(--text); caret-color: var(--text); box-shadow: 0 0 0 1000px var(--field-bg) inset; }
+  input[type=checkbox] { accent-color: var(--primary-bg); }
+  option { background: var(--field-bg); color: var(--text); }
+  a { color: var(--link); }
   .row { display: flex; gap: 16px; flex-wrap: wrap; }
   .row > div { flex: 1 1 220px; }
   .actions { margin-top: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; cursor: pointer; }
-  a.action-link { display: inline-block; font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; color: inherit; text-decoration: none; cursor: pointer; margin-left: 6px; }
-  button.primary { background: #111827; color: #fff; border-color: #111827; }
-  button.danger { color: #b91c1c; }
+  button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--control-border); background: var(--button-bg); color: var(--text); cursor: pointer; }
+  a.action-link { display: inline-block; font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--control-border); background: var(--button-bg); color: var(--text); text-decoration: none; cursor: pointer; margin-left: 6px; }
+  button:hover:not(:disabled), a.action-link:hover { background: var(--button-hover); }
+  button:active:not(:disabled), a.action-link:active { background: var(--button-active); }
+  button.primary { background: var(--primary-bg); color: var(--primary-text); border-color: var(--primary-bg); }
+  button.primary:hover:not(:disabled), button.primary:active:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+  button.danger { color: var(--danger-text); }
+  button.danger:hover:not(:disabled), button.danger:active:not(:disabled) { background: var(--danger-bg); border-color: var(--danger-border); }
+  button:disabled, input:disabled, select:disabled { background: var(--disabled-bg); color: var(--disabled-text); border-color: var(--control-border); cursor: not-allowed; opacity: 1; }
+  button:focus-visible, a:focus-visible, input:focus, select:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #f3f4f6; font-size: 14px; vertical-align: middle; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: middle; }
   #list td:nth-child(4), #list td:nth-child(5) { white-space: nowrap; width: 1%; }
-  .state { display: inline-block; white-space: nowrap; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #d1d5db; }
-  .state.connected { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
-  .state.connecting { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
-  .state.reconnecting { color: #a16207; border-color: #fde68a; background: #fffbeb; }
-  .state.error, .state.incomplete { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
-  .state.disabled, .state.stopped { color: #6b7280; }
-  .hint { font-size: 12px; color: #6b7280; margin-top: 6px; }
-  .toast { position: fixed; right: 20px; bottom: 20px; background: #111827; color: #fff; padding: 10px 16px; border-radius: 10px; opacity: 0; transition: opacity .2s; }
+  .state { display: inline-block; white-space: nowrap; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--control-border); }
+  .state.connected { color: var(--success-text); border-color: var(--success-border); background: var(--success-bg); }
+  .state.connecting, .state.ready { color: var(--info-text); border-color: var(--info-border); background: var(--info-bg); }
+  .state.reconnecting { color: var(--warning-text); border-color: var(--warning-border); background: var(--warning-bg); }
+  .state.error, .state.incomplete { color: var(--danger-text); border-color: var(--danger-border); background: var(--danger-bg); }
+  .state.disabled, .state.stopped { color: var(--muted); background: var(--button-bg); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .toast { position: fixed; right: 20px; bottom: 20px; background: var(--toast-bg); color: var(--toast-text); padding: 10px 16px; border-radius: 10px; opacity: 0; transition: opacity .2s; }
   .toast.show { opacity: 1; }
-  .session { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #6b7280; margin: 0 0 14px; }
+  .session { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); margin: 0 0 14px; }
   /* display:flex would otherwise beat the hidden attribute. */
   .session[hidden] { display: none; }
   .session button { padding: 2px 10px; font-size: 12px; }
-  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; }
+  code { background: var(--code-bg); color: var(--text); padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
 <div class="session" id="session-bar" hidden>
   <span id="who"></span>
   <span id="multica-state"></span>
-  <a id="multica-login" href="#" target="_blank" rel="noreferrer" hidden>去登录 Multica</a>
+  <a id="multica-login" href="#" target="_blank" rel="noreferrer" hidden>去登录 Team Mesh</a>
   <button type="button" id="logout">退出</button>
 </div>
-<h1>Multica智能体 绑定 如流机器人</h1>
+<h1>Team Mesh 如流机器人管理</h1>
 
 <section id="login" hidden>
   <h2 style="font-size:16px;margin:0 0 10px">登录</h2>
-  <p class="hint">请先登录 <a id="multica-link" href="#" target="_blank" rel="noreferrer">Multica</a> 后，再登录本页面。</p>
+  <p class="hint">请先登录 <a id="multica-link" href="#" target="_blank" rel="noreferrer">Team Mesh</a> 后，再登录本页面。</p>
   <p class="hint" id="login-lede">用你的企业邮箱登录，验证码会由如流机器人私聊发给你。</p>
   <p class="hint" id="verification-bot-hint" hidden>如果从未使用过“<span id="verification-bot-name"></span>”，请先打开 <a id="verification-bot-link" href="#" target="_blank" rel="noreferrer">对话窗口</a>，后续即可正常接收验证码。</p>
   <div class="row">
@@ -94,7 +135,7 @@
     <input type="hidden" name="id" />
     <div class="row">
      <div>
-       <label>绑定的 Multica 智能体</label>
+       <label>绑定的 Team Mesh 智能体</label>
        <select name="agent" id="agent" required></select>
        <label style="margin:6px 0 0;color:inherit"><input type="checkbox" id="mine-only" /> 只看这个账号创建的</label>
        <p class="hint" id="agent-hint"></p>
@@ -139,7 +180,7 @@ const page = window.__BRIDGE_PAGE || {};
 function applyPageConfig() {
   const multicaLink = document.getElementById("multica-link");
   if (page.multicaWebUrl) multicaLink.href = page.multicaWebUrl;
-  else multicaLink.replaceWith(document.createTextNode("Multica"));
+  else multicaLink.replaceWith(document.createTextNode("Team Mesh"));
   if (page.emailPlaceholder) document.getElementById("login-email").placeholder = page.emailPlaceholder;
   if (page.verificationBotName && page.verificationBotChatUrl) {
     document.getElementById("verification-bot-name").textContent = page.verificationBotName;
@@ -206,7 +247,7 @@ function render() {
     accountLine.className = "hint";
     accountLine.textContent = robot.mineAccount
       ? "账号：" + (account?.email || account?.label || "你的账号")
-      : "账号：别人的 Multica 账号";
+      : "账号：别人的 Team Mesh 账号";
     agent.append(accountLine);
     const workspaceLine = document.createElement("div");
     workspaceLine.className = "hint";
@@ -228,7 +269,7 @@ function render() {
     if (status.error) {
       const detail = document.createElement("div");
       detail.className = "hint";
-      detail.style.color = status.state === "reconnecting" ? "#a16207" : "#b91c1c";
+      detail.style.color = status.state === "reconnecting" ? "var(--warning-text)" : "var(--danger-text)";
       detail.textContent = status.error;
       state.append(detail);
     }
@@ -299,7 +340,7 @@ function renderAgents() {
   const placeholder = document.createElement("option");
   placeholder.value = "";
   if (multicaMissing) {
-    placeholder.textContent = "这台机器还没有登记你的 Multica 账号，先在 Multica 用同一个邮箱登录一次";
+    placeholder.textContent = "这台机器还没有登记你的 Team Mesh 账号，先在 Team Mesh 用同一个邮箱登录一次";
   } else if (visible.length === 0) {
     placeholder.textContent = "当前用户暂未创建智能体";
   } else {
@@ -353,8 +394,8 @@ function renderSession() {
   const badge = document.getElementById("multica-state");
   badge.className = "state " + (signedIn ? "connected" : "error");
   badge.textContent = signedIn
-    ? "Multica 已登录：" + data.me.email + "（profile " + (data.me.profile === "" ? "默认" : data.me.profile) + "）"
-    : "Multica 未登录";
+    ? "Team Mesh 已登录：" + data.me.email + "（profile " + (data.me.profile === "" ? "默认" : data.me.profile) + "）"
+    : "Team Mesh 未登录";
   const link = document.getElementById("multica-login");
   link.hidden = signedIn;
   link.href = data.webUrl || "#";
@@ -530,7 +571,7 @@ form.addEventListener("submit", async (event) => {
     allowAllInGroups: form.allowAllInGroups.checked,
   };
   if (!payload.agent) {
-    toast("先选一个 Multica 智能体");
+    toast("先选一个 Team Mesh 智能体");
     return;
   }
   try {

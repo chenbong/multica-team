@@ -76,7 +76,7 @@ export class VerificationCodeRelay {
 
     try {
       await this.send(user, [
-        `**Multica 登录验证码：${code}**`,
+        `**Team Mesh 登录验证码：${code}**`,
         "",
         "10 分钟内有效。如果不是你本人在登录，请忽略这条消息。",
       ].join("\n"));
