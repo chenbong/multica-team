@@ -30,7 +30,7 @@ describe("connection commands", () => {
     expect(bodies[2]).toContain("multica --profile user ducc setup");
     expect(bodies[2]).toContain("PATH");
     expect(bodies[2]).toContain("ducc config model 'Opus 4.8'");
-    expect(bodies[3]?.trim()).toBe("multica --profile user daemon start");
+    expect(bodies[3]?.trim()).toBe("multica --profile user daemon restart");
   });
 
   it("places setup directly under section 3 when runtime defaults are absent", () => {
@@ -56,7 +56,7 @@ describe("connection commands", () => {
     expect(command.indexOf("ducc setup")).toBeLessThan(command.indexOf('export PATH='));
     expect(command.indexOf('export PATH=')).toBeLessThan(command.indexOf("ducc config model 'Opus 4.8'"));
     expect(command).toContain('$HOME/.baidu-cc/baidu-cc/bin:$HOME/.comate/baidu-cc/bin:$HOME/.baidu-cx/baidu-cx/bin:$HOME/.comate/baidu-cx/bin:$PATH');
-    expect(command.trim()).toMatch(/multica --profile test.user daemon start$/);
+    expect(command.trim()).toMatch(/multica --profile test.user daemon restart$/);
     expect(command).not.toContain("setup self-host");
   });
 

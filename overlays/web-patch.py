@@ -97,27 +97,20 @@ function MobileControlLink() {
 
   if (!url) return null;
   return (
-    <SidebarGroup className="mt-auto pt-4 pb-0">
-      <SidebarGroupContent>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              size="sm"
-              type="button"
-              className="text-muted-foreground hover:text-foreground"
-              onClick={handleCopy}
-              title={url}
-              aria-live="polite"
-              aria-label={copied ? "已复制" : `手机控制：${url}`}
-            >
-              <span className="truncate">
-                {copied ? "已复制" : `手机控制：${url}`}
-              </span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarGroupContent>
-    </SidebarGroup>
+    <SidebarMenuButton
+      size="sm"
+      type="button"
+      className="h-auto min-w-0 flex-1 flex-col items-start gap-0.5 py-1 text-muted-foreground hover:text-foreground group-data-[collapsible=icon]:hidden"
+      onClick={handleCopy}
+      title={url}
+      aria-live="polite"
+      aria-label={copied ? "已复制" : `手机控制：${url}`}
+    >
+      <span className="text-micro">手机控制</span>
+      <span className="w-full whitespace-normal! break-all text-left text-micro leading-tight">
+        {copied ? "已复制" : url}
+      </span>
+    </SidebarMenuButton>
   );
 }'''
 
@@ -380,14 +373,21 @@ CHANGES = {
     ],
     SIDEBAR: [
         (
+            'import { JoinDiscordCard } from "./join-discord-card";\n',
+            '',
+        ),
+        (
             SIDEBAR_DRAFT_DOT,
             SIDEBAR_DRAFT_DOT + "\n\n" + SIDEBAR_MOBILE_CONTROL,
         ),
         (
-            "          </SidebarGroup>\n        </SidebarContent>",
-            "          </SidebarGroup>\n\n"
-            "          <MobileControlLink />\n"
-            "        </SidebarContent>",
+            '          {/* Discord fills the strip while visible; once dismissed, help\n'
+            '              aligns with the navigation icons above. */}\n'
+            '          <div className="flex items-center gap-1">\n'
+            '            <JoinDiscordCard />\n',
+            '          {/* Keep mobile access alongside help below the utility links. */}\n'
+            '          <div className="flex min-w-0 items-center gap-1">\n'
+            '            <MobileControlLink />\n',
         ),
     ],
     PROXY: [
@@ -568,6 +568,13 @@ for locale, labels in {
     path=f"packages/views/locales/{locale}/settings.json"
     CHANGES.setdefault(path,[]).append(('  "page": {', '  "ducc": '+json.dumps(labels,ensure_ascii=False)+',\n  "page": {'))
 
+
+for locale, label in {
+    "en": "Only mine", "zh-Hans": "只看我的",
+    "ja": "自分のみ", "ko": "내 런타임만", "fr": "Uniquement les miens",
+}.items():
+    CHANGES.setdefault(f"packages/views/locales/{locale}/runtimes.json", []).append((
+        '    "scope_mine":', '    "only_mine": ' + json.dumps(label, ensure_ascii=False) + ',\n    "scope_mine":'))
 
 for locale,label in {"en":"Registration failed","zh-Hans":"注册失败"}.items():
     CHANGES[f"packages/views/locales/{locale}/runtimes.json"].append(('    "tagline":', '    "registration_failed": '+json.dumps(label,ensure_ascii=False)+',\n    "tagline":'))
@@ -817,6 +824,48 @@ PORTED_CHANGES = {
 
 for _rel, _replacements in PORTED_CHANGES.items():
     CHANGES[_rel] = _replacements + CHANGES.get(_rel, [])
+
+# Remove the optional attribution survey without writing questionnaire answers.
+CHANGES["packages/views/layout/dashboard-layout.tsx"] = [
+    ('import { SourceBackfillModal } from "../onboarding";\n', ''),
+    ('          <SourceBackfillModal />\n', ''),
+]
+
+# Limit only the add-computer dialog; other installer surfaces keep their choices.
+CHANGES["packages/views/common/cli-install-command.tsx"].extend([
+    ('  classNames,\n  children,', '  classNames,\n  platforms = PLATFORMS,\n  children,'),
+    ('  classNames?: { list?: string; trigger?: string };',
+     '  classNames?: { list?: string; trigger?: string };\n  platforms?: readonly [CliInstallPlatform, ...CliInstallPlatform[]];'),
+    ('<Tabs defaultValue={PLATFORMS[0]}>', '<Tabs defaultValue={platforms[0]}>'),
+    ('        {PLATFORMS.map((platform)', '        {platforms.map((platform)'),
+    ('      {PLATFORMS.map((platform)', '      {platforms.map((platform)'),
+])
+CHANGES[DIALOG].append((
+    '            <CliInstallCommand\n',
+    '            <CliInstallCommand\n              platforms={["macosLinux"]}\n',
+))
+CHANGES["packages/views/runtimes/components/connect-remote-dialog.test.tsx"].extend([
+    ('it("copies the installer for the platform picked in step 1"',
+     'it("only offers macOS / Linux and copies its full setup command"'),
+    ('    await user.click(screen.getByRole("tab", { name: "Windows" }));',
+     '    expect(screen.queryByRole("tab", { name: "Windows" })).not.toBeInTheDocument();\n'
+     '    expect(screen.getAllByRole("tab")).toHaveLength(1);\n'
+     '    await user.click(screen.getByRole("tab", { name: "macOS / Linux" }));'),
+    ('expect.stringContaining(WINDOWS_CMD)', 'expect.not.stringContaining(WINDOWS_CMD)'),
+])
+CHANGES.setdefault("packages/views/common/cli-install-command.test.tsx", []).append((
+    'describe("CliInstallCommand", () => {\n',
+    'describe("CliInstallCommand", () => {\n'
+    '  it("can restrict the available platform tabs", () => {\n'
+    '    render(<CliInstallCommand labels={LABELS} platforms={["macosLinux"]}>\n'
+    '      {(command) => <code>{command}</code>}\n'
+    '    </CliInstallCommand>);\n'
+    '    expect(screen.getAllByRole("tab")).toHaveLength(1);\n'
+    '    expect(screen.queryByRole("tab", { name: "Windows" })).not.toBeInTheDocument();\n'
+    '    expect(screen.getByText(CLI_INSTALL_COMMANDS.macosLinux)).toBeInTheDocument();\n'
+    '  });\n',
+))
+
 
 def apply_patches():
     for rel, original, text, unchanged in plan_patches():

@@ -78,5 +78,5 @@ ${path}
 ducc config model 'Opus 4.8'
 
 # 4. 启动守护进程，连接平台
-${cli} daemon start`;
+${cli} daemon restart`;
 }
