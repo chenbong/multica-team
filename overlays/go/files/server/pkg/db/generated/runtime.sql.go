@@ -493,7 +493,7 @@ func (q *Queries) GetAgentRuntimeForWorkspace(ctx context.Context, arg GetAgentR
 }
 
 const getAgentRuntimeHeartbeatLeases = `-- name: GetAgentRuntimeHeartbeatLeases :many
-SELECT id, workspace_id, daemon_id, status, last_seen_at
+SELECT id, workspace_id, daemon_id, status, last_seen_at, owner_id
 FROM agent_runtime
 WHERE id = ANY($1::uuid[])
 `
@@ -504,6 +504,7 @@ type GetAgentRuntimeHeartbeatLeasesRow struct {
 	DaemonID    pgtype.Text        `json:"daemon_id"`
 	Status      string             `json:"status"`
 	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
+	OwnerID     pgtype.UUID        `json:"owner_id"`
 }
 
 // Narrow connection-time and heartbeat-reconciliation projection. The daemon
@@ -525,6 +526,7 @@ func (q *Queries) GetAgentRuntimeHeartbeatLeases(ctx context.Context, ids []pgty
 			&i.DaemonID,
 			&i.Status,
 			&i.LastSeenAt,
+			&i.OwnerID,
 		); err != nil {
 			return nil, err
 		}
@@ -778,6 +780,9 @@ func (q *Queries) ListDaemonCustomNames(ctx context.Context, arg ListDaemonCusto
 const listStaleOfflineRuntimeGCCandidates = `-- name: ListStaleOfflineRuntimeGCCandidates :many
 SELECT id FROM agent_runtime
 WHERE status = 'offline'
+  -- Personal computers are durable owner assets, not workspace cache rows.
+  -- Only the explicit owner-wide deletion flow can remove their projections.
+  AND (owner_id IS NULL OR daemon_id IS NULL)
   AND last_seen_at < now() - make_interval(secs => $1::double precision)
   AND NOT EXISTS (
     SELECT 1

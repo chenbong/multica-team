@@ -83,7 +83,8 @@ func (h *Handler) requireDaemonWorkspaceAccess(w http.ResponseWriter, r *http.Re
 	return ok
 }
 
-// requireDaemonRuntimeAccess looks up a runtime and verifies the caller owns its workspace.
+// requireDaemonRuntimeAccess verifies both workspace membership and runtime ownership
+// (or an exact workspace/machine grant for daemon tokens).
 //
 // Only pgx.ErrNoRows is treated as a real "runtime gone" 404 — the daemon uses
 // that response to drop the stale runtime from its in-memory map and re-register,
@@ -105,6 +106,10 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 		return db.AgentRuntime{}, false
 	}
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(rt.WorkspaceID)) {
+		return db.AgentRuntime{}, false
+	}
+	if !daemonOwnsRuntime(r, rt) {
+		writeError(w, http.StatusNotFound, "runtime not found")
 		return db.AgentRuntime{}, false
 	}
 	return rt, true
@@ -160,6 +165,13 @@ func (h *Handler) requireDaemonTaskAccessWithWorkspace(w http.ResponseWriter, r 
 	}
 
 	if !h.requireDaemonWorkspaceAccess(w, r, wsID) {
+		return db.AgentTaskQueue{}, "", false
+	}
+	if !task.RuntimeID.Valid {
+		writeError(w, http.StatusNotFound, "task not found")
+		return db.AgentTaskQueue{}, "", false
+	}
+	if _, ok := h.requireDaemonRuntimeAccess(w, r, uuidToString(task.RuntimeID)); !ok {
 		return db.AgentTaskQueue{}, "", false
 	}
 	return task, wsID, true
@@ -333,6 +345,72 @@ func (h *Handler) inheritMachineCustomName(ctx context.Context, rt db.AgentRunti
 }
 
 var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
+var errDaemonRegistrationDenied = errors.New("daemon registration belongs to another owner")
+
+// Serialize registration of the same machine, including the first insert: a
+// read-before-upsert alone cannot prevent two owners racing for a daemon ID.
+// MDTs preserve the existing machine owner; a PAT may never adopt an ownerless
+// or foreign machine by presenting its daemon ID.
+func lockDaemonRegistration(ctx context.Context, tx pgx.Tx, workspaceID pgtype.UUID, daemonID pgtype.Text, ownerID pgtype.UUID) (pgtype.UUID, error) {
+	isDaemon := middleware.DaemonWorkspaceIDFromContext(ctx) != ""
+	if isDaemon {
+		if middleware.DaemonWorkspaceIDFromContext(ctx) != uuidToString(workspaceID) ||
+			middleware.DaemonIDFromContext(ctx) == "" || middleware.DaemonIDFromContext(ctx) != daemonID.String {
+			return pgtype.UUID{}, errDaemonRegistrationDenied
+		}
+	} else if !ownerID.Valid {
+		return pgtype.UUID{}, errDaemonRegistrationDenied
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, uuidToString(workspaceID)+"/"+daemonID.String); err != nil {
+		return pgtype.UUID{}, err
+	}
+	rows, err := tx.Query(ctx, `SELECT owner_id FROM agent_runtime WHERE workspace_id=$1 AND daemon_id=$2 ORDER BY id FOR UPDATE`, workspaceID, daemonID)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	defer rows.Close()
+	resolvedOwner := ownerID
+	for rows.Next() {
+		var existingOwner pgtype.UUID
+		if err := rows.Scan(&existingOwner); err != nil {
+			return pgtype.UUID{}, err
+		}
+		if !isDaemon && (!existingOwner.Valid || existingOwner != ownerID) {
+			return pgtype.UUID{}, errDaemonRegistrationDenied
+		}
+		if existingOwner.Valid {
+			if resolvedOwner.Valid && resolvedOwner != existingOwner {
+				return pgtype.UUID{}, errDaemonRegistrationDenied
+			}
+			resolvedOwner = existingOwner
+		}
+	}
+	return resolvedOwner, rows.Err()
+}
+
+func (h *Handler) upsertDaemonRuntime(ctx context.Context, params db.UpsertAgentRuntimeParams) (db.UpsertAgentRuntimeRow, error) {
+	var row db.UpsertAgentRuntimeRow
+	err := retryPersonalRuntimeTx(ctx, func() error { var err error; row, err = h.upsertDaemonRuntimeOnce(ctx, params); return err })
+	return row, err
+}
+
+func (h *Handler) upsertDaemonRuntimeOnce(ctx context.Context, params db.UpsertAgentRuntimeParams) (db.UpsertAgentRuntimeRow, error) {
+	var row db.UpsertAgentRuntimeRow
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return row, err
+	}
+	defer tx.Rollback(ctx)
+	params.OwnerID, err = lockDaemonRegistration(ctx, tx, params.WorkspaceID, params.DaemonID, params.OwnerID)
+	if err != nil {
+		return row, err
+	}
+	row, err = h.Queries.WithTx(tx).UpsertAgentRuntime(ctx, params)
+	if err != nil {
+		return row, err
+	}
+	return row, tx.Commit(ctx)
+}
 
 // upsertRuntimeWithProfile serializes custom-runtime registration with profile
 // deletion. The profile row remains KEY SHARE locked until the runtime upsert
@@ -340,6 +418,21 @@ var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
 // enumerates runtime rows. This closes the stale-read window where deletion
 // could miss an instance inserted by a concurrently registering daemon.
 func (h *Handler) upsertRuntimeWithProfile(
+	ctx context.Context,
+	workspaceID, profileID pgtype.UUID,
+	build func(db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams,
+) (db.UpsertAgentRuntimeWithProfileRow, db.RuntimeProfile, error) {
+	var row db.UpsertAgentRuntimeWithProfileRow
+	var profile db.RuntimeProfile
+	err := retryPersonalRuntimeTx(ctx, func() error {
+		var err error
+		row, profile, err = h.upsertRuntimeWithProfileOnce(ctx, workspaceID, profileID, build)
+		return err
+	})
+	return row, profile, err
+}
+
+func (h *Handler) upsertRuntimeWithProfileOnce(
 	ctx context.Context,
 	workspaceID, profileID pgtype.UUID,
 	build func(db.RuntimeProfile) db.UpsertAgentRuntimeWithProfileParams,
@@ -361,11 +454,18 @@ func (h *Handler) upsertRuntimeWithProfile(
 	if err != nil {
 		return row, profile, fmt.Errorf("lock runtime profile: %w", err)
 	}
+	params := build(profile)
+	params.OwnerID, err = lockDaemonRegistration(ctx, tx, params.WorkspaceID, params.DaemonID, params.OwnerID)
+	if err != nil {
+		return row, profile, err
+	}
+	if !profile.CreatedBy.Valid || profile.CreatedBy != params.OwnerID {
+		return row, profile, pgx.ErrNoRows
+	}
 	if !profile.Enabled {
 		return row, profile, errRuntimeProfileDisabled
 	}
-
-	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, params)
 	if err != nil {
 		return row, profile, fmt.Errorf("upsert profile runtime: %w", err)
 	}
@@ -432,8 +532,8 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	req.WorkspaceID = uuidToString(wsUUID)
 
 	// Verify workspace access and resolve owner.
-	// Daemon tokens (mdt_) prove workspace access directly; OwnerID will be zero
-	// (the SQL COALESCE preserves any existing owner on upsert).
+	// Daemon tokens (mdt_) prove an exact workspace/machine grant. The locked
+	// registration resolves and preserves that machine's existing owner.
 	// PAT/JWT tokens require a membership check and set OwnerID from the member.
 	var ownerID pgtype.UUID
 	if daemonWsID := middleware.DaemonWorkspaceIDFromContext(r.Context()); daemonWsID != "" {
@@ -441,7 +541,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "workspace not found")
 			return
 		}
-		// ownerID stays zero — COALESCE keeps the existing owner on upsert.
+		if middleware.DaemonIDFromContext(r.Context()) == "" || middleware.DaemonIDFromContext(r.Context()) != req.DaemonID {
+			writeError(w, http.StatusForbidden, "daemon_id does not match token")
+			return
+		}
 	} else {
 		member, ok := h.requireWorkspaceMember(w, r, req.WorkspaceID, "workspace not found")
 		if !ok {
@@ -529,6 +632,14 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, "runtime profile is disabled: "+runtime.ProfileID)
 				return
 			}
+			if errors.Is(err, errDaemonRegistrationDenied) {
+				writeError(w, http.StatusForbidden, "daemon registration is not owned by this user")
+				return
+			}
+			if personalRuntimeRetired(err) {
+				writeError(w, http.StatusConflict, "this daemon identity was retired; use the current computer identity")
+				return
+			}
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
 					uuidToString(ownerID),
@@ -564,7 +675,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				ProfileID:      prow.ProfileID,
 			}
 		} else {
-			row, err := h.Queries.UpsertAgentRuntime(r.Context(), db.UpsertAgentRuntimeParams{
+			row, err := h.upsertDaemonRuntime(r.Context(), db.UpsertAgentRuntimeParams{
 				WorkspaceID: wsUUID,
 				DaemonID:    strToText(req.DaemonID),
 				Name:        name,
@@ -575,6 +686,14 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				Metadata:    metadata,
 				OwnerID:     ownerID,
 			})
+			if errors.Is(err, errDaemonRegistrationDenied) {
+				writeError(w, http.StatusForbidden, "daemon registration is not owned by this user")
+				return
+			}
+			if personalRuntimeRetired(err) {
+				writeError(w, http.StatusConflict, "this daemon identity was retired; use the current computer identity")
+				return
+			}
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
 					uuidToString(ownerID),
@@ -735,7 +854,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	// that interpret every daemon:register event as a newly connected computer.
 	if len(resp) > 0 {
 		h.publish(protocol.EventDaemonRegister, req.WorkspaceID, "system", "", map[string]any{
-			"runtimes": resp,
+			"action": "refresh",
 		})
 	}
 
@@ -790,6 +909,9 @@ func (h *Handler) mergeLegacyRuntimes(r *http.Request, registered db.AgentRuntim
 			if _, seen := merged[oldID]; seen {
 				continue
 			}
+			if !registered.OwnerID.Valid || !old.OwnerID.Valid || registered.OwnerID != old.OwnerID || !daemonOwnsRuntime(r, old) {
+				continue
+			}
 			merged[oldID] = struct{}{}
 
 			if err := h.mergeLegacyRuntime(r.Context(), registered.ID, old.ID, legacyID, provider); err != nil {
@@ -836,6 +958,10 @@ var errRuntimeMergeFenced = errors.New("runtime merge refused by the task-write 
 // teardown cannot start deleting the target until this merge finishes, and any
 // failure rolls the whole merge back to its starting state.
 func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRuntimeID pgtype.UUID, legacyID, provider string) error {
+	return retryPersonalRuntimeTx(ctx, func() error { return h.mergeLegacyRuntimeOnce(ctx, newRuntimeID, oldRuntimeID, legacyID, provider) })
+}
+
+func (h *Handler) mergeLegacyRuntimeOnce(ctx context.Context, newRuntimeID, oldRuntimeID pgtype.UUID, legacyID, provider string) error {
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
@@ -853,6 +979,19 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 	if err := qtx.LockWorkspaceForRuntimeMerge(ctx, runtimeIDs); err != nil {
 		return fmt.Errorf("lock workspace: %w", err)
 	}
+	// Personal identities precede registration aliases in the global lock
+	// order. Retiring an old identity must be atomic with moving its history.
+	canonicalRows, err := tx.Query(ctx, `SELECT id FROM personal_runtime WHERE id IN (SELECT personal_runtime_id FROM agent_runtime WHERE id=ANY($1::uuid[])) ORDER BY id FOR UPDATE`, runtimeIDs)
+	if err != nil {
+		return err
+	}
+	for canonicalRows.Next() {
+	}
+	err = canonicalRows.Err()
+	canonicalRows.Close()
+	if err != nil {
+		return err
+	}
 	locked, err := qtx.LockRuntimesForMerge(ctx, runtimeIDs)
 	if err != nil {
 		return fmt.Errorf("lock runtimes: %w", err)
@@ -861,6 +1000,28 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 		// One of them went away while we were queueing for the lock; the fence
 		// inside the reassignment would refuse anyway.
 		return errRuntimeMergeFenced
+	}
+	// Revalidate after both row locks. Neither a stale preflight nor the
+	// workspace/provider lookup may authorize moving another owner's agents.
+	newRuntime, err := qtx.GetAgentRuntime(ctx, newRuntimeID)
+	if err != nil {
+		return err
+	}
+	oldRuntime, err := qtx.GetAgentRuntime(ctx, oldRuntimeID)
+	if err != nil {
+		return err
+	}
+	if !newRuntime.OwnerID.Valid || !oldRuntime.OwnerID.Valid || newRuntime.OwnerID != oldRuntime.OwnerID ||
+		newRuntime.WorkspaceID != oldRuntime.WorkspaceID || newRuntime.Provider != oldRuntime.Provider ||
+		newRuntime.ProfileID.Valid || oldRuntime.ProfileID.Valid {
+		return errDaemonRegistrationDenied
+	}
+	if daemonID := middleware.DaemonIDFromContext(ctx); daemonID != "" {
+		if middleware.DaemonWorkspaceIDFromContext(ctx) != uuidToString(newRuntime.WorkspaceID) ||
+			!newRuntime.DaemonID.Valid || newRuntime.DaemonID.String != daemonID ||
+			!oldRuntime.DaemonID.Valid || oldRuntime.DaemonID.String != daemonID {
+			return errDaemonRegistrationDenied
+		}
 	}
 
 	reassignment, err := qtx.ReassignTasksToRuntime(ctx, db.ReassignTasksToRuntimeParams{
@@ -885,6 +1046,14 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 	// Inside the transaction this can no longer be best-effort: a failed statement
 	// poisons the transaction, so it either lands with the rest of the merge or the
 	// merge is rolled back.
+	_, err = tx.Exec(ctx, `UPDATE personal_runtime target SET custom_name=coalesce(target.custom_name,source.custom_name) FROM personal_runtime source WHERE target.id=(SELECT personal_runtime_id FROM agent_runtime WHERE id=$1) AND source.id=(SELECT personal_runtime_id FROM agent_runtime WHERE id=$2)`, newRuntimeID, oldRuntimeID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE agent_runtime r SET custom_name=c.custom_name FROM personal_runtime c WHERE c.id=(SELECT personal_runtime_id FROM agent_runtime WHERE id=$1) AND r.personal_runtime_id=c.id`, newRuntimeID)
+	if err != nil {
+		return err
+	}
 	if err := qtx.RecordRuntimeLegacyDaemonID(ctx, db.RecordRuntimeLegacyDaemonIDParams{
 		ID:             newRuntimeID,
 		LegacyDaemonID: strToText(legacyID),
@@ -893,6 +1062,17 @@ func (h *Handler) mergeLegacyRuntime(ctx context.Context, newRuntimeID, oldRunti
 	}
 	if err := qtx.DeleteAgentRuntime(ctx, oldRuntimeID); err != nil {
 		return fmt.Errorf("delete old runtime: %w", err)
+	}
+	// Workspace aliases of the old hostname may still exist. Retire the
+	// personal identity now so a list/refresh cannot recreate aliases already
+	// merged; remaining workspaces drain through this same legacy merge path.
+	_, err = tx.Exec(ctx, `UPDATE personal_runtime SET retired_at=coalesce(retired_at,now()) WHERE owner_id=$1 AND daemon_id=$2 AND provider=$3 AND personal_profile_id IS NULL`, oldRuntime.OwnerID, oldRuntime.DaemonID, oldRuntime.Provider)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM personal_runtime c WHERE c.owner_id=$1 AND c.daemon_id=$2 AND c.provider=$3 AND c.retired_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_runtime r WHERE r.personal_runtime_id=c.id)`, oldRuntime.OwnerID, oldRuntime.DaemonID, oldRuntime.Provider)
+	if err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -994,7 +1174,7 @@ func (h *Handler) DaemonDeregister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		wsID := uuidToString(rt.WorkspaceID)
-		if !h.verifyDaemonWorkspaceAccess(r, wsID) {
+		if !h.verifyDaemonWorkspaceAccess(r, wsID) || !daemonOwnsRuntime(r, rt) {
 			slog.Warn("deregister: workspace mismatch", "runtime_id", rid)
 			continue
 		}
@@ -1156,6 +1336,10 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workspaceCheckMs = time.Since(wsCheckStart).Milliseconds()
 	if !wsOK {
 		outcome = "workspace_denied"
+		return
+	}
+	if !daemonOwnsRuntime(r, rt) {
+		writeError(w, 404, "runtime not found")
 		return
 	}
 	authMs = time.Since(start).Milliseconds()
@@ -1810,7 +1994,7 @@ func (h *Handler) ClaimTasksByRuntime(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		if !h.verifyDaemonWorkspaceAccess(r, uuidToString(rt.WorkspaceID)) {
+		if !h.verifyDaemonWorkspaceAccess(r, uuidToString(rt.WorkspaceID)) || !daemonOwnsRuntime(r, rt) {
 			continue
 		}
 		// Group-ownership check (mirrors the WS path, daemon_ws.go): a runtime
@@ -1977,9 +2161,9 @@ func claimPollHintDelay(now, fireAt time.Time) time.Duration {
 //     snapshot), and a concurrent re-registration that would change owner_id
 //     blocks until this gate commits — closing the TOCTOU window between the
 //     claim-time runtime read and daemon delivery (PUCK-89 blocker 1);
-//   - the private-runtime owner fence re-runs against the locked row;
+//   - the runtime owner fence re-runs against the locked row;
 //   - agent.runtime_id still equals the claimed task's runtime (rebind fence);
-//   - agent ownership still satisfies the private-runtime binding.
+//   - agent ownership still satisfies the runtime binding.
 //   - response requesting-user identity is refreshed from that same owner;
 //
 // On mismatch the task is settled through the existing
@@ -2026,12 +2210,12 @@ func (h *Handler) finalizeClaimDelivery(
 				Detail: "agent runtime changed before delivery",
 			}
 		}
-		if locked.Visibility == "private" && locked.OwnerID.Valid &&
+		if locked.OwnerID.Valid &&
 			(!agent.OwnerID.Valid || agent.OwnerID != locked.OwnerID) {
 			agentOwnerID = agent.OwnerID
 			return &service.ClaimDeliveryAuthzError{
 				Reason: "error_runtime_access_denied",
-				Detail: "private runtime does not permit task agent at delivery gate",
+				Detail: "runtime does not permit task agent at delivery gate",
 			}
 		}
 		if !locked.OwnerID.Valid {
@@ -2077,17 +2261,17 @@ func (h *Handler) finalizeClaimDelivery(
 		)
 		return nil, failure, nil
 	default:
-		userMessage := "This private runtime cannot run the assigned agent because the agent and runtime have different owners."
+		userMessage := "This runtime cannot run the assigned agent because the agent and runtime have different owners."
 		if authzErr.Reason == "error_runtime_owner_missing" {
 			userMessage = "This runtime cannot run the assigned agent because the runtime has no owner."
 		} else if !agentOwnerID.Valid {
-			userMessage = "This private runtime cannot run the assigned agent because the agent has no owner."
+			userMessage = "This runtime cannot run the assigned agent because the agent has no owner."
 		}
 		failure := h.failClaimedTaskBeforeLaunch(
 			ctx, task,
 			userMessage,
 			taskfailure.ReasonRuntimeAccessDenied,
-			"error_runtime_access_denied", http.StatusForbidden, "private runtime does not permit task agent",
+			"error_runtime_access_denied", http.StatusForbidden, "runtime does not permit task agent",
 		)
 		return nil, failure, nil
 	}
@@ -2443,13 +2627,13 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			"error_agent_runtime_changed", http.StatusConflict, "agent runtime changed before task delivery",
 		)
 	}
-	if runtime.Visibility == "private" && runtime.OwnerID.Valid &&
+	if runtime.OwnerID.Valid &&
 		(!agent.OwnerID.Valid || agent.OwnerID != runtime.OwnerID) {
-		userMessage := "This private runtime cannot run the assigned agent because the agent and runtime have different owners."
+		userMessage := "This runtime cannot run the assigned agent because the agent and runtime have different owners."
 		if !agent.OwnerID.Valid {
-			userMessage = "This private runtime cannot run the assigned agent because the agent has no owner."
+			userMessage = "This runtime cannot run the assigned agent because the agent has no owner."
 		}
-		slog.Warn("daemon claim: private runtime no longer permits task agent; refusing dispatch",
+		slog.Warn("daemon claim: runtime no longer permits task agent; refusing dispatch",
 			"task_id", uuidToString(task.ID),
 			"agent_id", uuidToString(task.AgentID),
 			"runtime_id", runtimeID,
@@ -2459,7 +2643,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			r.Context(), task,
 			userMessage,
 			taskfailure.ReasonRuntimeAccessDenied,
-			"error_runtime_access_denied", http.StatusForbidden, "private runtime does not permit task agent",
+			"error_runtime_access_denied", http.StatusForbidden, "runtime does not permit task agent",
 		)
 	}
 	useSkillRefs := requestHasClientCapability(r, protocol.DaemonCapabilitySkillBundlesV1)
@@ -4965,8 +5149,8 @@ func (h *Handler) GetTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// This endpoint is polled by every in-flight daemon task. Load only the
-	// status and the owning agent's workspace instead of the full task plus its
-	// optional issue / chat / autopilot source chain.
+	// status and the owning agent's workspace independently of the optional
+	// issue / chat / autopilot source chain, which may already have been deleted.
 	task, err := h.Queries.GetAgentTaskStatus(r.Context(), taskUUID)
 	if err != nil {
 		// A missing row is the daemon's hard interruption signal. Keep transient
@@ -4981,6 +5165,24 @@ func (h *Handler) GetTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(task.WorkspaceID)) {
+		return
+	}
+	// Workspace access alone must not let a peer daemon inspect this task.
+	// Resolve its execution runtime without following the optional source links.
+	fullTask, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "task not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load task")
+		}
+		return
+	}
+	if !fullTask.RuntimeID.Valid {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if _, ok := h.requireDaemonRuntimeAccess(w, r, uuidToString(fullTask.RuntimeID)); !ok {
 		return
 	}
 

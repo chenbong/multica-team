@@ -569,13 +569,6 @@ for locale, labels in {
     CHANGES.setdefault(path,[]).append(('  "page": {', '  "ducc": '+json.dumps(labels,ensure_ascii=False)+',\n  "page": {'))
 
 
-for locale, label in {
-    "en": "Only mine", "zh-Hans": "只看我的",
-    "ja": "自分のみ", "ko": "내 런타임만", "fr": "Uniquement les miens",
-}.items():
-    CHANGES.setdefault(f"packages/views/locales/{locale}/runtimes.json", []).append((
-        '    "scope_mine":', '    "only_mine": ' + json.dumps(label, ensure_ascii=False) + ',\n    "scope_mine":'))
-
 for locale,label in {"en":"Registration failed","zh-Hans":"注册失败"}.items():
     CHANGES[f"packages/views/locales/{locale}/runtimes.json"].append(('    "tagline":', '    "registration_failed": '+json.dumps(label,ensure_ascii=False)+',\n    "tagline":'))
 
@@ -623,14 +616,16 @@ def plan_patches():
         current = source.read_text()
         original = backup.read_text() if backup.exists() else current
         text = original
-        for number, (before, after) in enumerate(replacements, 1):
-            if text.count(before) != 1:
+        for number, replacement in enumerate(replacements, 1):
+            before, after = replacement[:2]
+            expected_count = replacement[2] if len(replacement) == 3 else 1
+            if text.count(before) != expected_count:
                 errors.append(
-                    f"{rel} anchor {number}: found {text.count(before)}, expected exactly 1; "
+                    f"{rel} anchor {number}: found {text.count(before)}, expected exactly {expected_count}; "
                     f"starts with {before[:100]!r}"
                 )
                 break
-            text = text.replace(before, after, 1)
+            text = text.replace(before, after, expected_count)
         else:
             if current not in (original, text):
                 errors.append(f"{rel}: staging file changed after patching; create a fresh copy")
@@ -865,6 +860,382 @@ CHANGES.setdefault("packages/views/common/cli-install-command.test.tsx", []).app
     '    expect(screen.getByText(CLI_INSTALL_COMMANDS.macosLinux)).toBeInTheDocument();\n'
     '  });\n',
 ))
+
+
+# Personal runtimes: workspace IDs remain in compatibility requests, never in
+# configuration ownership. Invalidate every workspace projection after edits.
+CHANGES.setdefault("packages/core/runtimes/access.ts", []).append((
+    '  if (!currentUserId) return true;\n  if (runtime.owner_id === currentUserId) return true;\n  return runtime.visibility === "public";',
+    '  return !!currentUserId && runtime.owner_id === currentUserId;'))
+CHANGES["packages/core/runtimes/access.ts"].append((
+    ' * A private runtime is usable only by its owner; a public one by anyone in the\n * workspace; an ownerless one by nobody. Workspace role does not enter into\n * it: a private runtime is someone\'s own machine, so not even an admin may\n * bind an agent to it, and only the owner may flip it to public. The server\n * enforces exactly this predicate (`canUseRuntimeForAgent`), so the picker and\n * the API/CLI never disagree (MUL-6126).\n *\n * An unknown viewer (no session yet) is treated as allowed so a still-loading\n * auth state never hides a runtime the user does own — every write path\n * re-checks server-side.',
+    ' * Runtime configuration is personal in every workspace. Only its owner\n * may select it, regardless of workspace role or legacy visibility flags.\n * Sharing is controlled through agent invocation grants. Unknown viewers\n * are denied while authentication resolves; the server enforces ownership.'))
+for rel, count in [("packages/core/runtimes/mutations.ts", 4), ("packages/core/runtimes/profiles.ts", 2)]:
+    CHANGES.setdefault(rel, []).append(('runtimeKeys.all(wsId)', '["runtimes"]', count))
+CHANGES["packages/core/runtimes/profiles.ts"].append(('runtimeProfileKeys.all(wsId) });', '["runtime-profiles"] });', 3))
+CHANGES.setdefault("packages/core/runtimes/queries.ts", []).extend([
+    ('import { api } from "../api";', 'import { api } from "../api";\nimport { useAuthStore } from "../auth";'),
+    ('["runtimes", wsId] as const', '["runtimes", wsId, useAuthStore.getState().user?.id ?? "anonymous"] as const'),
+    ('["runtimes", "usage",', '["runtimes", "usage", useAuthStore.getState().user?.id ?? "anonymous",', 3),
+])
+CHANGES["packages/core/runtimes/profiles.ts"].extend([
+    ('import { api } from "../api";', 'import { api } from "../api";\nimport { useAuthStore } from "../auth";'),
+    ('["runtime-profiles", wsId] as const', '["runtime-profiles", wsId, useAuthStore.getState().user?.id ?? "anonymous"] as const'),
+    ('// Query keys for the workspace-scoped custom runtime profile catalog. Kept', '// Account-owned profiles retain workspace routing for legacy aliases. Kept'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/runtime-detail.tsx", []).extend([
+    ('const canEditRuntime = isAdmin || isRuntimeOwner;', 'const canEditRuntime = isRuntimeOwner;'),
+    ('? isAdmin && !!runtimeProfile', '? isRuntimeOwner && !!runtimeProfile'),
+    ('canEditVisibility={!!isRuntimeOwner}', 'canEditVisibility={false}'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/runtime-list.tsx", []).extend([
+    ('? isAdmin && !!profile', '? !!user && runtime.owner_id === user.id && !!profile'),
+    ('(isAdmin || (!!user && runtime.owner_id === user.id))', '(!!user && runtime.owner_id === user.id)'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/runtime-detail-page.tsx", []).extend([
+    ('isAdmin && machine?.mode === "local" && !!machine.daemonId;', '!!currentUserId && machine?.mode === "local" && !!machine.daemonId && machine.runtimes.every((r) => r.owner_id === currentUserId);'),
+    ('const editable = isAdmin\n      ? machine.runtimes[0]\n      : machine.runtimes.find((runtime) => runtime.owner_id === currentUserId);', 'const editable = machine.runtimes.find((runtime) => runtime.owner_id === currentUserId);'),
+    ('canManagePublicRuntimes={isAdmin}', 'canManagePublicRuntimes={false}'),
+])
+CHANGES["packages/core/api/client.ts"].append((
+    '  async deleteOfflineMachine(runtimeId: string, runtimeIds: string[], agentIds: string[]): Promise<void> {',
+    '  async personalMachineDeletePlan(runtimeId: string): Promise<PersonalMachineDeletePlan> {\n'
+    '    const plan = parseWithFallback<PersonalMachineDeletePlan | null>(\n'
+    '      await this.fetch(`/api/runtimes/${runtimeId}/delete-machine-plan`),\n'
+    '      PersonalMachineDeletePlanSchema, null, { endpoint: "GET /api/runtimes/:runtimeId/delete-machine-plan" },\n'
+    '    );\n'
+    '    if (!plan || !plan.ids.includes(runtimeId)) throw new Error("Invalid deletion plan. Close the dialog and try again.");\n'
+    '    return plan;\n  }\n\n'
+    '  async deleteOfflineMachine(runtimeId: string, runtimeIds: string[], agentIds: string[]): Promise<void> {'))
+CHANGES["packages/core/api/client.ts"].append((
+    'import { configStore } from "../config";',
+    'import { configStore } from "../config";\nimport { PersonalMachineDeletePlanSchema, type PersonalMachineDeletePlan } from "./personal-runtime-schema";'))
+CHANGES.setdefault("packages/views/locales/zh-Hans/runtimes.json", []).extend([
+    ('"title": "运行时",', '"title": "我的运行时",'),
+    ('将从数据库删除当前工作区中这台电脑的 {{count}} 个运行时实例。保留共享运行时配置及其他电脑。', '将删除这台个人电脑在所有工作区的 {{count}} 条注册记录。保留运行时配置及其他电脑。'),
+    ('绑定的用户智能体将解绑，保留配置、聊天和任务历史；未完成运行会取消，受影响的自动化会暂停。内部系统智能体按现有清理规则移除。', '各工作区绑定的智能体将解绑，保留配置、聊天和任务历史。有未结束任务时拒绝删除，受影响的自动化会暂停。'),
+    ('我确认解绑以上智能体，并取消相关未完成运行。', '我确认解除以上各工作区智能体的运行时绑定。'),
+])
+CHANGES.setdefault("packages/views/locales/en/runtimes.json", []).append(('"title": "Runtimes",', '"title": "My runtimes",'))
+
+# Personal configuration changes refresh every cached workspace projection.
+CHANGES["packages/core/runtimes/mutations.ts"].extend([
+    ('(wsId: string)', '(_wsId: string)', 4),
+    ('import { runtimeKeys } from "./queries";\n', ''),
+    ('import { workspaceKeys } from "../workspace/queries";\n', ''),
+    ('import { agentTaskSnapshotKeys } from "../agents/queries";\n', ''),
+    ('      qc.invalidateQueries({ queryKey: ["runtimes"] });',
+     '      qc.invalidateQueries({ queryKey: ["runtimes"] });\n      qc.invalidateQueries({ queryKey: ["runtime-profiles"] });', 3),
+    ('      qc.invalidateQueries({queryKey: ["runtimes"]});',
+     '      qc.invalidateQueries({queryKey: ["runtimes"]});\n      qc.invalidateQueries({queryKey: ["runtime-profiles"]});'),
+    ('      qc.invalidateQueries({queryKey: workspaceKeys.agents(wsId)});\n      qc.invalidateQueries({queryKey: agentTaskSnapshotKeys.all(wsId)});',
+     '      qc.invalidateQueries({queryKey: ["workspaces"]});'),
+    ('      qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });\n      qc.invalidateQueries({ queryKey: agentTaskSnapshotKeys.all(wsId) });',
+     '      qc.invalidateQueries({ queryKey: ["workspaces"] });'),
+])
+CHANGES["packages/core/runtimes/profiles.ts"].extend([
+    ('import { runtimeKeys } from "./queries";\n', ''),
+    ('      qc.invalidateQueries({ queryKey: ["runtime-profiles"] });\n    },',
+     '      qc.invalidateQueries({ queryKey: ["runtime-profiles"] });\n      qc.invalidateQueries({ queryKey: ["runtimes"] });\n    },'),
+])
+CHANGES["packages/views/runtimes/components/runtime-detail-page.tsx"].extend([
+    ('  memberListOptions,\n', ''),
+    ('  const { data: members = [] } = useQuery(memberListOptions(wsId));\n', ''),
+    ('  const currentMember = currentUserId\n    ? members.find((member) => member.user_id === currentUserId)\n    : null;\n  const isAdmin =\n    currentMember?.role === "owner" || currentMember?.role === "admin";\n', ''),
+    ('[machine, isAdmin, currentUserId]', '[machine, currentUserId]'),
+    ('!!machine.daemonId && machine.runtimes.every', '!!machine.daemonId && machine.runtimes.length > 0 && machine.runtimes.every'),
+])
+for rel in ["runtime-detail.tsx", "runtime-list.tsx"]:
+    CHANGES[f"packages/views/runtimes/components/{rel}"].append((
+        '  const currentMember = user\n    ? members.find((m) => m.user_id === user.id)\n    : null;\n  const isAdmin = currentMember\n    ? currentMember.role === "owner" || currentMember.role === "admin"\n    : false;\n', ''))
+CHANGES["packages/views/runtimes/components/runtime-list.tsx"].extend([
+    ('workloadIndex, isAdmin, user]', 'workloadIndex, user]'),
+    ('function VisibilityBadge({ runtime }: { runtime: AgentRuntime })', 'function VisibilityBadge({ runtime: _runtime }: { runtime: AgentRuntime })'),
+    ('  if (runtime.visibility !== "public") return null;', '  return null;\n  // Legacy visibility flags never grant access or display a sharing badge.'),
+])
+CHANGES["packages/views/runtimes/components/runtime-detail.tsx"].extend([
+    ('function VisibilityReadout({ runtime }: { runtime: AgentRuntime })', 'function VisibilityReadout({ runtime: _runtime }: { runtime: AgentRuntime })'),
+    ('  const visibility = runtime.visibility === "public" ? "public" : "private";', '  const visibility = "private" as const;'),
+    ('  const Icon = visibility === "public" ? Globe : Lock;', '  const Icon = Lock;'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/machine-cli-section.tsx", []).extend([(
+    '          runtime.owner_id === currentUserId ||\n          (canManagePublicRuntimes && runtime.visibility === "public"),',
+    '          runtime.owner_id === currentUserId,'),
+    ('  canManagePublicRuntimes: boolean,', '  _canManagePublicRuntimes: boolean,'),
+    (' * machine-wide daemon update. The viewer may use their own runtime, or a\n * public runtime when they are a workspace owner/admin. An online runtime\n * wins so the daemon can receive the request immediately.',
+     ' * machine-wide daemon update. Only the runtime owner can update their\n * computer. An online runtime wins so the daemon receives the request.'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/runtime-profiles-dialog.tsx", []).append((
+    '        {/* NOTE: a visibility control is intentionally omitted in v1. The\n            server forces every profile to \'workspace\' because the read paths\n            (list, daemon pull, register) do not yet enforce \'private\', so\n            offering a private toggle would leak the profile to other members.\n            Re-add once creator-visibility filtering exists. Follow-up:\n            MUL-3308. */}',
+    '        {/* Profiles are personal across workspaces. Agent invocation\n            permissions provide sharing without exposing computer settings. */}'))
+
+# Update user-facing scope and destructive consequences in both product locales.
+PERSONAL_RUNTIME_COPY = {
+    "en": [
+        ("Machines and cloud workers running CLI sessions for your agents.", "Your runtimes are personal, with the same settings shared across your workspaces. Share agents through invocation permissions, not computers."),
+        ("Delete this computer's {{count}} runtime instances from the current workspace database. Shared profiles and other computers are retained.", "Delete this computer's {{count}} runtime registrations across all workspaces. Your profiles and other computers are retained."),
+        ("User agents are unbound; their settings, chats and task history are retained. Unfinished runs are cancelled and affected automations paused. Internal system agents follow existing cleanup rules.", "Bound agents in all workspaces will be unbound. Their settings, chats and run history are retained. Unfinished runs block deletion; affected automations are paused."),
+        ("I confirm unbinding these agents and cancelling their unfinished runs.", "I confirm deleting this computer across all workspaces and unbinding the listed agents."),
+        ("Only runtime owners and workspace admins can update the CLI.", "Only the runtime owner can update the CLI."),
+        ("Only the runtime owner and workspace admins can delete this runtime", "Only the runtime owner can delete this runtime"),
+        ("Only the runtime owner and workspace admins can delete a runtime.", "Only the runtime owner can delete a runtime."),
+        ("These workspace runtimes are not connected to any machine. Connect a machine with the matching commands, or use a row's actions to edit or delete them.", "These personal runtimes are not connected to any machine. Connect one of your computers with the matching commands, or edit or delete the profile."),
+        ("Custom runtime definitions are workspace-wide and sync to every connected machine. A machine registers the runtime when the command is available there.", "Your runtime profiles use the same settings in every workspace and sync to your connected computers. A computer registers a runtime when its command is available."),
+        ("Set up a custom command from {{machine}}. The definition syncs workspace-wide and registers only on machines where that command is available.", "Set up a custom command from {{machine}}. Your profile uses the same settings in all workspaces and registers on your computers where the command is available."),
+        ("Delete custom runtime from workspace?", "Delete personal runtime profile?"),
+        ('\\"{{name}}\\" will be removed from this workspace and every machine where it is registered. This can\'t be undone.', '\\"{{name}}\\" will be removed from all your workspaces and computers. Bound agents or unfinished runs block deletion. This can\'t be undone.'),
+        ("Delete from workspace", "Delete from all workspaces", 2),
+        ("Custom runtime deleted from workspace", "Personal runtime profile deleted from all workspaces"),
+        ("Only you can create agents on this runtime.", "Only you can manage this runtime. Share agents through their invocation permissions."),
+        ("Only the runtime owner can create agents on this runtime, and only they can switch it to Public.", "Only you can manage this runtime. Share agents through their invocation permissions."),
+    ],
+    "zh-Hans": [
+        ("为智能体跑 CLI 会话的机器和云端 worker。", "运行时归个人所有，配置在你的所有工作区共享并保持一致。通过调用权限共享智能体，不共享电脑。"),
+        ("我确认解除以上各工作区智能体的运行时绑定。", "我确认删除这台电脑在所有工作区的注册，并解除以上智能体的绑定。"),
+        ("只有运行时所有者和工作区管理员可以更新 CLI。", "只有运行时所有者可以更新 CLI。"),
+        ("只有运行时所有者和工作区管理员可以删除这个运行时", "只有运行时所有者可以删除这个运行时"),
+        ("只有运行时所有者和工作区管理员可以删除运行时。", "只有运行时所有者可以删除运行时。"),
+        ("这些工作区运行时目前没有连接到任何机器。你可以连接装有对应命令的机器，或通过行操作编辑、删除配置。", "这些个人运行时尚未连接电脑。连接装有对应命令的个人电脑，或编辑、删除配置。"),
+        ("自定义运行时定义属于整个工作区，会同步到所有已连接的机器。只有机器上能找到对应命令时，才会注册该运行时。", "个人运行时配置在所有工作区保持一致，并同步到自己的电脑。只有电脑上能找到对应命令时，才会注册运行时。"),
+        ("从 {{machine}} 配置一个自定义命令。定义会同步到整个工作区，但只会在能找到该命令的机器上注册。", "从 {{machine}} 配置自定义命令。个人配置在所有工作区保持一致，并在装有对应命令的个人电脑上注册。"),
+        ("从工作区删除自定义运行时？", "删除个人运行时配置？"),
+        ('\\"{{name}}\\" 将从此工作区及所有已注册的机器中移除。此操作无法撤销。', '\\"{{name}}\\" 将从所有工作区和个人电脑中移除。有绑定智能体或未结束的运行时会拒绝删除。此操作无法撤销。'),
+        ("从工作区删除", "从所有工作区删除", 3),
+        ("仅运行时所有者可以在此运行时上创建智能体，也只有他们能切换为「公开」。", "仅你能管理这个运行时。通过调用权限共享智能体，不共享电脑。"),
+    ],
+}
+for locale, replacements in PERSONAL_RUNTIME_COPY.items():
+    CHANGES[f"packages/views/locales/{locale}/runtimes.json"].extend(replacements)
+
+# Preserve upstream tests, updating assertions whose public/admin contract changed.
+CHANGES.setdefault("packages/core/runtimes/access.test.ts", []).extend([
+    ('it("lets anyone use a public runtime"', 'it("rejects another member even when a legacy runtime is public"'),
+    ('isRuntimeUsableForUser(makeRuntime({ visibility: "public" }), OTHER),\n    ).toBe(true);', 'isRuntimeUsableForUser(makeRuntime({ visibility: "public" }), OTHER),\n    ).toBe(false);'),
+    ('it("allows everything while the viewer is unknown, so a loading session never hides the user\'s own runtime"', 'it("rejects an unknown viewer while authentication is loading"'),
+    ('expect(isRuntimeUsableForUser(makeRuntime(), null)).toBe(true);', 'expect(isRuntimeUsableForUser(makeRuntime(), null)).toBe(false);'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/runtime-detail-visibility.test.tsx", []).extend([
+    ('it("shows owner-editable visibility choices when the caller owns the runtime"', 'it("shows personal visibility without sharing controls for an owner"'),
+    ('expect(screen.getByText("Public")).toBeInTheDocument();', 'expect(screen.queryByText("Public")).not.toBeInTheDocument();', 2),
+    ('expect(screen.queryByText("Private")).not.toBeInTheDocument();', 'expect(screen.getByText("Private")).toBeInTheDocument();'),
+    ('it("flips visibility to public when the owner clicks the Public choice"', 'it("does not allow the owner to publish their runtime"'),
+    ('    fireEvent.click(screen.getByText("Public"));\n    await waitFor(() =>\n      expect(mockUpdateRuntime).toHaveBeenCalledWith("rt-1", { visibility: "public" }),\n    );',
+     '    expect(screen.queryByRole("button", { name: "Public" })).not.toBeInTheDocument();\n    expect(mockUpdateRuntime).not.toHaveBeenCalled();'),
+    ('      screen.getByRole("button", { name: /Delete runtime/i }),\n    ).toBeInTheDocument();',
+     '      screen.queryByRole("button", { name: /Delete runtime/i }),\n    ).not.toBeInTheDocument();'),
+    ('it("shows usage to a workspace admin viewing another member\'s public runtime"', 'it("hides usage from an admin viewing another member\'s legacy public runtime"'),
+    ('expect(screen.getByTestId("usage-section")).toBeInTheDocument();', 'expect(screen.queryByTestId("usage-section")).not.toBeInTheDocument();'),
+    ('it("routes custom runtime deletion through the profile delete dialog for admins"', 'it("lets a member delete their own profile across workspaces"'),
+    ('{ user_id: "user-me", role: "owner", name: "Me" }', '{ user_id: "user-me", role: "member", name: "Me" }'),
+    ('owner_id: "someone-else",\n        profile_id: profile.id,', 'owner_id: "user-me",\n        profile_id: profile.id,'),
+    ('Delete custom runtime from workspace?', 'Delete personal runtime profile?', 2),
+    ('Delete from workspace', 'Delete from all workspaces'),
+    ('it("hides custom runtime delete for non-admin runtime owners"', 'it("hides custom runtime delete for a non-owner"'),
+    ('  it("hides custom runtime delete for a non-owner", () => {\n    const profile = makeProfile();',
+     '  it("hides custom runtime delete for a non-owner", () => {\n    const profile = makeProfile({ created_by: "someone-else" });'),
+    ('    const profile = makeProfile({ created_by: "someone-else" });\n    mockQueryData.profiles = [profile];\n\n    renderDetail(\n      makeRuntime({\n        owner_id: "user-me",',
+     '    const profile = makeProfile({ created_by: "someone-else" });\n    mockQueryData.profiles = [profile];\n\n    renderDetail(\n      makeRuntime({\n        owner_id: "someone-else",'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/machine-cli-section.test.tsx", []).extend([
+    ('it("updates through an online public teammate-owned runtime for an admin"', 'it("never updates a teammate-owned runtime even for an admin with a legacy public flag"'),
+    ('    expect(screen.getAllByRole("button", { name: "Update" })).toHaveLength(1);\n    expect(mockUpdateSection).toHaveBeenCalledWith({\n      runtimeId: "online-other-user",\n      currentVersion: "0.3.17",\n      isOnline: true,',
+     '    expect(screen.queryByRole("button", { name: "Update" })).not.toBeInTheDocument();\n    expect(mockUpdateSection).toHaveBeenCalledWith({\n      runtimeId: null,\n      currentVersion: "0.3.17",\n      isOnline: false,'),
+])
+CHANGES.setdefault("packages/views/runtimes/components/update-section.test.tsx", []).append((
+    'Only runtime owners and workspace admins can update the CLI.', 'Only the runtime owner can update the CLI.'))
+CHANGES.setdefault("packages/views/runtimes/components/runtime-list.test.ts", []).extend([
+    ('it("allows usage for a public teammate runtime"', 'it("rejects usage for another member even when the legacy visibility is public"'),
+    ('canReadRuntimeUsage(makeRuntime({ visibility: "public" }), "member-1"),\n    ).toBe(true);',
+     'canReadRuntimeUsage(makeRuntime({ visibility: "public" }), "member-1"),\n    ).toBe(false);'),
+])
+
+for locale, replacements in {
+    "en": [
+        ('Are you sure you want to delete \\"{{name}}\\"? This action cannot be undone.', 'Delete \\"{{name}}\\" across all your workspaces? Unfinished runs block deletion. This action cannot be undone.'),
+        ('Delete \\"{{name}}\\". The agents below are kept — their instructions, chats and run history stay intact — but they will be unbound and cannot run until you bind them to another runtime. Their queued or in-progress runs will be cancelled, and then the Runtime will be deleted.', 'Delete \\"{{name}}\\" across all your workspaces. The listed agents keep their instructions, chats and run history, but are unbound until you assign another runtime. Unfinished runs block deletion.'),
+        ('Queued and in-progress runs will be cancelled, and these agents cannot be assigned new work until they are bound to a runtime.', 'Unfinished runs in any workspace block deletion. Unbound agents cannot accept new work until they have another runtime.'),
+        ('I understand this {{count}} agent will be unbound and cannot run until I bind it to a runtime, and that any queued or in-progress runs will be cancelled.', 'I confirm deletion across all my workspaces and unbinding this {{count}} agent. Unfinished runs block deletion.'),
+        ('I understand these {{count}} agents will be unbound and cannot run until I bind them to a runtime, and that any queued or in-progress runs will be cancelled.', 'I confirm deletion across all my workspaces and unbinding these {{count}} agents. Unfinished runs block deletion.'),
+    ],
+    "zh-Hans": [
+        ('确定要删除\\"{{name}}\\"吗？此操作无法撤销。', '确定从所有工作区删除\\"{{name}}\\"吗？有未结束的运行时会拒绝删除。此操作无法撤销。'),
+        ('删除\\"{{name}}\\"。下列智能体会保留——其指令、聊天记录和运行历史都不会丢失——但会与该运行时解绑，在重新绑定前无法接受新工作。排队中或进行中的运行会被取消，然后删除运行时。', '从所有工作区删除\\"{{name}}\\"。下列智能体的指令、聊天记录和运行历史会保留，但会解除运行时绑定，重新绑定前无法接受新工作。有未结束的运行时会拒绝删除。'),
+        ('排队中和进行中的运行会被取消；这些智能体重新绑定运行时之前，无法接受新工作。', '任何工作区有未结束的运行时都会拒绝删除。解绑的智能体在重新绑定前无法接受新工作。'),
+        ('我已了解：这 {{count}} 个智能体会与该运行时解绑，在重新绑定前无法接受新工作；其排队中或进行中的运行会被取消。', '我确认从所有工作区删除运行时，并解除这 {{count}} 个智能体的绑定。有未结束的运行时会拒绝删除。'),
+    ],
+}.items():
+    CHANGES[f"packages/views/locales/{locale}/runtimes.json"].extend(replacements)
+
+# Shared agents retain invocation grants; configuration belongs to their owner.
+CHANGES.setdefault("packages/core/permissions/rules.ts", []).extend([
+    ('  if (isAdminLike(ctx.role)) return ALLOW;\n  if (agent.owner_id !== null', '  if (agent.owner_id !== null'),
+    ('Only the agent owner and workspace admins can edit this agent.', 'Only the agent owner can edit this agent.'),
+    ('  if (isAdminLike(ctx.role)) return ALLOW;\n  if (runtime.owner_id !== null', '  if (runtime.owner_id !== null'),
+    ('Only the runtime owner and workspace admins can delete this runtime.', 'Only the runtime owner can delete this runtime.'),
+])
+CHANGES["packages/views/agents/components/agents-page.tsx"].extend([
+    ('        canManage: isWorkspaceAdmin || isOwner,', '        canManage: isOwner,'),
+    ('  const isWorkspaceAdmin = useMemo(() => {\n    if (!currentUser) return false;\n    const me = members.find((m) => m.user_id === currentUser.id);\n    return me?.role === "owner" || me?.role === "admin";\n  }, [members, currentUser]);\n\n', ''),
+    ('    isWorkspaceAdmin,\n', ''),
+])
+CHANGES.setdefault("packages/views/agents/components/agent-row-actions.tsx", []).append((
+    '  // True when the current user can manage this agent (owner of agent or\n  // workspace admin/owner). Mirrors the back-end\'s canManageAgent check —',
+    '  // True only for the agent owner. Mirrors the back-end\'s canManageAgent check —'))
+CHANGES.setdefault("packages/views/agents/components/agent-overview-pane.tsx", []).extend([(
+    '        // Env is the only settings tab backed by a secret-bearing endpoint.\n        // GET/PUT /api/agents/{id}/env admits the agent owner or a workspace\n        // owner/admin (MUL-5438) — the same rule `canEdit` encodes — so\n        // showing the tab to anyone else guarantees a 403 on "Reveal & edit".\n        // The server stays the boundary; this only removes a dead entry point.\n        if (tab.id === "env") return canEdit;',
+    '        // Personal configuration and secrets are owner-only. Invocation\n        // and channel administration keep their separate permission rules.\n        if (!canEdit) return false;'),
+    ('{TOP_TABS.map((tab) => (', '{TOP_TABS.filter((tab) => tab.id !== "settings" || canEdit).map((tab) => ('),
+])
+for locale, replacements in {
+    "en": [
+        ('Only workspace owners and admins can read or edit values;', 'Only the agent owner can read or edit values;'),
+        ('Only the agent owner or a workspace admin can read this config.', 'Only the agent owner can read this config.'),
+    ],
+    "zh-Hans": [
+        ('只有工作区所有者 / 管理员可以查看或编辑值；', '只有智能体所有者可以查看或编辑值；'),
+        ('只有智能体 owner 或工作区 admin 可以查看此配置。', '只有智能体所有者可以查看此配置。'),
+    ],
+}.items():
+    CHANGES[f"packages/views/locales/{locale}/agents.json"].extend(replacements)
+CHANGES.setdefault("packages/core/permissions/rules.test.ts", []).extend([
+    ('it("allows workspace owner"', 'it("denies a non-owner workspace owner"'),
+    ('canEditAgent(agent, { userId: BOB, role: "owner" }).allowed).toBe(\n      true,', 'canEditAgent(agent, { userId: BOB, role: "owner" }).allowed).toBe(\n      false,'),
+    ('canEditAgent(agent, { userId: BOB, role: "admin" }).allowed).toBe(\n      true,', 'canEditAgent(agent, { userId: BOB, role: "admin" }).allowed).toBe(\n      false,'),
+    ('it("admin can still edit an orphan (owner_id null) agent"', 'it("an admin cannot edit an ownerless agent"'),
+    ('canEditAgent(orphan, { userId: BOB, role: "admin" }).allowed).toBe(\n      true,', 'canEditAgent(orphan, { userId: BOB, role: "admin" }).allowed).toBe(\n      false,'),
+    ('canDeleteRuntime(r, { userId: BOB, role: "admin" }).allowed).toBe(\n      true,', 'canDeleteRuntime(r, { userId: BOB, role: "admin" }).allowed).toBe(\n      false,'),
+    ('it("allows workspace admin", () => {\n    expect(canEditAgent', 'it("denies a non-owner admin", () => {\n    expect(canEditAgent'),
+    ('it("allows workspace admin", () => {\n    const r = makeRuntime(ALICE);', 'it("denies a non-owner runtime admin", () => {\n    const r = makeRuntime(ALICE);'),
+])
+CHANGES.setdefault("packages/views/agents/components/agent-overview-pane.test.tsx", []).append((
+    '    renderPane([makeRuntime("claude")], { canEdit: false });\n    openSettings();',
+    '    renderPane([makeRuntime("openclaw")], { canEdit: false });\n'
+    '    expect(screen.queryByRole("tab", { name: /^Settings$/i })).not.toBeInTheDocument();\n'
+    '    expect(screen.queryByRole("tab", { name: /^General$|^Access$|^Custom arguments$|^Runtime config$/i })).not.toBeInTheDocument();\n'
+    '    expect(screen.getByRole("tab", { name: /^Work$/i })).toBeInTheDocument();'))
+CHANGES.setdefault("packages/views/agents/components/agent-detail-page.test.tsx", []).append((
+    'describe("AgentDetailPage DM button", () => {',
+    'describe("AgentDetailPage DM button", () => {\n'
+    '  it.each(["member", "admin", "owner"])("keeps invocation but hides management for a non-owner %s", async (role) => {\n'
+    '    agentsRef.current = [{ ...baseAgent, owner_id: "someone-else", permission_mode: "public_to", invocation_targets: [{target_type: "workspace", target_id: null}] }];\n'
+    '    membersRef.current = [{ user_id: "user-1", role }];\n'
+    '    const { push } = renderPage();\n'
+    '    fireEvent.click(await screen.findByRole("button", { name: "DM" }));\n'
+    '    expect(push).toHaveBeenCalledWith("/acme/chat?agent=agent-1");\n'
+    '    expect(screen.getByRole("button", { name: "Assign work" })).toBeInTheDocument();\n'
+    '    expect(screen.queryByLabelText("Agent actions")).not.toBeInTheDocument();\n'
+    '  });\n'))
+
+
+# Remove retired public-sharing controls from the generated UI entirely.
+CHANGES["packages/views/runtimes/components/runtime-detail.tsx"].extend([
+    ("  Globe,\n", ""),
+    ("import { useUpdateRuntime } from \"@multica/core/runtimes/mutations\";\n", ""),
+    ("              runtime={runtime}\n              canEditVisibility={false}\n", ""),
+    ("  runtime,\n  canEditVisibility,\n  canDelete,", "  canDelete,"),
+    ("  runtime: AgentRuntime;\n  /**\n   * Runtime owner only — narrower than the card's other affordances on\n   * purpose (MUL-6126). Sharing a machine with the workspace is the owner's\n   * call, so a workspace admin sees the read-only chip here even though they\n   * may still rename or delete the runtime.\n   */\n  canEditVisibility: boolean;\n", ""),
+    ("          {canEditVisibility ? (\n            <VisibilityEditor runtime={runtime} />\n          ) : (\n            <VisibilityReadout runtime={runtime} />\n          )}", "          <VisibilityReadout />"),
+    ("// VisibilityReadout renders a static \"Private\" / \"Public\" pill for everyone\n// who is not the runtime owner — workspace admins included (MUL-6126). Its\n// tooltip is phrased in the third person for that reason; the editor's own\n// hints stay in the second person. The description used to sit under the\n// chip; it now lives in the hover tooltip so the Diagnostics column stays\n// compact and matches the surrounding sections. Older backends that omit the\n// field render as \"Private\" to match the strict default.\n", "// Runtime configuration is personal; legacy visibility flags never grant sharing.\n"),
+    ("function VisibilityReadout({ runtime: _runtime }: { runtime: AgentRuntime })", "function VisibilityReadout()"),
+    ("// VisibilityEditor lets the runtime owner flip public↔private. Owner only —\n// the PATCH endpoint refuses a workspace admin here (canSetRuntimeVisibility);\n// this is a UI gate, not a security boundary. Per-choice description text lives in the hover\n// tooltip so the two buttons stay a tight icon+label pair instead of the\n// previous two-line block that competed with the surrounding cards.\nfunction VisibilityEditor({ runtime }: { runtime: AgentRuntime }) {\n  const { t } = useT(\"runtimes\");\n  const wsId = useWorkspaceId();\n  const updateRuntime = useUpdateRuntime(wsId);\n  const current = runtime.visibility === \"public\" ? \"public\" : \"private\";\n\n  const flip = (next: \"private\" | \"public\") => {\n    if (next === current) return;\n    updateRuntime.mutate(\n      { runtimeId: runtime.id, patch: { visibility: next } },\n      {\n        onSuccess: () =>\n          toast.success(\n            t(($) => $.detail.visibility_toast_updated, {\n              visibility: t(($) => $.detail.visibility_label[next]),\n            }),\n          ),\n        onError: (err) =>\n          toast.error(\n            err instanceof Error && err.message\n              ? err.message\n              : t(($) => $.detail.visibility_toast_failed),\n          ),\n      },\n    );\n  };\n\n  return (\n    <div className=\"inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5\">\n      <VisibilityChoice\n        active={current === \"private\"}\n        icon={<Lock className=\"h-3 w-3\" />}\n        label={t(($) => $.detail.visibility_label.private)}\n        tooltip={t(($) => $.detail.visibility_hint.private)}\n        disabled={updateRuntime.isPending}\n        onClick={() => flip(\"private\")}\n      />\n      <VisibilityChoice\n        active={current === \"public\"}\n        icon={<Globe className=\"h-3 w-3\" />}\n        label={t(($) => $.detail.visibility_label.public)}\n        tooltip={t(($) => $.detail.visibility_hint.public)}\n        disabled={updateRuntime.isPending}\n        onClick={() => flip(\"public\")}\n      />\n    </div>\n  );\n}\n\nfunction VisibilityChoice({\n  active,\n  icon,\n  label,\n  tooltip,\n  disabled,\n  onClick,\n}: {\n  active: boolean;\n  icon: React.ReactNode;\n  label: string;\n  tooltip: string;\n  disabled: boolean;\n  onClick: () => void;\n}) {\n  return (\n    <Tooltip>\n      <TooltipTrigger\n        render={\n          <button\n            type=\"button\"\n            onClick={onClick}\n            disabled={disabled}\n            className={`inline-flex items-center gap-1.5 rounded-xs px-2 py-1 text-caption font-medium transition-colors ${\n              active\n                ? \"bg-background text-foreground shadow-sm\"\n                : \"text-muted-foreground hover:text-foreground\"\n            } ${disabled ? \"cursor-not-allowed opacity-60\" : \"\"}`}\n          >\n            <span className=\"shrink-0\">{icon}</span>\n            <span>{label}</span>\n          </button>\n        }\n      />\n      <TooltipContent>{tooltip}</TooltipContent>\n    </Tooltip>\n  );\n}\n", ""),
+])
+CHANGES["packages/views/runtimes/components/runtime-list.tsx"].extend([
+    ("  Globe,\n", ""),
+    ("        <VisibilityBadge runtime={runtime} />\n", ""),
+    ("// Only public is worth a badge — private is the default and rendering a\n// `🔒 Private` chip on every row turns the whole column into noise.\nfunction VisibilityBadge({ runtime: _runtime }: { runtime: AgentRuntime }) {\n  const { t } = useT(\"runtimes\");\n  return null;\n  // Legacy visibility flags never grant access or display a sharing badge.\n  return (\n    <Tooltip>\n      <TooltipTrigger\n        render={\n          <span className=\"inline-flex shrink-0 items-center gap-0.5 rounded-xs bg-info/10 px-1 text-micro font-medium text-info\">\n            <Globe className=\"h-2.5 w-2.5\" />\n            {t(($) => $.detail.visibility_label.public)}\n          </span>\n        }\n      />\n      <TooltipContent>\n        {t(($) => $.detail.visibility_hint.public)}\n      </TooltipContent>\n    </Tooltip>\n  );\n}\n\n", ""),
+])
+
+CHANGES["packages/views/runtimes/components/runtime-list.tsx"].append((
+    'import {\n  Tooltip,\n  TooltipContent,\n  TooltipTrigger,\n} from "@multica/ui/components/ui/tooltip";\n', ''))
+
+# Lark/DingTalk agent binding follows canManageAgent; other channel rules stay intact.
+CHANGES.setdefault("packages/views/agents/components/tabs/integrations-tab.tsx", []).extend([
+    ('  const canManageLark = isWorkspaceAdmin || isAgentOwner;', '  const canManageLark = isAgentOwner;'),
+    ('  const canManageDingtalk = isWorkspaceAdmin || isAgentOwner;', '  const canManageDingtalk = isAgentOwner;'),
+    ('        ) : (\n          <p className="text-caption text-muted-foreground">\n            {t(($) => $.tab_body.integrations.members_note)}\n          </p>\n        )}',
+     '        ) : (\n          <div className="space-y-2 text-caption text-muted-foreground">\n            <p>{t(($) => $.tab_body.integrations.owner_note)}</p>\n            <p>{t(($) => $.tab_body.integrations.members_note)}</p>\n          </div>\n        )}'),
+    ('  // Lark bind/manage is authorized for the agent\'s owner OR a workspace\n  // owner/admin (server/internal/handler/lark.go canManageAgent, MUL-4213).',
+     '  // Lark bind/manage is owner-only, matching the backend canManageAgent gate.'),
+    ('  // agent\'s owner or a workspace owner/admin may connect and disconnect it.', '  // agent\'s owner alone may connect and disconnect it.'),
+    ('          {!configured ? (',
+     '          {!canManageLark ? (\n            <p className="text-caption text-muted-foreground">\n              {t(($) => $.tab_body.integrations.owner_note)}\n            </p>\n          ) : !configured ? ('),
+    ('            // Agent owner or workspace owner/admin with either a supported', '            // Agent owner with either a supported'),
+    ('              <p className="text-caption text-muted-foreground">\n                {t(($) => $.tab_body.integrations.members_note)}\n              </p>\n            )\n          ) : !dingtalkConfigured',
+     '              <p className="text-caption text-muted-foreground">\n                {t(($) => $.tab_body.integrations.owner_note)}\n              </p>\n            )\n          ) : !dingtalkConfigured'),
+])
+for locale, copy in {
+    "en": "Only the agent owner can connect or disconnect Lark and DingTalk.",
+    "zh-Hans": "只有智能体所有者可以连接或断开飞书和钉钉。",
+}.items():
+    CHANGES[f"packages/views/locales/{locale}/agents.json"].append((
+        '      "members_note":', '      "owner_note": ' + json.dumps(copy, ensure_ascii=False) + ',\n      "members_note":'))
+CHANGES.setdefault("packages/views/settings/components/lark-tab.tsx", []).extend([
+    ('import { memberListOptions } from "@multica/core/workspace/queries";', 'import { agentListOptions, memberListOptions } from "@multica/core/workspace/queries";'),
+    ('  const canManage =\n    currentMember?.role === "owner" || currentMember?.role === "admin";',
+     '  const { data: agents = [] } = useQuery(agentListOptions(wsId));'),
+    ('                    canManage={canManage}',
+     '                    canManage={!!currentMember && !!user?.id && agents.some((agent) => agent.id === inst.agent_id && agent.owner_id === user.id)}'),
+    ('  const isWorkspaceAdmin =\n    currentMember?.role === "owner" || currentMember?.role === "admin";\n', ''),
+    ('  // Mirror the backend canManageAgent gate: the agent\'s owner OR a\n  // workspace owner/admin may bind/manage the bot (MUL-4213).\n  const canManage = isWorkspaceAdmin || isAgentOwner;',
+     '  // Fail closed until the agent owner and workspace membership are known.\n  const canManage = currentMember != null && isAgentOwner;'),
+    ('// Listing is member-visible; the disconnect action is admin-only (the\n// backend enforces it; the UI hides the button for non-admins to match).',
+     '// Listing is member-visible; disconnect requires the bound agent owner.\n// An unresolved agent never grants management through a workspace role.'),
+    ('//   1. Only the agent\'s owner or a workspace owner/admin see anything —\n//      the backend authorizes `POST /lark/install/begin`, the status\n//      poll, AND disconnect with canManageAgent (agent owner OR ws\n//      owner/admin; see server/internal/handler/lark.go, MUL-4213), so\n//      the gate here mirrors that. `agentOwnerId` is what lets a\n//      non-admin owner through; when it is omitted the button stays\n//      workspace owner/admin-only.',
+     '//   1. Only the agent owner with workspace membership can bind, poll, or\n//      disconnect. Missing agentOwnerId grants no access, including to admins.'),
+    ('   * The bound agent\'s owner (`agent.owner_id`). When it matches the\n   * current user, the button treats them as able to manage the bot even\n   * if they are not a workspace owner/admin — mirroring the backend\'s\n   * canManageAgent authorization (MUL-4213). Omit it to keep the button\n   * workspace owner/admin-only.',
+     '   * The bound agent owner. Management requires a matching user and\n   * workspace membership; omitted ownership never grants admin access.'),
+    ('// only the agent\'s owner or a workspace owner/admin ever reach this', '// only the agent owner with workspace membership can reach this'),
+])
+CHANGES.setdefault("packages/views/settings/components/dingtalk-tab.tsx", []).extend([
+    ('  const isWorkspaceAdmin =\n    currentMember?.role === "owner" || currentMember?.role === "admin";\n', ''),
+    ('  const canManage = isWorkspaceAdmin || isAgentOwner;', '  const canManage = isAgentOwner;'),
+    ('//   1. Only the agent\'s owner or a workspace owner/admin sees management UI.', '//   1. Only the agent owner with workspace membership sees management UI.'),
+    ('    enabled: !canManage && !!wsId,', '    enabled: !!wsId,'),
+    ('                    canManage={canManage}\n                    onDisconnect=',
+     '                    canManage={canManage}\n                    canDisconnect={inst.agent_available === false\n                      ? canManage\n                      : !!currentMember && !!user?.id && visibleAgents.some((agent) => agent.id === inst.agent_id && agent.owner_id === user.id)}\n                    onDisconnect='),
+    ('  canManage,\n  onDisconnect,', '  canManage,\n  canDisconnect,\n  onDisconnect,'),
+    ('  canManage: boolean;\n  onDisconnect:', '  canManage: boolean;\n  canDisconnect: boolean;\n  onDisconnect:'),
+    ('        {canManage && isActive && (', '        {canDisconnect && isActive && ('),
+    ('// server. Disconnect, linked Staff IDs, and permission remediation remain\n// workspace owner/admin-only in Settings.',
+     '// server. Disconnect is owner-only for a live agent, with explicit orphan\n// cleanup reserved for workspace admins. Other Settings admin tools are unchanged.'),
+])
+
+
+# Regression coverage for owner-only channel management and unchanged admin tools.
+CHANGES.setdefault("packages/views/agents/components/tabs/integrations-tab.test.tsx", []).extend([
+    ("ownsAgent: false, permissionMode: \"private\", canManage: true", "ownsAgent: false, permissionMode: \"private\", canManage: false", 2),
+    ("ownsAgent: false, permissionMode: \"public_to\", canManage: true", "ownsAgent: false, permissionMode: \"public_to\", canManage: false", 2),
+    ("      expect(screen.queryByTestId(\"dingtalk-agent-connect\") !== null).toBe(canManage);", "      expect(screen.queryByTestId(\"dingtalk-agent-connect\") !== null).toBe(canManage);\n      expect(screen.queryByTestId(\"lark-bind-button\") !== null).toBe(canManage);\n      for (const channel of [\"slack\", \"wecom\", \"telegram\"]) {\n        expect(screen.queryByTestId(`${channel}-bind-button`) !== null).toBe(role !== \"member\");\n      }"),
+    ("  it(\"hides permission remediation from a read-only Agent viewer\", () => {\n    membersRef.current = [{ user_id: \"user-1\", role: \"member\" }];", "  it.each([\"member\", \"admin\", \"owner\"] as const)(\"hides DingTalk management from a non-owner %s\", (role) => {\n    membersRef.current = [{ user_id: \"user-1\", role }];"),
+    ("    expect(screen.queryByRole(\"button\", { name: /qyapi_chat_manage/ })).toBeNull();", "    expect(screen.queryByRole(\"button\", { name: /qyapi_chat_manage/ })).toBeNull();\n    expect(screen.queryByTestId(\"lark-bind-button\")).toBeNull();\n    expect(screen.queryByTestId(\"dingtalk-agent-bot-disconnect\")).toBeNull();"),
+])
+CHANGES.setdefault("packages/views/settings/components/lark-tab.test.tsx", []).extend([
+    ("  it(\"hides both bind CTAs for a plain member when no agentOwnerId is supplied (stays admin-only)\", () => {\n    membersRef.current = [{ user_id: \"user-1\", role: \"member\" }];\n    const { container } = render(\n      <LarkAgentBindButton agentId=\"agent-1\" agentName=\"Bot\" />,\n      { wrapper: I18nWrapper },\n    );\n    expect(container.querySelector(\"button\")).toBeNull();\n  });\n", "  it(\"hides both bind CTAs for a plain member when no agentOwnerId is supplied (ownership is unknown)\", () => {\n    membersRef.current = [{ user_id: \"user-1\", role: \"member\" }];\n    const { container } = render(\n      <LarkAgentBindButton agentOwnerId={null} agentId=\"agent-1\" agentName=\"Bot\" />,\n      { wrapper: I18nWrapper },\n    );\n    expect(container.querySelector(\"button\")).toBeNull();\n  });\n"),
+    ("<LarkAgentBindButton agentId=\"agent-1\"", "<LarkAgentBindButton agentOwnerId=\"user-1\" agentId=\"agent-1\"", 17),
+    ("const membersRef = vi.hoisted(() => ({", "const agentsRef = vi.hoisted(() => ({ current: [{ id: \"agent-1\", owner_id: \"user-1\" }] }));\n\nconst membersRef = vi.hoisted(() => ({"),
+    ("    if (key.includes(\"members\")) return { data: membersRef.current, isLoading: false };", "    if (key.includes(\"members\")) return { data: membersRef.current, isLoading: false };\n    if (key.includes(\"agents\")) return { data: agentsRef.current, isLoading: false };"),
+    ("  memberListOptions: () => ({ queryKey: [\"members\"], queryFn: vi.fn() }),", "  memberListOptions: () => ({ queryKey: [\"members\"], queryFn: vi.fn() }),\n  agentListOptions: () => ({ queryKey: [\"agents\"], queryFn: vi.fn() }),"),
+    ("  agentNameByIdRef.current = new Map();", "  agentNameByIdRef.current = new Map();\n  agentsRef.current = [{ id: \"agent-1\", owner_id: \"user-1\" }];"),
+    ("    // Disconnect stays reachable so the orphan row can be cleaned up.\n    expect(screen.getByRole(\"button\", { name: /Disconnect/i })).toBeTruthy();", "    // Missing ownership is not evidence that a workspace admin can manage this bot.\n    expect(screen.queryByRole(\"button\", { name: /Disconnect/i })).toBeNull();"),
+    ("falls back to a stable placeholder when the agent has been deleted (so the row is still actionable for cleanup)", "keeps an unresolved agent visible without granting management"),
+    ("// The Connected bots list used to surface", "\ndescribe(\"Lark owner-only management\", () => {\n  beforeEach(resetFixtures);\n  const roles = [\"member\", \"admin\", \"owner\"] as const;\n  it.each(roles)(\"uses ownership for both new and connected bots, role=%s\", (role) => {\n    membersRef.current = [{ user_id: \"user-1\", role }];\n    for (const active of [false, true]) {\n      installationsRef.current.installations = active ? [{ id: \"inst\", agent_id: \"agent-1\", status: \"active\", app_id: \"app\", region: \"feishu\" }] : [];\n      for (const agentOwnerId of [undefined, null, \"someone-else\", \"user-1\"]) {\n        const view = render(<LarkAgentBindButton agentId=\"agent-1\" agentOwnerId={agentOwnerId} />, { wrapper: I18nWrapper });\n        const testId = active ? \"lark-agent-bot-disconnect\" : \"lark-agent-bind-feishu\";\n        expect(screen.queryByTestId(testId) !== null).toBe(agentOwnerId === \"user-1\");\n        view.unmount();\n      }\n    }\n    expect(mockBeginInstall).not.toHaveBeenCalled();\n    expect(mockDeleteInstallation).not.toHaveBeenCalled();\n  });\n\n  it(\"requires workspace membership even for a matching agent owner\", () => {\n    membersRef.current = [];\n    render(<LarkAgentBindButton agentId=\"agent-1\" agentOwnerId=\"user-1\" />, { wrapper: I18nWrapper });\n    expect(screen.queryByTestId(\"lark-agent-bind-feishu\")).toBeNull();\n  });\n\n  it.each(roles)(\"keeps Settings disconnect owner-only, role=%s\", (role) => {\n    membersRef.current = [{ user_id: \"user-1\", role }];\n    installationsRef.current.installations = [{ id: \"inst\", agent_id: \"agent-1\", status: \"active\", installed_at: \"2026-01-01T00:00:00Z\" }];\n    for (const ownerId of [\"someone-else\", \"user-1\"]) {\n      agentsRef.current = [{ id: \"agent-1\", owner_id: ownerId }];\n      const view = render(<LarkTab />, { wrapper: I18nWrapper });\n      expect(screen.queryByRole(\"button\", { name: /Disconnect/i }) !== null).toBe(ownerId === \"user-1\");\n      view.unmount();\n    }\n  });\n});\n\n// The Connected bots list used to surface"),
+])
+CHANGES.setdefault("packages/views/settings/components/dingtalk-tab.test.tsx", []).extend([
+    ("{ id: \"agent-1\" }", "{ id: \"agent-1\", owner_id: \"user-1\" }", 2),
+    ("{ id: \"agent-7\" }", "{ id: \"agent-7\", owner_id: \"user-1\" }", 3),
+    ("{ id: \"agent-8\" }", "{ id: \"agent-8\", owner_id: \"user-1\" }", 2),
+    ("<DingTalkAgentBindButton agentId=\"agent-1\"", "<DingTalkAgentBindButton agentOwnerId=\"user-1\" agentId=\"agent-1\"", 5),
+    ("ownsAgent: false, canManage: true", "ownsAgent: false, canManage: false", 2),
+    ("      // Settings intentionally has no Agent-owner input: every plain member,\n      // including someone who owns one of these Agents, stays read-only here.", "      // Bot management follows ownership; existing metadata/admin tools keep their role gate."),
+    ("      expect(screen.queryByRole(\"button\", { name: /Disconnect/i }) !== null).toBe(canManage);", "      expect(screen.queryByRole(\"button\", { name: /Disconnect/i }) !== null).toBe(true);"),
+    ("describe(\"DingTalkTab\", () => {", "\ndescribe(\"DingTalk owner-only management\", () => {\n  beforeEach(resetFixtures);\n  it.each([\"member\", \"admin\", \"owner\"] as const)(\"does not grant a non-owner %s connect or disconnect\", (role) => {\n    membersRef.current = [{ user_id: \"user-1\", role }];\n    for (const active of [false, true]) {\n      installationsRef.current.installations = active ? [{ id: \"inst\", agent_id: \"agent-1\", status: \"active\" }] : [];\n      for (const agentOwnerId of [undefined, null, \"someone-else\"]) {\n        const view = renderUI(<DingTalkAgentBindButton agentId=\"agent-1\" agentOwnerId={agentOwnerId} />);\n        expect(screen.queryByTestId(\"dingtalk-agent-connect\")).toBeNull();\n        expect(screen.queryByTestId(\"dingtalk-agent-bot-disconnect\")).toBeNull();\n        view.unmount();\n      }\n    }\n    expect(mockRegisterBYO).not.toHaveBeenCalled();\n    expect(mockDeleteInstallation).not.toHaveBeenCalled();\n  });\n\n  it.each([\"member\", \"admin\", \"owner\"] as const)(\"restricts Settings disconnect while preserving metadata, role=%s\", (role) => {\n    membersRef.current = [{ user_id: \"user-1\", role }];\n    agentsRef.current = [{ id: \"agent-1\", owner_id: \"someone-else\" }];\n    installationsRef.current.installations = [{ id: \"inst\", agent_id: \"agent-1\", status: \"active\", installed_at: \"2026-01-01T00:00:00Z\" }];\n    renderUI(<DingTalkTab />);\n    expect(screen.getByText(\"Agent agent-1\")).toBeTruthy();\n    expect(screen.queryByRole(\"button\", { name: /Disconnect/i })).toBeNull();\n  });\n});\n\ndescribe(\"DingTalkTab\", () => {"),
+])
+
+CHANGES["packages/views/settings/components/dingtalk-tab.test.tsx"].extend([
+    ('agentOwnerId="user-1" agentId="agent-1" agentOwnerId="user-1"', 'agentOwnerId="user-1" agentId="agent-1"'),
+    ('  it("shows only the server-filtered Agent, bot, groups, and install time to a regular member", () => {',
+     '  it("shows only the server-filtered Agent, bot, groups, and install time to a regular member", () => {\n    agentsRef.current = [{ id: "agent-7", owner_id: "someone-else" }];'),
+])
 
 
 def apply_patches():

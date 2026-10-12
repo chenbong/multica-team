@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS runtime_profile_workspace_id_display_name_key ON runtime_profile(workspace_id,display_name);

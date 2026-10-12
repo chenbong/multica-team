@@ -81,17 +81,13 @@ class FrontendPatches(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.assertFalse((self.target / ".overlay-backup").exists())
 
-    def test_runtime_ownership_overlay_keeps_existing_page_features(self):
+    def test_personal_runtime_page_has_no_workspace_owner_override(self):
         rel = "packages/views/runtimes/components/runtimes-page.tsx"
-        (self.target / rel).write_text((ROOT / "overlays/web-direct" / rel).read_text())
         self.apply()
         page = (self.target / rel).read_text()
         self.assertIn("<DeleteMachineButton machine={machine}", page)
-        self.assertIn('role === "owner" || role === "admin"', page)
-        self.assertIn("checked={!showAllRuntimes}", page)
-        for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
-            labels = json.loads((self.target / f"packages/views/locales/{locale}/runtimes.json").read_text())
-            self.assertTrue(labels["page"]["only_mine"])
+        self.assertNotIn("showAllRuntimes", page)
+        self.assertNotIn("only_mine", page)
 
     def test_reapplication_does_not_clobber_changed_staging_files(self):
         self.apply()
@@ -126,6 +122,37 @@ class FrontendPatches(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to patch a repository checkout", result.stderr)
+
+    def test_personal_runtime_scope_and_global_delete_copy(self):
+        self.apply()
+        for locale, scope, forbidden in (
+            ("en", "all workspaces", "workspace admins"),
+            ("zh-Hans", "所有工作区", "工作区管理员"),
+        ):
+            copy = json.loads((self.target / f"packages/views/locales/{locale}/runtimes.json").read_text())
+            self.assertIn(scope, copy["machine_delete"]["description"])
+            self.assertIn(scope, copy["machine_delete"]["confirm_unbind"])
+            self.assertNotIn(forbidden, json.dumps(copy, ensure_ascii=False))
+            self.assertNotIn("cancelled", copy["detail"]["delete_dialog"]["cascade"]["description"])
+            self.assertNotIn("会被取消", copy["detail"]["delete_dialog"]["cascade"]["description"])
+        en = json.loads((self.target / "packages/views/locales/en/runtimes.json").read_text())
+        self.assertIn("invocation permissions, not computers", en["page"]["tagline"])
+        self.assertIn("all your workspaces", en["profiles"]["delete_dialog"]["description"])
+        self.assertIn("Unfinished runs block deletion", en["machine_delete"]["effects"])
+
+    def test_personal_management_does_not_require_workspace_admin(self):
+        self.apply()
+        detail = (self.target / "packages/views/runtimes/components/runtime-detail-page.tsx").read_text()
+        self.assertNotIn("isAdmin", detail)
+        self.assertIn("machine.runtimes.every((r) => r.owner_id === currentUserId)", detail)
+        rows = (self.target / "packages/views/runtimes/components/runtime-list.tsx").read_text()
+        self.assertNotIn("isAdmin", rows)
+        self.assertIn("runtime.owner_id === user.id && !!profile", rows)
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        self.assertIn("/delete-machine-plan", client)
+        self.assertIn("PersonalMachineDeletePlanSchema", client)
+        self.assertIn("!plan.ids.includes(runtimeId)", client)
+
 
     def test_brand_is_checked_idempotent_and_keeps_bot_identity(self):
         self.apply()

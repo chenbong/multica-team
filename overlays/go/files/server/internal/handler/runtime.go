@@ -26,6 +26,9 @@ import (
 // DeleteOfflineMachine removes only this workspace's instances of one daemon.
 // Shared runtime profiles and user agents are retained. All teardown is atomic.
 func (h *Handler) DeleteOfflineMachine(w http.ResponseWriter, r *http.Request) {
+	if !requirePersonalRuntimeActor(w, r) {
+		return
+	}
 	id, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "runtimeId"), "runtime_id")
 	if !ok {
 		return
@@ -69,14 +72,14 @@ func (h *Handler) DeleteOfflineMachine(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	qtx := h.Queries.WithTx(tx)
-	all, err := qtx.ListAgentRuntimes(r.Context(), rt.WorkspaceID)
+	all, err := h.personalMachineRuntimes(r.Context(), qtx, tx, rt, true)
 	if err != nil {
 		writeError(w, 500, "failed to list runtimes")
 		return
 	}
 	var targets []db.AgentRuntime
 	for _, item := range all {
-		if item.DaemonID == rt.DaemonID && item.RuntimeMode == "local" {
+		if item.DaemonID == rt.DaemonID && item.OwnerID == rt.OwnerID && item.RuntimeMode == "local" {
 			targets = append(targets, item)
 		}
 	}
@@ -96,7 +99,7 @@ func (h *Handler) DeleteOfflineMachine(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, "电脑运行时已变化，请重新确认")
 			return
 		}
-		if locked.WorkspaceID != rt.WorkspaceID || locked.DaemonID != rt.DaemonID || locked.RuntimeMode != "local" {
+		if locked.OwnerID != rt.OwnerID || locked.DaemonID != rt.DaemonID || locked.RuntimeMode != "local" {
 			writeError(w, 409, "电脑运行时已变化，请重新确认")
 			return
 		}
@@ -126,7 +129,16 @@ func (h *Handler) DeleteOfflineMachine(w http.ResponseWriter, r *http.Request) {
 	}
 	var changes []service.RuntimeTeardownResult
 	for _, item := range targets {
-		result, err := service.TeardownRuntime(r.Context(), qtx, item.ID, service.RuntimeTeardownOptions{CancelNonTerminalTasks: true})
+		unfinished, err := qtx.CountUndrainedTasksByRuntimeOrAgent(r.Context(), db.CountUndrainedTasksByRuntimeOrAgentParams{RuntimeIds: []pgtype.UUID{item.ID}})
+		if err != nil {
+			writeError(w, 500, "failed to check unfinished runs")
+			return
+		}
+		if unfinished > 0 {
+			writePersonalRuntimeTeardownError(w, service.ErrRuntimeNotDrained)
+			return
+		}
+		result, err := service.TeardownRuntime(r.Context(), qtx, item.ID, service.RuntimeTeardownOptions{})
 		if err != nil {
 			slog.Error("offline machine teardown failed", "error", err)
 			writeError(w, 409, "电脑依赖清理失败，未删除任何运行时")
@@ -138,14 +150,19 @@ func (h *Handler) DeleteOfflineMachine(w http.ResponseWriter, r *http.Request) {
 		}
 		changes = append(changes, result)
 	}
+	if _, err := tx.Exec(r.Context(), `DELETE FROM personal_runtime WHERE owner_id=$1 AND daemon_id=$2`, rt.OwnerID, rt.DaemonID); err != nil {
+		writeError(w, 500, "failed to remove personal computer")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "failed to commit deletion")
 		return
 	}
 	for i, item := range targets {
 		h.NotifyRuntimeGone(uuidToString(item.ID))
-		h.publishRuntimeTeardown(r.Context(), changes[i], wsID, uuidToString(member.UserID))
+		h.publishRuntimeTeardown(r.Context(), changes[i], uuidToString(item.WorkspaceID), uuidToString(member.UserID))
 	}
+	h.publishPersonalRuntimeRefresh(r.Context(), requestUserID(r))
 	slog.Info("offline computer removed", "daemon_id", rt.DaemonID.String, "workspace_id", wsID, "runtimes", len(targets), "deleted_by", uuidToString(member.UserID))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -615,6 +632,9 @@ const maxRuntimeCustomNameLen = 100
 // Workspace-membership-checked; write access is gated by canEditRuntime, and
 // `visibility` carries the narrower owner-only gate on top (MUL-6126).
 func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
+	if !requirePersonalRuntimeActor(w, r) {
+		return
+	}
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
 	if !ok {
@@ -650,8 +670,8 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	)
 	if req.Visibility != nil {
 		v := *req.Visibility
-		if v != "private" && v != "public" {
-			writeError(w, http.StatusBadRequest, "visibility must be 'private' or 'public'")
+		if v != "private" {
+			writeError(w, http.StatusBadRequest, "runtimes are personal; share an agent instead")
 			return
 		}
 		// Only a real change is gated. An admin renaming a runtime through a
@@ -677,6 +697,17 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	changed := false
+	if req.CustomName != nil {
+		name := strings.TrimSpace(*req.CustomName)
+		updated, err := h.renamePersonalRuntime(r.Context(), rt, pgtype.Text{String: name, Valid: name != ""}, req.ApplyToMachine)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update personal runtime")
+			return
+		}
+		h.publishPersonalRuntimeRefresh(r.Context(), requestUserID(r))
+		writeJSON(w, http.StatusOK, runtimeToResponse(updated))
+		return
+	}
 
 	if needVisibility {
 		updated, err := h.Queries.UpdateAgentRuntimeVisibility(r.Context(), db.UpdateAgentRuntimeVisibilityParams{
@@ -692,55 +723,6 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 
-	if req.CustomName != nil {
-		// An empty / whitespace-only name clears the override (NULL), so the
-		// runtime falls back to its daemon-proposed Name.
-		trimmed := strings.TrimSpace(*req.CustomName)
-		customName := pgtype.Text{String: trimmed, Valid: trimmed != ""}
-
-		if req.ApplyToMachine && rt.DaemonID.Valid {
-			// Non-admins may only relabel their own runtimes on the machine;
-			// owners/admins rename every runtime sharing the daemon_id. A NULL
-			// owner filter means "all runtimes on this machine".
-			var ownerFilter pgtype.UUID
-			if !roleAllowed(member.Role, "owner", "admin") {
-				ownerFilter = member.UserID
-			}
-			rows, err := h.Queries.UpdateAgentRuntimeCustomNameByDaemon(r.Context(), db.UpdateAgentRuntimeCustomNameByDaemonParams{
-				CustomName:  customName,
-				WorkspaceID: rt.WorkspaceID,
-				DaemonID:    rt.DaemonID,
-				OwnerID:     ownerFilter,
-			})
-			if err != nil {
-				slog.Error("UpdateAgentRuntimeCustomNameByDaemon failed", "error", err, "runtime_id", runtimeID)
-				writeError(w, http.StatusInternalServerError, "failed to update runtime")
-				return
-			}
-			// The actor always owns (or admins) the runtime addressed by :id,
-			// so it is among the updated rows — surface it in the response.
-			for _, row := range rows {
-				if uuidToString(row.ID) == uuidToString(runtimeUUID) {
-					rt = row
-					break
-				}
-			}
-			changed = true
-		} else {
-			updated, err := h.Queries.UpdateAgentRuntimeCustomName(r.Context(), db.UpdateAgentRuntimeCustomNameParams{
-				CustomName: customName,
-				ID:         runtimeUUID,
-			})
-			if err != nil {
-				slog.Error("UpdateAgentRuntimeCustomName failed", "error", err, "runtime_id", runtimeID)
-				writeError(w, http.StatusInternalServerError, "failed to update runtime")
-				return
-			}
-			rt = updated
-			changed = true
-		}
-	}
-
 	if changed {
 		// Notify connected clients that runtime metadata changed so the
 		// list/detail pages refresh — matches the pattern used by
@@ -754,9 +736,6 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 }
 
 func canEditRuntime(member db.Member, rt db.AgentRuntime) bool {
-	if roleAllowed(member.Role, "owner", "admin") {
-		return true
-	}
 	return rt.OwnerID.Valid && uuidToString(rt.OwnerID) == uuidToString(member.UserID)
 }
 
@@ -796,6 +775,9 @@ func (h *Handler) runtimeLookup(source string) service.RuntimeLookup {
 // several 500ms browser poll loops, and counting them together would hide the
 // polling the metric exists to measure.
 func (h *Handler) requireRuntimeReadAccess(w http.ResponseWriter, r *http.Request, source, runtimeID string) (db.AgentRuntime, db.Member, bool) {
+	if !h.requirePersonalRuntimeReadActor(w, r) {
+		return db.AgentRuntime{}, db.Member{}, false
+	}
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
 	if !ok {
 		return db.AgentRuntime{}, db.Member{}, false
@@ -1010,9 +992,6 @@ func canUseRuntimeForAgent(member db.Member, rt db.AgentRuntime) bool {
 	if !rt.OwnerID.Valid {
 		return false
 	}
-	if rt.Visibility == "public" {
-		return true
-	}
 	return uuidToString(rt.OwnerID) == uuidToString(member.UserID)
 }
 
@@ -1028,40 +1007,59 @@ func canSetRuntimeVisibility(member db.Member, rt db.AgentRuntime) bool {
 }
 
 func (h *Handler) ListAgentRuntimes(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePersonalRuntimeReadActor(w, r) {
+		return
+	}
 	workspaceID := h.resolveWorkspaceID(r)
 	userID, ok := requireUserID(w, r)
 	if !ok {
 		return
 	}
-	member, ok := h.requireWorkspaceMember(w, r, workspaceID, "workspace not found")
+	_, ok = h.requireWorkspaceMember(w, r, workspaceID, "workspace not found")
 	if !ok {
 		return
 	}
 
-	var runtimes []db.AgentRuntime
-	var err error
-
-	if ownerFilter := r.URL.Query().Get("owner"); ownerFilter == "me" {
-		runtimes, err = h.Queries.ListAgentRuntimesByOwner(r.Context(), db.ListAgentRuntimesByOwnerParams{
-			WorkspaceID: parseUUID(workspaceID),
-			OwnerID:     parseUUID(userID),
-		})
-	} else if roleAllowed(member.Role, "owner", "admin") {
-		// Governance visibility preserves the existing owner/admin contract:
-		// admins can find a private runtime to rename or delete it, but the
-		// per-runtime read gate still denies data and machine access.
-		runtimes, err = h.Queries.ListAgentRuntimes(r.Context(), parseUUID(workspaceID))
-	} else {
-		runtimes, err = h.Queries.ListVisibleAgentRuntimes(r.Context(), db.ListVisibleAgentRuntimesParams{
-			WorkspaceID: parseUUID(workspaceID),
-			OwnerID:     parseUUID(userID),
-		})
+	if err := h.ensurePersonalRuntimes(r.Context(), parseUUID(workspaceID), userID); err != nil {
+		writeError(w, 500, "failed to load personal runtimes")
+		return
 	}
+	runtimes, err := h.Queries.ListAgentRuntimesByOwner(r.Context(), db.ListAgentRuntimesByOwnerParams{
+		WorkspaceID: parseUUID(workspaceID), OwnerID: parseUUID(userID),
+	})
 
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list runtimes")
 		return
 	}
+	retired, err := h.DB.Query(r.Context(), `SELECT r.id FROM agent_runtime r JOIN personal_runtime c ON c.id=r.personal_runtime_id WHERE r.workspace_id=$1 AND r.owner_id=$2 AND c.retired_at IS NOT NULL`, parseUUID(workspaceID), parseUUID(userID))
+	if err != nil {
+		writeError(w, 500, "failed to load personal runtime identities")
+		return
+	}
+	hidden := map[string]bool{}
+	for retired.Next() {
+		var id pgtype.UUID
+		if err = retired.Scan(&id); err != nil {
+			retired.Close()
+			writeError(w, 500, "failed to read personal runtime identities")
+			return
+		}
+		hidden[uuidToString(id)] = true
+	}
+	err = retired.Err()
+	retired.Close()
+	if err != nil {
+		writeError(w, 500, "failed to read personal runtime identities")
+		return
+	}
+	visible := runtimes[:0]
+	for _, rt := range runtimes {
+		if !hidden[uuidToString(rt.ID)] {
+			visible = append(visible, rt)
+		}
+	}
+	runtimes = visible
 
 	resp := make([]AgentRuntimeResponse, len(runtimes))
 	for i, rt := range runtimes {
@@ -1117,6 +1115,9 @@ func (h *Handler) publishRuntimeTeardown(ctx context.Context, res service.Runtim
 }
 
 func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
+	if !requirePersonalRuntimeActor(w, r) {
+		return
+	}
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
 	if !ok {
@@ -1141,6 +1142,9 @@ func (h *Handler) DeleteAgentRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := uuidToString(member.UserID)
+	if h.deletePersonalRuntime(w, r, rt, false, nil) {
+		return
+	}
 
 	profile, hasLiveProfile, err := h.runtimeLiveProfile(r.Context(), rt)
 	if err != nil {
@@ -1326,6 +1330,9 @@ type unbindAgentsAndDeleteRuntimeRequest struct {
 // Served at POST /api/runtimes/:id/unbind-agents-and-delete and, for installed
 // clients, the original /archive-agents-and-delete path.
 func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Request) {
+	if !requirePersonalRuntimeActor(w, r) {
+		return
+	}
 	runtimeID := chi.URLParam(r, "runtimeId")
 	runtimeUUID, ok := parseUUIDOrBadRequest(w, runtimeID, "runtime_id")
 	if !ok {
@@ -1359,6 +1366,9 @@ func (h *Handler) UnbindAgentsAndDeleteRuntime(w http.ResponseWriter, r *http.Re
 		return
 	}
 	userID := uuidToString(member.UserID)
+	if h.deletePersonalRuntime(w, r, rt, true, expected) {
+		return
+	}
 
 	profile, hasLiveProfile, err := h.runtimeLiveProfile(r.Context(), rt)
 	if err != nil {

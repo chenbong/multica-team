@@ -17,15 +17,12 @@ func TestDeleteOfflineMachineAtomic(t *testing.T) {
 		t.Fatal("isolated test database required")
 	}
 	ctx := context.Background()
-	r1, profile := createProfileBackedRuntime(t, ctx, "Offline Machine")
-	r2 := createCascadeFixtureRuntime(t, ctx, "Second Runtime")
-	other := createCascadeFixtureRuntime(t, ctx, "Other Computer")
-	if _, err := testPool.Exec(ctx, `UPDATE agent_runtime SET runtime_mode='local', daemon_id=$1, status='offline' WHERE id IN ($2,$3)`, "daemon-"+profile, r1, r2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := testPool.Exec(ctx, `UPDATE agent_runtime SET profile_id=$1 WHERE id=$2`, profile, other); err != nil {
-		t.Fatal(err)
-	}
+	profile := insertRuntimeProfileFixture(t, ctx, "Offline Machine", "codex", "codex")
+	// Personal identities are immutable; build the intended machine rather
+	// than reassigning an existing registration to another daemon/profile.
+	r1 := dbfx.Runtime(t, "Offline Machine", testutil.Cols{"runtime_mode": "local", "daemon_id": "daemon-" + profile, "profile_id": profile, "provider": "codex", "status": "offline"})
+	r2 := dbfx.Runtime(t, "Second Runtime", testutil.Cols{"runtime_mode": "local", "daemon_id": "daemon-" + profile, "provider": "claude", "status": "offline"})
+	other := dbfx.Runtime(t, "Other Computer", testutil.Cols{"runtime_mode": "local", "daemon_id": "other-" + profile, "profile_id": profile, "provider": "codex", "status": "offline"})
 	agentID := createCascadeFixtureAgent(t, ctx, r1, "Retained User Agent")
 	call := func(runtimes, agents []string, status int) {
 		req := withURLParam(newRequest("POST", "/api/runtimes/"+r1+"/delete-offline-machine", map[string]any{"expected_runtime_ids": runtimes, "expected_active_agent_ids": agents}), "runtimeId", r1)

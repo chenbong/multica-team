@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS personal_runtime_profile_owner_name_key ON personal_runtime_profile(owner_id,display_name);

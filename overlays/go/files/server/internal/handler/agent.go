@@ -1204,7 +1204,7 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		// agent running under an owner's daemon could read other agents'
 		// MCP configs (which routinely embed third-party API tokens) — the
 		// same lateral-movement vector MUL-2600 closed for custom_env.
-		if actorType == "agent" || alwaysRedact || !canViewAgentSecrets(a, userID, member.Role) {
+		if actorType == "agent" || isMachineCredentialActor(r) || alwaysRedact || !canViewAgentSecrets(a, userID, member.Role) {
 			redactMcpConfig(&resp)
 		}
 		// composio_toolkit_allowlist is owner-only — not because the slugs
@@ -1279,12 +1279,8 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	alwaysRedact := workspaceAlwaysRedactSecrets(ws.Settings)
 	// Agent actors NEVER see mcp_config (see ListAgents for the rationale).
-	if actorType == "agent" || alwaysRedact {
+	if actorType == "agent" || isMachineCredentialActor(r) || alwaysRedact || !canViewAgentSecrets(agent, userID, viewerRole) {
 		redactMcpConfig(&resp)
-	} else if member, ok := ctxMember(r.Context()); ok {
-		if !canViewAgentSecrets(agent, userID, member.Role) {
-			redactMcpConfig(&resp)
-		}
 	}
 	// composio_toolkit_allowlist visibility is strictly owner-only (see
 	// ListAgents for the rationale). No workspace owner/admin bypass.
@@ -1384,6 +1380,10 @@ func normaliseAgentConversationStarters(starters []AgentConversationStarter) ([]
 }
 
 func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
+	if isMachineCredentialActor(r) && !h.ownerInitiatedAgentTask(r) {
+		writeError(w, http.StatusForbidden, "only the human owner can create agents")
+		return
+	}
 	workspaceID := h.resolveWorkspaceID(r)
 
 	var req CreateAgentRequest
@@ -1457,7 +1457,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canUseRuntimeForAgent(member, runtime) {
-		writeError(w, http.StatusForbidden, "this runtime is private; only its owner can create agents on it")
+		writeError(w, http.StatusForbidden, "only the runtime owner can create agents on it")
 		return
 	}
 
@@ -1739,15 +1739,12 @@ func workspaceAlwaysRedactSecrets(settings []byte) bool {
 
 // canViewAgentSecrets checks whether the requesting user is allowed to
 // see the agent's secret-bearing fields (currently `mcp_config`). Only
-// the agent owner or workspace owner/admin qualify; for everyone else
+// the agent owner qualifies; for everyone else
 // the response is redacted. `custom_env` is no longer part of an agent
 // resource response (see MUL-2600), so this predicate is shared only by
 // the remaining mcp_config redaction path.
 func canViewAgentSecrets(agent db.Agent, userID string, memberRole string) bool {
-	if roleAllowed(memberRole, "owner", "admin") {
-		return true
-	}
-	return uuidToString(agent.OwnerID) == userID
+	return agent.OwnerID.Valid && userID != "" && uuidToString(agent.OwnerID) == userID
 }
 
 // broadcastAgentResponse strips secret-bearing fields from an
@@ -1869,17 +1866,23 @@ func redactAgentResponseForActor(resp *AgentResponse, actorType string) {
 }
 
 // canManageAgent checks whether the current user can update or archive an agent.
-// Only the agent owner or workspace owner/admin can manage any agent,
+// Only the agent owner can manage an agent,
 // regardless of whether it is public or private.
 func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent db.Agent) bool {
+	// Task credentials carry their runtime owner's user ID so shared agents
+	// can execute. That delegated identity is not permission to reconfigure
+	// this agent, another agent, or the owner's execution secrets.
+	if isMachineCredentialActor(r) && !h.ownerInitiatedAgentTask(r) {
+		writeError(w, http.StatusForbidden, "only the human owner can manage this agent")
+		return false
+	}
 	wsID := uuidToString(agent.WorkspaceID)
 	member, ok := h.requireWorkspaceRole(w, r, wsID, "agent not found", "owner", "admin", "member")
 	if !ok {
 		return false
 	}
-	isAdmin := roleAllowed(member.Role, "owner", "admin")
-	isAgentOwner := uuidToString(agent.OwnerID) == requestUserID(r)
-	if !isAdmin && !isAgentOwner {
+	isAgentOwner := agent.OwnerID.Valid && agent.OwnerID == member.UserID
+	if !isAgentOwner {
 		writeError(w, http.StatusForbidden, "only the agent owner can manage this agent")
 		return false
 	}
@@ -1987,14 +1990,14 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Same gate as CreateAgent — prevents UpdateAgent from being used to
-		// re-bind an agent onto someone else's private runtime, which would
+		// re-bind an agent onto someone else's runtime, which would
 		// otherwise be a quiet end-run around the CreateAgent check.
 		member, ok := h.workspaceMember(w, r, uuidToString(existing.WorkspaceID))
 		if !ok {
 			return
 		}
 		if !canUseRuntimeForAgent(member, runtime) {
-			writeError(w, http.StatusForbidden, "this runtime is private; only its owner can move agents onto it")
+			writeError(w, http.StatusForbidden, "only the runtime owner can move agents onto it")
 			return
 		}
 		params.RuntimeID = runtime.ID
@@ -2645,8 +2648,8 @@ func (h *Handler) RestoreAgent(w http.ResponseWriter, r *http.Request) {
 
 // CancelAgentTasks bulk-cancels every active task (queued/dispatched/running)
 // belonging to an agent. Powers the agents-list "Cancel all tasks" row
-// action. Same permission gate as archive (canManageAgent — owner or
-// workspace admin/owner). Each cancelled row triggers a task:cancelled WS
+// action. Same owner-only permission gate as archive (canManageAgent).
+// Each cancelled row triggers a task:cancelled WS
 // event so connected clients clear their live cards immediately.
 //
 // Note: a `running` task on the daemon side won't actually halt for up to
