@@ -1,4 +1,5 @@
-import { Client, WSClient } from "@baidu/infoflow-sdk-nodejs";
+import { Client } from "@baidu/infoflow-sdk-nodejs";
+import { createWSClient } from "./ws-transport.js";
 import { Bridge } from "./bridge.js";
 import { ReviewNotifications } from "./review-notifications.js";
 import { acknowledge } from "./reactions.js";
@@ -191,9 +192,10 @@ export class RobotRuntime {
       return;
     }
 
-    const wsClient = new WSClient({
+    const wsClient = createWSClient({
       appKey: robot.appKey,
       appSecret: robot.appSecret,
+      baseUrl: robot.baseUrl,
       // Only override what the deployment configured, so an unconfigured clone
       // keeps whatever gateway the SDK ships with.
       ...(DEFAULT_WS_GATEWAY ? { wsGateway: DEFAULT_WS_GATEWAY } : {}),

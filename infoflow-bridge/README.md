@@ -39,6 +39,18 @@ Design notes worth knowing:
 
 ## Setup
 
+### 可选：仅网关与 WebSocket 使用代理
+
+设置 `INFOFLOW_WS_PROXY=http://<proxy-host>:<port>` 后重启 Bridge，端点申请和
+WebSocket 握手（包括自动重连）均使用该代理，TLS 证书仍正常校验。
+留空维持直连；此设置不会改变 Multica API、验证码和其他内网 HTTP 请求的路由。
+不要为此设置进程级 `HTTP_PROXY` / `HTTPS_PROXY`。
+
+安装依赖时 `postinstall` 会给固定版本 SDK 添加实例级 agent 注入点，
+不修改 Node 全局网络方法。升级 SDK 需要重新审查补丁；版本或匹配点不符会拒绝应用。
+如果安装时使用了 `--ignore-scripts`，需要补跑 `npm run postinstall`。
+WebSocket 自动注册回调使用机器人的 `baseUrl`，与发送消息的 API 地址一致。
+
 ## 配置页面（本机）
 
 Bridge 启动后在 <http://127.0.0.1:4180> 提供一个本机配置页：新增机器人时填名称、应用 ID、
