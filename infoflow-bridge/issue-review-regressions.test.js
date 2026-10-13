@@ -273,7 +273,7 @@ test("private names resolve through each robot account and in-group members send
   assert.deepEqual(f.lookups, ["alice", "bob"]);
   assert.deepEqual(entries.map(entry => entry.agentId), [A, B]);
   f.runtime.issueGroups.members = async () => [{ appId: "101" }, { appId: "202" }];
-  const bound = { group: { leader_agent_id: A, agent_ids: [A, B] } };
+  const bound = { binding_id: "binding-1", group: { leader_agent_id: A, agent_ids: [A, B] } };
   const observed = await f.runtime.issueGroups.inspect({ robot_id: "a", agent_id: A, workspace_id: "ws" }, { kind: "group", id: "42" }, bound);
   const route = f.runtime.issueGroups.selectSender(observed, { binding: bound, author_agent_id: B });
   assert.equal(route.pin.robot_id, "b"); assert.equal(route.pin.delegated, false);
@@ -314,7 +314,7 @@ test("authoritative task roster excludes an unrelated disabled invalid name with
   f.config.robots[1].agent = "deleted-agent";
   f.config.robots[1].enabled = false;
   f.runtime.instances.get("b").bridge.multica.listAgents = async () => assert.fail("unrelated invalid name was queried");
-  const bound = { group: { leader_agent_id: A, agent_ids: [A], agent_names: { [A]: "leader" } } };
+  const bound = { binding_id: "binding-1", group: { leader_agent_id: A, agent_ids: [A], agent_names: { [A]: "leader" } } };
   const scope = { workspace_id: "ws", robot_id: "a", agent_id: A };
   assert.equal(await f.runtime.issueGroups.owns(scope, bound), true);
   f.runtime.issueGroups.members = async () => [{ appId: "101" }];
@@ -332,7 +332,7 @@ test("a roster-matching private participant cannot disappear when its own lookup
 test("a missing member robot can use the leader despite unrelated obsolete configuration", async t => {
   const f = robotFixture(t); f.config.robots[0].agent = A; f.config.robots[1].agent = "deleted-agent";
   f.runtime.instances.get("b").bridge.multica.listAgents = async () => assert.fail("unrelated lookup");
-  const bound = { group: { leader_agent_id: A, agent_ids: [A, B], agent_names: { [A]: "leader", [B]: "member" } } };
+  const bound = { binding_id: "binding-1", group: { leader_agent_id: A, agent_ids: [A, B], agent_names: { [A]: "leader", [B]: "member" } } };
   f.runtime.issueGroups.members = async () => [{ appId: "101" }];
   const observed = await f.runtime.issueGroups.inspect({ workspace_id: "ws", robot_id: "a", agent_id: A }, { kind: "group", id: "42" }, bound);
   assert.equal(observed.leader_present, true);

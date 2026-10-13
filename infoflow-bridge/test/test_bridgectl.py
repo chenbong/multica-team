@@ -153,6 +153,8 @@ class RelayStateIgnoreTests(unittest.TestCase):
             "infoflow-bridge/state.json.issue-group-invites.json.tmp",
             "custom/nested/state.issue-group-invites.json",
             "infoflow-bridge/state.json.issue-deliveries-example.json.inbox",
+            "infoflow-bridge/state.json.issue-deliveries-example.json.decisions/fixture.json",
+            "infoflow-bridge/state.json.issue-deliveries-example.json.decisions/fixture.json.tmp",
         ]
         result = subprocess.run(["git", "check-ignore", "--no-index", "--stdin"],
                                 cwd=BRIDGE_ROOT.parent, input="\n".join(paths) + "\n",

@@ -71,7 +71,7 @@ export class ReviewNotifications {
           const comment = timeline.filter(e => e.type === "comment" && e.actor_type === "agent" && e.actor_id === agent.id && e.content).at(-1);
           const stateLabel = toCategory === "blocked" ? "已阻塞" : "已进入审核中";
           state.pending[event.id] = {
-            issueId: issue.id, owner, at: event.created_at,
+            issueId: issue.id, identifier: issue.identifier, owner, at: event.created_at,
             content: `**任务${stateLabel}：${issue.identifier}**\n\n${issue.title}\n智能体：${agent.name}\n` +
               (comment ? `\n完成摘要：\n${comment.content.slice(0, 1600)}\n` : "\n请打开任务查看执行结果并审核。\n") +
               `\n${m.issueUrl(issue)}`,
@@ -87,7 +87,7 @@ export class ReviewNotifications {
       if (this.stopped) break;
       if (notification.owner !== owner) continue;
       try {
-        await this.runtime.sendDirect(robot.id, owner, withReplyMode(notification.content, "issue"));
+        await this.runtime.sendDirect(robot.id, owner, withReplyMode(notification.content, "issue", notification.identifier));
         state.sent[eventId] = { at: this.now(), issueId: notification.issueId };
         delete state.pending[eventId];
         this.save();

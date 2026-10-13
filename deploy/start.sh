@@ -11,11 +11,7 @@ mkdir -p "$DEPLOY_DIR/logs"
 
 (cd "$INSTANCE_DIR/multica/server" && "$DEPLOY_DIR/bin/migrate" up) \
   >> "$DEPLOY_DIR/logs/migrate.log" 2>&1
-for migration in "$INSTANCE_DIR"/migrations/*.up.sql; do
-  [ -e "$migration" ] || continue
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration" \
-    >> "$DEPLOY_DIR/logs/migrate.log" 2>&1
-done
+bash "$DEPLOY_DIR/migrate-team.sh" >> "$DEPLOY_DIR/logs/migrate.log" 2>&1
 
 BRIDGE_CONFIG="$INSTANCE_DIR/infoflow-bridge/config.local.json"
 if [ ! -f "$BRIDGE_CONFIG" ]; then

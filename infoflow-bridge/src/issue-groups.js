@@ -103,7 +103,8 @@ export class IssueGroups {
   }
 
   async inspect(scope, conversation, binding, { invite = false, bootstrap = false } = {}) {
-    const key = JSON.stringify([scope.workspace_id, exactGroupId(conversation.id)]);
+    if (!binding?.binding_id) throw new Error("group binding identity is missing");
+    const key = JSON.stringify([scope.workspace_id, binding.binding_id, exactGroupId(conversation.id)]);
     const prior = this.locks.get(key) || Promise.resolve();
     const pending = prior.catch(() => {}).then(() => this.inspectSerial(scope, conversation, binding, invite, bootstrap));
     this.locks.set(key, pending);

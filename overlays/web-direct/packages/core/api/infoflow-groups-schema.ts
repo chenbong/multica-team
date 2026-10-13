@@ -16,7 +16,7 @@ export const InfoFlowGroupsSchema = z.object({
     group_id: groupIdSchema,
     name: z.string().max(256).optional(),
     url: z.string(),
-  })).max(1000),
+  })).max(1),
 });
 
 export interface InfoFlowGroup {

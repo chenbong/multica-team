@@ -98,7 +98,7 @@ test("runtime maps participant configs across Bridge callbacks without workspace
   assert.equal(entries[1].send, null);
   assert.equal(bridge.issueRelay.groups, runtime.issueGroups);
   runtime.issueGroups.members = async () => [{ appId: "101", imId: "9001" }, { appId: "202", imId: "9002" }];
-  const binding = { group: { leader_agent_id: a, agent_ids: [a, b] } };
+  const binding = { binding_id: "binding-1", group: { leader_agent_id: a, agent_ids: [a, b] } };
   const observation = await runtime.issueGroups.inspect({ robot_id: "a", agent_id: a, workspace_id: "ws" }, { kind: "group", id: "42" }, binding);
   assert.equal(observation.leader_present, true);
   assert.throws(() => runtime.issueGroups.selectSender(observation, { binding, author_agent_id: b }), /in group but unavailable/);

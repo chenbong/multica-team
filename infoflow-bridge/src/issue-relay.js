@@ -6,6 +6,8 @@ import { issueRequest } from "./chat.js";
 import { messageIdString } from "./conversation-context.js";
 import { withReplyMode, noticeReplyMode } from "./reply-format.js";
 
+const DEFERRED_BINDING = Symbol("deferred-binding");
+
 // The service credential only authorizes the trusted inbound bridge. Never put
 // it in agent prompts, CLI profiles, robot admin responses, or daemon requests.
 export class IssueRelay {
@@ -25,6 +27,7 @@ export class IssueRelay {
     this.path = config.statePath + ".issue-deliveries-" + createHash("sha256").update(scope).digest("hex").slice(0, 16) + ".json";
     this.inboxPath = this.path + ".inbox";
     this.quarantinePath = this.path + ".quarantine";
+    this.decisionsPath = this.path + ".decisions";
     this.sentParts = {};
     this.inbox = {};
     if (this.enabled) {
@@ -76,7 +79,7 @@ export class IssueRelay {
     if (this.stopped || !message.messageId || (typeof message.messageId === "number" && !Number.isSafeInteger(message.messageId))) return true;
     const key = JSON.stringify([message.conversation.kind, String(message.conversation.id)]);
     const id = createHash("sha256").update(JSON.stringify([key, String(message.messageId)])).digest("hex");
-    if (existsSync(joinPath(this.quarantinePath, id))) return true;
+    if (existsSync(joinPath(this.quarantinePath, id)) || existsSync(joinPath(this.decisionsPath, id))) return true;
     if (!this.inbox[id]) {
       if (Object.keys(this.inbox).length >= 500) {
         this.logger.warn("issue relay inbox is full; input was not accepted");
@@ -100,9 +103,13 @@ export class IssueRelay {
 
   async drain(key, currentId = null) {
     let handled = true;
+    const blockedBindings = new Set();
     for (const [id, record] of Object.entries(this.inbox)) {
       if (record.key !== key || this.stopped) continue;
       try {
+        // A crash may leave an inbox entry after its terminal no-route marker
+        // was committed. Do not resend its notice or reinterpret its target.
+        if (existsSync(joinPath(this.decisionsPath, id))) { delete this.inbox[id]; this.saveInbox(); continue; }
         if (record.quarantined) { this.archiveQuarantined(id, record); continue; }
         if (record.chatSubmitted) { delete this.inbox[id]; this.saveInbox(); continue; }
         if (record.chatSubmitting) {
@@ -110,7 +117,8 @@ export class IssueRelay {
           error.status = 409;
           throw error;
         }
-        const result = await this.handleSerial(record.input, record);
+        const result = await this.handleSerial(record.input, record, blockedBindings);
+        if (result === DEFERRED_BINDING) continue;
         if (id === currentId) handled = result;
         // A recovered unbound Chat input cannot be dropped silently. The main
         // Bridge installs a fallback that reuses its normal Chat deduplication.
@@ -123,6 +131,10 @@ export class IssueRelay {
         } else if (!result && id !== currentId) {
           throw new Error("unbound message awaits Chat handoff");
         }
+        // Only terminal, non-selected routing decisions are completed here.
+        // Accepted mutations still rely on server receipts/permission checks;
+        // transport failures and failed notice sends remain in the inbox.
+        if (record.routingNotice && result === true) this.completeRoutingDecision(id);
         delete this.inbox[id];
         this.saveInbox();
       } catch (error) {
@@ -146,7 +158,15 @@ export class IssueRelay {
         }
         this.saveInbox();
         this.logger.warn("issue relay input pending: " + error.message);
-        // Preserve order within this conversation; other conversations may run.
+        // Once the authoritative target is pinned, preserve order per task,
+        // not per physical group. Another task can keep working while this
+        // task's leader/status endpoint is unavailable. Unknown targets still
+        // conservatively block this conversation until routing can be proven.
+        if (record.input.conversation.kind === "group" && record.preparedBody?.expected_binding_id) {
+          blockedBindings.add(record.preparedBody.expected_binding_id);
+          continue;
+        }
+        // Private conversations retain their existing sequential semantics.
         break;
       }
     }
@@ -162,6 +182,16 @@ export class IssueRelay {
     this.saveInbox();
   }
 
+  completeRoutingDecision(id) {
+    // Keep small per-input tombstones rather than an expiring/in-memory seen
+    // set: delayed SDK replays must not become executable after a topology
+    // change. No raw text, identity, task list or credentials are retained.
+    mkdirSync(this.decisionsPath, { recursive: true, mode: 0o700 });
+    const path = joinPath(this.decisionsPath, id);
+    writeFileSync(path + ".tmp", JSON.stringify({ disposition: "no-route", completedAt: Date.now() }), { mode: 0o600 });
+    renameSync(path + ".tmp", path);
+  }
+
   saveInbox() {
     const data = JSON.stringify(this.inbox);
     if (Buffer.byteLength(data) > 64 * 1024 * 1024) throw new Error("issue relay inbox exceeds storage budget");
@@ -169,18 +199,27 @@ export class IssueRelay {
     renameSync(this.inboxPath + ".tmp", this.inboxPath);
   }
 
-  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [] }, record = {}) {
+  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [] }, record = {}, blockedBindings = new Set()) {
       // Missing/rounded identifiers cannot provide safe retry deduplication.
       if (!messageId || (typeof messageId === "number" && !Number.isSafeInteger(messageId))) return true;
       // Once preflight hands this input to Chat, later binds must never retarget
       // it. Unknown Chat POST outcomes are quarantined by drain before this path.
       if (record.chatHandoff) return false;
+      if (record.routingNotice) {
+        // A failed clarification send is not permission to reinterpret the
+        // same message as executable when the group topology later changes.
+        await this.sendNotice(conversation, record.routingNotice);
+        return true;
+      }
       const scope = await this.scope();
       const parsed = relayOperation(text);
+      const groupUnbind = conversation.kind === "group" && parsed.operation === "unbind";
+      const versionedOperation = parsed.operation === "message" || groupUnbind;
       const wasPrepared = Boolean(record.preparedBody);
       const body = record.preparedBody ? structuredClone(record.preparedBody) : {
         ...scope, conversation: { kind: conversation.kind, id: String(conversation.id) },
         sender: user, message_id: String(messageId), operation: parsed.operation,
+        ...(parsed.explicitBinding && parsed.operation === "binding" ? { command: "binding" } : {}),
         ...(parsed.issue_ref ? { issue_ref: parsed.issue_ref } : {}),
         content: parsed.content,
         ...(replyToMessageId ? { reply_to_message_id: String(replyToMessageId) } : {}),
@@ -189,15 +228,18 @@ export class IssueRelay {
       let result;
       let preflight;
       try {
-        if (wasPrepared && body.operation === "message" &&
+        if (body.expected_binding_id && blockedBindings.has(body.expected_binding_id)) return DEFERRED_BINDING;
+        if (wasPrepared && versionedOperation &&
             (!body.expected_binding_id || !body.expected_generation)) {
           // A legacy queued request cannot prove its original destination. Do
           // not retrofit today's binding onto it, even after a restart.
           throw Object.assign(new Error("unversioned prepared input requires operator review"), { status: 409 });
         }
-        if (record.preflightPending || (!wasPrepared && (parsed.operation === "message" ||
+        if (record.preflightPending || (!wasPrepared && (versionedOperation ||
             (this.groups && conversation.kind === "group" && parsed.operation === "binding")))) {
-          preflight = await this.request("issue-relay", { ...body, operation: "binding", content: "" });
+          // Routing is server-authoritative: preserve the text/task numbers and
+          // exact quoted message ID, including when checking a pinned retry.
+          preflight = await this.request("issue-relay", { ...body, operation: "binding", ...(groupUnbind ? { command: "unbind" } : {}) });
           this.validateDecision(preflight);
           if (body.expected_binding_id && (preflight.binding?.binding_id !== body.expected_binding_id ||
               preflight.binding?.generation !== body.expected_generation)) {
@@ -208,7 +250,17 @@ export class IssueRelay {
             this.saveInbox();
             return false;
           }
-          if (parsed.operation === "message" && preflight.binding) {
+          if (!preflight.binding && (preflight.handled || groupUnbind)) {
+            // Ambiguity/unknown references are terminal notices, not a guess,
+            // a Chat fallback, or a mutation with an unpinned destination.
+            record.routingNotice = { handled: true, silent: preflight.silent,
+              notice: preflight.notice || (groupUnbind ? "当前群未绑定所指定的任务。" : undefined),
+              conversation_mode: preflight.conversation_mode };
+            this.saveInbox();
+            await this.sendNotice(conversation, record.routingNotice);
+            return true;
+          }
+          if (versionedOperation && preflight.binding) {
             if (!preflight.binding.binding_id || !preflight.binding.generation) throw new Error("binding version is missing from preflight");
             body.expected_binding_id = preflight.binding.binding_id;
             body.expected_generation = preflight.binding.generation;
@@ -218,20 +270,21 @@ export class IssueRelay {
             record.preflightPending = true;
             record.mediaPrepared = images.length === 0;
             this.saveInbox();
+            if (blockedBindings.has(body.expected_binding_id)) return DEFERRED_BINDING;
           }
-          if (this.groups && conversation.kind === "group" && preflight.binding && !preflight.binding.group) throw new Error("group binding is missing its coordination plan");
-          if (this.groups && conversation.kind === "group" && preflight.binding?.group) {
+          if (!groupUnbind && this.groups && conversation.kind === "group" && preflight.binding && !preflight.binding.group) throw new Error("group binding is missing its coordination plan");
+          if (!groupUnbind && this.groups && conversation.kind === "group" && preflight.binding?.group) {
             const checked = await this.reconcileGroup(scope, conversation, preflight.binding, { invite: preflight.can_reconcile_group === true, bootstrap: true });
             if (checked.binding?.group?.state !== "active") {
               await this.sendNotice(conversation, !preflight.can_comment && preflight.notice ? preflight : checked);
               return true;
             }
           }
-          if (preflight.handled && !preflight.can_comment && (images.length || !(preflight.binding?.group && this.groups && conversation.kind === "group"))) {
+          if (!groupUnbind && preflight.handled && !preflight.can_comment && (images.length || !(preflight.binding?.group && this.groups && conversation.kind === "group"))) {
             await this.sendNotice(conversation, preflight);
             return true;
           }
-          if (parsed.operation === "message") {
+          if (versionedOperation) {
             if (!body.expected_binding_id) throw new Error("binding version is missing from preflight");
             record.preflightPending = false;
             this.saveInbox();
@@ -293,7 +346,7 @@ export class IssueRelay {
         return false;
       }
       if (parsed.operation === "binding" && result.binding && result.can_comment && !result.notice) {
-        result.notice = `当前绑定任务：${result.binding.identifier || result.binding.issue_id}${result.binding.title ? " " + result.binding.title : ""}\n后续消息会发布到任务评论；使用 /unbind 解除绑定后恢复普通聊天。`;
+        result.notice = `当前绑定任务：${result.binding.identifier || result.binding.issue_id}${result.binding.title ? " " + result.binding.title : ""}\n回复该任务消息或注明任务编号可发布评论；使用 /unbind ${result.binding.identifier || result.binding.issue_id} 解除此任务绑定。`;
       }
       await this.sendNotice(conversation, result);
       return true;
@@ -304,7 +357,7 @@ export class IssueRelay {
   }
 
   async reconcileGroup(scope, conversation, binding, { invite = false, bootstrap = false } = {}) {
-    if (!binding?.group || !this.groups) throw new Error("group binding coordination is unavailable");
+    if (!binding?.binding_id || !binding?.group || !this.groups) throw new Error("group binding coordination is unavailable");
     if (!binding.group.leader_agent_id) return { handled: true, silent: false, binding,
       notice: binding.group.reason || "请先为任务配置负责人或小队队长", observation: { leader_present: false } };
     let observation;
@@ -313,12 +366,12 @@ export class IssueRelay {
     const response = await this.request("issue-group-status", {
       ...scope,
       ...(observation.leader_robot_id ? { robot_id: observation.leader_robot_id, agent_id: binding.group.leader_agent_id } : {}),
-      conversation: { kind: "group", id: String(conversation.id) }, generation: binding.generation,
+      conversation: { kind: "group", id: String(conversation.id) }, binding_id: binding.binding_id, generation: binding.generation,
       leader_agent_id: binding.group.leader_agent_id || "", leader_robot_id: observation.leader_robot_id || "",
       leader_present: observation.leader_present,
     });
     this.validateDecision(response);
-    if (!response.binding?.group || response.binding.generation !== binding.generation ||
+    if (!response.binding?.group || response.binding.binding_id !== binding.binding_id || response.binding.generation !== binding.generation ||
         response.binding.group.leader_agent_id !== binding.group.leader_agent_id) {
       throw new Error("group binding changed during membership verification");
     }
@@ -344,10 +397,14 @@ export class IssueRelay {
     if (!Array.isArray(result.groups)) throw new Error("invalid issue group list");
     const checked = new Map();
     for (const group of result.groups) {
-      if (group.conversation?.kind !== "group" || !group.conversation.id || !group.binding?.group) throw new Error("invalid issue group plan");
-      if (!(await this.groups.owns(scope, group.binding))) continue;
-      const state = await this.reconcileGroup(scope, group.conversation, group.binding, { invite: true });
-      checked.set(String(group.conversation.id), state);
+      try {
+        if (group.conversation?.kind !== "group" || !group.conversation.id || !group.binding?.binding_id || !group.binding.group) throw new Error("invalid issue group plan");
+        if (!(await this.groups.owns(scope, group.binding))) continue;
+        const state = await this.reconcileGroup(scope, group.conversation, group.binding, { invite: true });
+        // Multiple task bindings can share one physical group/leader. A failed
+        // task's topology or membership must not pause unrelated deliveries.
+        checked.set(group.binding.binding_id, { ...state, conversation: group.conversation });
+      } catch { this.logger.warn("issue group binding reconciliation pending"); }
     }
     return checked;
   }
@@ -356,7 +413,7 @@ export class IssueRelay {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
     for (const part of this.replyParts(result.notice, result.binding)) {
       if (this.stopped) throw new Error("issue relay stopped before notice delivery");
-      await this.send(conversation, withReplyMode(part, noticeReplyMode(result)), {});
+      await this.send(conversation, withReplyMode(part, noticeReplyMode(result), result.binding?.identifier), {});
     }
   }
 
@@ -417,8 +474,9 @@ export class IssueRelay {
         if (prior && prior.digest !== digest) throw new Error("issue delivery content changed during retry");
         let route = null;
         if (shared) {
-          const plan = groupPlans?.get(String(item.conversation.id));
+          const plan = groupPlans?.get(item.binding?.binding_id);
           if (!plan || plan.binding.group.state !== "active" ||
+              String(plan.conversation.id) !== String(item.conversation.id) ||
               plan.binding.generation !== item.binding?.generation || plan.binding.issue_id !== item.binding?.issue_id ||
               plan.binding.group.leader_robot_id !== scope.robot_id) throw new Error("group delivery is not owned by this active leader");
           if (prior && !prior.route) throw new Error("legacy group checkpoint requires operator review");
@@ -443,7 +501,7 @@ export class IssueRelay {
             route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, route.pin);
           }
           const receipt = await (route?.send || this.send)(item.conversation,
-            withReplyMode((route?.pin.label || "") + parts[index], "issue"), {});
+            withReplyMode((route?.pin.label || "") + parts[index], "issue", (item.binding || item).identifier), {});
           const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId);
           const messageIds = [...(checkpoints[item.id]?.messageIds || [])];
           if (messageId) messageIds.push(messageId);

@@ -17,12 +17,7 @@ def extend(changes):
       InfoFlowGroupsSchema, null, { endpoint: "GET /api/issues/:id/infoflow-groups" },
     );
     if (!result) throw new Error("Invalid InfoFlow group list");
-    const seen = new Set<string>();
-    return result.groups.filter((group) => {
-      if (seen.has(group.group_id)) return false;
-      seen.add(group.group_id);
-      return true;
-    }).map((group) => ({
+    return result.groups.map((group) => ({
       groupId: group.group_id, name: group.name,
       // Construct the one permitted app action; never navigate to an arbitrary
       // URL from a network response, even one using the infoflow scheme.

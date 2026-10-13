@@ -23,7 +23,7 @@ function setup(t, catalog = [{key:"custom_review",category:"in_review"},{key:"cu
 test("skip history; notify binding owner once across polls and restart",async t=>{
   const f=setup(t);await f.watcher.poll();assert.equal(f.sent.length,0);
   f.review();await f.watcher.poll();await f.watcher.poll();assert.equal(f.sent.length,1);assert.equal(f.sent[0].user,"binder");
-  assert.match(f.sent[0].text, /^\[任务模式\]\n\n/);
+  assert.match(f.sent[0].text, /^\[任务模式\] TEST-1\n\n/);
   f.watcher.stop();const restored=new ReviewNotifications(f.runtime,{now:()=>9000,intervalMs:999999});t.after(()=>restored.stop());
   await restored.poll();assert.equal(f.sent.length,1);
   f.review("again","custom_review");await restored.poll();assert.equal(f.sent.length,2);
@@ -51,7 +51,7 @@ test("blocked transition notifies and is distinct from review",async t=>{
   f.review("blocked", "blocked"); await f.watcher.poll();
   assert.equal(f.sent.length, 1);
   assert.match(f.sent[0].text, /任务已阻塞/);
-  assert.match(f.sent[0].text, /^\[任务模式\]\n\n/);
+  assert.match(f.sent[0].text, /^\[任务模式\] TEST-1\n\n/);
   f.review("review-after-block", "in_review", "blocked"); await f.watcher.poll();
   assert.equal(f.sent.length, 2);
   assert.match(f.sent[1].text, /任务已进入审核中/);

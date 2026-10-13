@@ -65,7 +65,8 @@ function fixture(t) {
       state.requests.push({ path, body: structuredClone(body) });
       if (path === "issue-groups") return { groups: state.binding ? [{ conversation, binding: structuredClone(state.binding) }] : [] };
       if (path === "issue-group-status") {
-        assert.deepEqual(Object.keys(body).sort(), ["robot_id", "agent_id", "workspace_id", "conversation", "generation", "leader_agent_id", "leader_robot_id", "leader_present"].sort());
+        assert.deepEqual(Object.keys(body).sort(), ["robot_id", "agent_id", "workspace_id", "conversation", "binding_id", "generation", "leader_agent_id", "leader_robot_id", "leader_present"].sort());
+        assert.equal(body.binding_id, state.binding.binding_id);
         assert.equal(body.generation, state.binding.generation);
         if (body.leader_robot_id) {
           assert.equal(body.robot_id, body.leader_robot_id);
@@ -325,7 +326,7 @@ test("fallback label and mode/footer appear on every bounded UTF-8 part", async 
   await f.make().issueRelay.poll();
   assert.ok(f.state.sent.length > 1);
   for (const sent of f.state.sent) {
-    assert.match(sent.content, /^\[任务模式\]\n\n【/);
+    assert.match(sent.content, /^\[任务模式\] TEST-1\n\n【/);
     assert.match(sent.content, /队长代发】/);
     assert.match(sent.content, /完整任务对话：https:\/\/team.example.invalid\/team\/issues\/TEST-1$/);
     assert.ok(Buffer.byteLength(sent.content) <= 1800);

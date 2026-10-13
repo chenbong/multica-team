@@ -81,16 +81,20 @@ func (h *Handler) InfoFlowIssueDeliveries(w http.ResponseWriter, r *http.Request
 		req.Limit = 20
 	}
 	// Discover keys, then close rows before taking transaction-scoped locks.
-	rows, err := h.DB.Query(r.Context(), `SELECT conversation_kind,conversation_id FROM infoflow_issue_binding
+	rows, err := h.DB.Query(r.Context(), `SELECT conversation_kind,conversation_id,id::text FROM infoflow_issue_binding
 		WHERE workspace_id=$2 AND issue_id IS NOT NULL AND ((conversation_kind='private' AND robot_id=$1 AND agent_id=$3) OR (conversation_kind='group' AND leader_robot_id=$1)) ORDER BY last_polled_at NULLS FIRST,conversation_kind,conversation_id`, req.RobotID, req.WorkspaceID, req.AgentID)
 	if err != nil {
 		infoFlowError(w, 500, "bindings")
 		return
 	}
-	var conversations []infoFlowConversation
+	type destination struct {
+		conversation infoFlowConversation
+		bindingID    string
+	}
+	var conversations []destination
 	for rows.Next() {
-		var c infoFlowConversation
-		if err = rows.Scan(&c.Kind, &c.ID); err != nil {
+		var c destination
+		if err = rows.Scan(&c.conversation.Kind, &c.conversation.ID, &c.bindingID); err != nil {
 			break
 		}
 		conversations = append(conversations, c)
@@ -110,7 +114,7 @@ func (h *Handler) InfoFlowIssueDeliveries(w http.ResponseWriter, r *http.Request
 		}
 		// One per conversation per poll, rotating persistently even when a
 		// destination never acknowledges. A failed group cannot starve others.
-		deliveries, err := h.infoFlowPollConversation(r.Context(), req.infoFlowScope, conversation, 1)
+		deliveries, err := h.infoFlowPollBinding(r.Context(), req.infoFlowScope, conversation.conversation, conversation.bindingID, 1)
 		if err != nil {
 			infoFlowError(w, 500, "deliveries")
 			return
@@ -120,7 +124,7 @@ func (h *Handler) InfoFlowIssueDeliveries(w http.ResponseWriter, r *http.Request
 	writeJSON(w, 200, map[string]any{"deliveries": out})
 }
 
-func (h *Handler) infoFlowPollConversation(ctx context.Context, s infoFlowScope, c infoFlowConversation, limit int) ([]infoFlowDelivery, error) {
+func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c infoFlowConversation, bindingID string, limit int) ([]infoFlowDelivery, error) {
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -129,7 +133,7 @@ func (h *Handler) infoFlowPollConversation(ctx context.Context, s infoFlowScope,
 	if err = infoFlowLock(ctx, tx, s, c); err != nil {
 		return nil, err
 	}
-	b, err := infoFlowLoadBinding(ctx, tx, s, c)
+	b, err := infoFlowLoadBindingID(ctx, tx, s, c, bindingID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -249,8 +253,9 @@ func (h *Handler) InfoFlowIssueDeliveryAck(w http.ResponseWriter, r *http.Reques
 	}
 	defer tx.Rollback(r.Context())
 	var c infoFlowConversation
-	err = tx.QueryRow(r.Context(), `SELECT b.conversation_kind,b.conversation_id FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id
-		WHERE d.id=$1 AND b.workspace_id=$3 AND ((b.conversation_kind='private' AND b.robot_id=$2 AND b.agent_id=$4) OR (b.conversation_kind='group' AND (b.leader_robot_id=$2 OR (b.leader_robot_id IS NULL AND b.robot_id=$2 AND b.agent_id=$4))))`, id, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&c.Kind, &c.ID)
+	var bindingID string
+	err = tx.QueryRow(r.Context(), `SELECT b.conversation_kind,b.conversation_id,b.id::text FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id
+		WHERE d.id=$1 AND b.workspace_id=$3 AND ((b.conversation_kind='private' AND b.robot_id=$2 AND b.agent_id=$4) OR (b.conversation_kind='group' AND (b.leader_robot_id=$2 OR (b.leader_robot_id IS NULL AND b.robot_id=$2 AND b.agent_id=$4))))`, id, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&c.Kind, &c.ID, &bindingID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		infoFlowError(w, 404, "delivery")
 		return
@@ -264,7 +269,7 @@ func (h *Handler) InfoFlowIssueDeliveryAck(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if c.Kind == "group" {
-		b, e := infoFlowLoadBinding(r.Context(), tx, req.infoFlowScope, c)
+		b, e := infoFlowLoadBindingID(r.Context(), tx, req.infoFlowScope, c, bindingID)
 		if e != nil {
 			infoFlowError(w, 409, "stale binding")
 			return

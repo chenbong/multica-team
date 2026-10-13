@@ -50,9 +50,9 @@ for (const kind of ["private", "group"]) {
       await f.bridge.handleMessage({ conversation: f.conversation, user: "alice", text: "请分析问题", messageId: "123" });
       if (mode === "chat") await f.bridge.chat.poll();
       else await f.bridge.issueRelay.poll();
-      const expected = withReplyMode(answer + (mode === "issue" ? footer : ""), mode);
+      const expected = withReplyMode(answer + (mode === "issue" ? footer : ""), mode, binding.identifier);
       assert.ok(f.sent.some(message => message.content === expected));
-      assert.ok(f.sent.every(message => message.content.startsWith(mode === "chat" ? "[聊天模式]\n\n" : "[任务模式]\n\n")));
+      assert.ok(f.sent.every(message => message.content.startsWith(mode === "chat" ? "[聊天模式]\n\n" : "[任务模式] TASK-1\n\n")));
       assert.ok(f.sent.every(message => message.options.atUser === undefined));
       assert.deepEqual(f.apiInputs, ["请分析问题"]);
       assert.equal(f.delivery.content, answer);
@@ -73,7 +73,7 @@ test("bind, permission notices and successful unbind show the correct current mo
   const f = fixture(t, "group", "issue");
   for (const notice of ["已绑定任务", "没有工作区权限，无法评论", "没有智能体权限，当前仅新增评论", "只有管理员可以解除绑定"]) {
     await f.bridge.issueRelay.sendNotice(f.conversation, { notice, binding, conversation_mode: "issue" });
-    assert.equal(f.sent.at(-1).content, withReplyMode(notice + footer, "issue"));
+    assert.equal(f.sent.at(-1).content, withReplyMode(notice + footer, "issue", binding.identifier));
   }
   await f.bridge.issueRelay.sendNotice(f.conversation, { notice: "已解除任务绑定", binding, conversation_mode: "chat" });
   assert.equal(f.sent.at(-1).content, withReplyMode("已解除任务绑定" + footer, "chat"));
@@ -88,7 +88,7 @@ test("label is added to every long reply part without invalidating an older send
   assert.ok(rawParts.length > 2);
   f.bridge.issueRelay.sentParts.d1 = { next: 1, digest: createHash("sha256").update(rawParts.join("")).digest("hex"), messageIds: ["123"] };
   await f.bridge.issueRelay.poll();
-  assert.deepEqual(f.sent.map(message => message.content), rawParts.slice(1).map(part => withReplyMode(part, "issue")));
+  assert.deepEqual(f.sent.map(message => message.content), rawParts.slice(1).map(part => withReplyMode(part, "issue", binding.identifier)));
   assert.ok(f.sent.every(message => Buffer.byteLength(message.content) <= 1900));
   assert.deepEqual(f.bridge.issueRelay.sentParts, {});
 });

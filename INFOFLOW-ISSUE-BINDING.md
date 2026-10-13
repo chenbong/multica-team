@@ -9,15 +9,20 @@ Enable the feature only after the server endpoints and migrations exist.
 Private chats and group mentions then accept:
 
 - `/bind PREFIX-123`: bind an existing issue in the robot's workspace.
-- `/binding`: show the current binding and issue link.
-- `/unbind`: remove the binding without deleting the issue or comments.
+- `/binding [PREFIX-123]`: show the selected binding and issue link.
+- `/unbind [PREFIX-123]`: remove only the selected binding, not the issue/comments.
+  If the group has multiple matching tasks, specify which one; never unbind all.
 - `/issue description`: create a new issue assigned to the robot's agent and
   bind the conversation. Explicit natural-language issue creation still works.
 
 A private binding still belongs to the robot, workspace, agent and sender.
-A group binds directly to an issue, independently of which robot received the
-command. A group cannot have two active issue associations through different
-robots or workspaces. Unbind before moving that group to another workspace.
+A group binds directly to issues, independently of which robot received the
+command. **An issue can have at most one group, while a group can have many
+issues.** Pending leader verification also occupies the issue's group slot.
+Private-chat bindings remain independent and do not consume that slot.
+`/bind` adds an association rather than replacing other tasks in the group.
+Binding an issue already associated with another group is rejected until its
+existing association is explicitly removed by an authorized user.
 For an existing issue assigned to a squad, the configured squad leader is the
 coordinator. For an issue assigned to one agent, that agent is the coordinator.
 An unassigned or human-assigned issue must first be assigned to an agent/squad.
@@ -28,6 +33,38 @@ not cancel existing work, but stops routing old-generation answers.
 Replacing an existing group binding first requires management authority over
 that existing binding; owning a different target task's leader is not enough.
 The target issue's binding requirements are then checked separately.
+
+## Routing within a multi-task group
+
+The server selects one issue for each ordinary message, in this order:
+
+1. A stored quoted inbound/outbound message belonging to that group and scope.
+2. An explicit issue reference in the request/text.
+3. The addressed agent's sole associated task in the group.
+
+Multiple candidates result in a clarification notice, no comment and no run.
+There is no shared implicit "current task", no model guessing, and no broadcast
+of one input to every task. Authorization precedes revealing route information.
+Known foreign/stale quote provenance must not be reinterpreted as another issue.
+Truly unbound conversations retain ordinary Chat behavior, including messages
+that mention task numbers. Binding commands always name their explicit target;
+an automatic unbind selection is version-pinned just like an ordinary message.
+
+For example, the same group contains task INFE-1 assigned to A+B and INFE-2
+assigned to A+D (A is both squads' leader):
+
+| Input | Result |
+| --- | --- |
+| `@A 继续` | Ask which task; execute neither |
+| `@B 继续` | INFE-1, if it is B's unique association |
+| `@D 继续` | INFE-2, if it is D's unique association |
+| `@A INFE-2 继续` | INFE-2 |
+| Reply to a stored INFE-1 message and `@A 继续` | INFE-1 |
+| `/unbind INFE-1` | Remove INFE-1 only; INFE-2 remains usable |
+
+Status, leader verification and delivery plans are keyed by **binding ID**, not
+group ID alone. A leader may coordinate several independent tasks in one group,
+and one failed association must not suppress another task's replies.
 
 ## Required leader presence and sending identity
 
@@ -82,7 +119,7 @@ Example: an issue is assigned to a squad led by A with member B. A's robot must
 be in the group. If B's robot is present, B sends:
 
 ```text
-[任务模式]
+[任务模式] TASK-42
 
 性能测试已完成。
 
@@ -92,7 +129,7 @@ be in the group. If B's robot is present, B sends:
 If B's robot is absent, A sends the same reply with explicit attribution:
 
 ```text
-[任务模式]
+[任务模式] TASK-42
 
 【B · 队长代发】
 性能测试已完成。
@@ -106,7 +143,9 @@ and A sends its own replies. No fictitious squad or additional leader is created
 ## Open the associated group from an issue
 
 The issue header shows **Open InfoFlow group / 打开如流群聊** for active,
-verified group bindings. One group opens directly; multiple groups use a menu.
+verified group bindings. Its single group opens directly; there is no group menu.
+The response retains the array shape for compatibility but contains zero or one
+entry. Unexpected multiple entries fail closed instead of choosing arbitrarily.
 Pending bindings, private chats, and inaccessible issues do not expose links.
 The normal member-authenticated `GET /api/issues/{id}/infoflow-groups` route
 returns only group destinations; service credentials are never sent to the UI.
@@ -144,9 +183,14 @@ IDs link to known comments; no arbitrary cross-issue parent ID is accepted.
 Every IM text reply starts with `[聊天模式]` or `[任务模式]`, including each
 long-message part. Labels are added only at the final transport boundary, never
 to platform Chat input, issue comments, prompts, or canonical delivery content.
+Selected task replies add the server-provided issue number on that same line,
+for example `[任务模式] INFE-1`. Clarification without a selected task does not
+invent a task number or a single-task footer.
 The optional `conversation_mode` response metadata distinguishes an active issue
 binding from the old issue link retained on a successful unbind notice. Bind
-success is issue mode; unbind success is Chat mode. Delayed answers keep their
+success is issue mode. Removing one group association does not switch the group
+to Chat while other task bindings remain. Private unbind restores Chat as before.
+Delayed answers keep their
 origin's mode. Existing plaintext delivery digests/checkpoints remain unchanged.
 Verification-code messages are not conversation replies and are not relabeled.
 
@@ -204,7 +248,8 @@ a broadcast of every unrelated human comment or historical/background event.
 Binding changes/deletion/moves invalidate old routing. Private deliveries also
 recheck the recipient's membership.
 
-Ordinary bound input pins `expected_binding_id` and `expected_generation` from
+Ordinary bound input and selected group unbind commands pin
+`expected_binding_id` and `expected_generation` from
 its first preflight before persistence/submission. Retries retain that target;
 an uncommitted message cannot silently move to another issue after a rebind.
 The server checks existing receipts before the target-version fence, so an
@@ -216,12 +261,19 @@ deduplication records.
 
 ## Reliability and storage
 
-Team migrations **477–490** create separate binding, source-receipt and delivery
-tables plus indexes. The new 488–490 migrations add group coordination and
-uniqueness guards; they refuse ambiguous older group bindings instead of
-silently deleting data. They do not apply personal-runtime migrations 467–476.
+Team migrations **477–497** create separate binding, source-receipt and delivery
+tables plus indexes. Migrations 491–497 change uniqueness from group-scoped to
+issue-scoped and retain private-scope uniqueness. Conflicting older data is
+rejected instead of silently deleted. Rollback refuses multi-task group data
+that cannot satisfy the old constraints; restore a pre-upgrade backup or perform
+explicit authorized reconciliation rather than discarding history. These do
+not apply personal-runtime migrations 467–476.
 Run each migration file independently; concurrent indexes must not run inside
 an enclosing transaction. Apply them to a disposable database before rollout.
+Use `bash deploy/migrate-team.sh` (also used by `deploy/start.sh`) for normal
+upgrades/replays. Once the new issue-unique index is valid, it skips the retired
+479/488/489/490 guards instead of recreating the old one-task-per-group indexes.
+An invalid transition index stops the runner and requires explicit repair.
 
 Incoming changes and source receipts are atomic, serialized per conversation,
 and idempotent by external message ID. WebSocket retries cannot duplicate an
@@ -243,6 +295,11 @@ send succeeds but before its receipt is persisted can still repeat that send;
 the system does **not** promise exactly-once external delivery. Invalid/unsafe
 message IDs are not guessed or rounded. Operators must monitor failed/full
 inboxes; the local inbox is capped at 500 entries and 64 MiB.
+The `*.issue-deliveries-*.json.decisions/` directory contains small no-route
+completion markers (no raw message or account data). Keep it with the private
+state backups: removing it can allow very old ambiguous inputs to be routed
+again after associations change. Failed clarification notices retain their
+original no-route decision instead of recomputing a target on retry.
 Legacy Chat submission has no server idempotency key. A failure before submission
 is retried; an uncertain outcome after its POST starts is retained for manual
 inspection, not blindly resubmitted as a second agent task. Already persisted
@@ -250,15 +307,17 @@ Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
 
-Local verification on 2026-10-13: 157 Bridge tests; 182 selected handler,
-permission, comment and transfer cases with the race detector; 12 real-router
-HTTP cases with the race detector; 13 isolated lifecycle/secret/gitignore tests;
-153 frontend API/query/component regressions
-(including 26 new group-entry cases); 10 existing legacy-browser compatibility
+Local verification on 2026-10-13: 191 Bridge tests; 203 selected handler,
+permission, comment and transfer cases with the race detector; 13 real-router
+HTTP cases with the race detector; 17 isolated lifecycle/secret/gitignore and
+migration-runner tests; 156 frontend API/query/component regressions
+(including 29 group-entry cases); 10 existing legacy-browser compatibility
 tests; core/views type checks; production Web build; syntax checks, Go vet and a
 Linux/amd64 API build passed. No test was skipped in those runs. New migrations
-488–490 passed conflict refusal, down/up/down/up/repeat-up on a second isolated
-database with no invalid indexes afterwards. The earlier 477–487 migration
+488–497 passed conflict refusal, down/up/down/up/repeat-up on a second isolated
+database with no invalid indexes afterwards. The multi-task migration tests also
+run the actual deployment helper against a populated multi-task group and check
+that associations and private uniqueness survive replay. The earlier 477–487 migration
 round trip remains part of the previous PR verification. SQL overlay checks and
 upstream cleanliness checks also passed.
 These are synthetic/local checks, not live InfoFlow account or browser testing.

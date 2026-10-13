@@ -39,16 +39,18 @@ can_comment:false with the requested owner permission notice and minimal binding
 link metadata (issue_id, identifier, workspace_slug, generation; no title/body).
 Member/no-invoke saves the comment and returns the requested agent-owner notice.
 `conversation_mode` is optional presentation metadata (`chat` or `issue`) for
-the current binding state. A successful unbind returns `chat` while retaining
-the previous issue's link metadata. Cached notices refresh this field from the
+the current binding state. Private unbind returns `chat` while retaining
+the previous issue's link metadata. Group unbind removes only one association;
+remaining bindings keep task mode. Cached notices refresh this field from the
 current state. The Bridge adds mode labels at IM send time only; no label is
 inserted into issue comments. Agent deliveries always retain issue-origin mode.
 A stale binding is handled and never falls through to Chat.
-For `operation:"message"`, the first bound preflight supplies `binding_id` and
+For `operation:"message"` and group `operation:"unbind"`, the first selected
+preflight supplies `binding_id` and
 `generation`. The Bridge persists these as `expected_binding_id` and
 `expected_generation` in the mutation body and never refreshes them on retry.
-Both must be valid UUIDs matching the current binding for a new comment. Missing
-or stale targets fail closed, before uploads or task creation. Receipt replay
+Both must be valid UUIDs matching the selected binding for a new mutation. Missing
+or stale targets fail closed, before uploads, comments, removal or task creation. Receipt replay
 is checked first, so an already committed request can be replayed idempotently
 after a rebind/unbind without producing another comment. Previously completed
 Chat messages are filtered before entering this API; they do not become task
@@ -63,9 +65,11 @@ or current binder, all still current workspace members. Create also requires
 invoke and uses content as the issue title/description. It binds the new issue.
 Each switch/unbind changes generation and invalidates old routing. Binding the
 same issue retains generation. All operations on a conversation serialize in DB.
-For group rebinding, authority over the existing binding is required before
-checking the target issue's leader/management permissions. The target owner
-cannot overwrite somebody else's binding merely by choosing their own task.
+Group `/bind` adds an issue association, never replaces other tasks in the group.
+An issue can occupy only one group slot, including pending associations. To move
+it to another group, an authorized user must explicitly unbind it first. The
+target owner cannot overwrite somebody else's association merely by binding
+their own task. Private binding replacement remains independent.
 Group messages addressing the assigned squad leader preserve a squad trigger
 (`is_leader_task=true`, assigned `squad_id`); worker and single-agent messages
 keep ordinary agent triggers, with unchanged invocation permission checks.
@@ -97,10 +101,25 @@ A crash between external send and ack can repeat delivery (at-least-once).
 
 ## Group coordination
 
-Group bindings are issue-scoped, not agent/robot-scoped. The external group ID
-has at most one non-null issue association across workspaces. Private scopes
-remain unchanged. Group message handling checks the addressed agent against the
+Group bindings are issue-scoped, not agent/robot-scoped. An issue has at most one
+group association; one group may contain multiple issues, with overlapping teams
+or different leaders. Private scopes remain unchanged. Group message handling checks the addressed agent against the
 current assigned team and retains per-agent invocation permissions.
+
+Preflight `operation:"binding"` retains the incoming `content` and
+`reply_to_message_id`; the server selects the route. Normal message priority is
+stored same-scope quote provenance, then explicit task reference, then the
+addressed agent's unique associated issue. Ambiguity returns a handled task-mode
+notice without a binding, comment or run. Known foreign/stale quotes cannot fall
+back to another task. A genuinely unbound group's new ordinary message retains
+Chat behavior. Explicit binding-control arguments select their named issue;
+`command:"unbind"` marks the read-only preflight for destructive selection.
+There is no global default/current issue for a multi-task group.
+
+The Bridge preserves terminal non-selected routing decisions across failed
+notice sends and restarts. A redelivered ambiguous input cannot become executable
+merely because another association was later removed; the user's clarification
+must be a new message. Transport errors remain retryable, not terminal decisions.
 
 Group binding views add `binding_id` and a `group` object containing `state`
 (`pending` or `active`), `leader_agent_id`, `agent_ids`, `agent_names` (current
@@ -114,10 +133,12 @@ permission to submit a new comment; a pending binding cannot admit comments.
 
 `POST /api/integrations/infoflow/issue-groups` accepts the ordinary relay scope
 and returns `{groups:[{conversation:{kind:"group",id},binding}]}` for the
-workspace. This is trusted service discovery, not a browser API.
+workspace. Multiple entries may have the same conversation ID. Callers key
+plans by `binding.binding_id`, not conversation ID. This is trusted service
+discovery, not a browser API.
 
 `POST /api/integrations/infoflow/issue-group-status` accepts that scope plus
-`conversation`, `generation`, `leader_agent_id`, `leader_robot_id`, and
+`conversation`, required `binding_id`, `generation`, `leader_agent_id`, `leader_robot_id`, and
 `leader_present`. Presence is reported only after a fresh, validated IM member
 list; an invitation response is not sufficient. An affirmative report must be
 scoped to the actual leader robot/agent. The server validates the generation and
@@ -135,7 +156,7 @@ before sending. Canonical comment and outbox content remain undecorated.
 
 `GET /api/issues/{id}/infoflow-groups` is a separate ordinary-authenticated
 endpoint. It uses issue access checks and returns
-`{groups:[{group_id:string,url:string}]}` for currently active group bindings.
+`{groups:[{group_id:string,url:string}]}` with zero or one active group binding.
 Private conversation identifiers and service/robot credentials are never
 returned. An absent/disabled integration returns an empty group list.
 Group IDs remain exact decimal strings. The URL is a URL-encoded Base64
@@ -151,5 +172,7 @@ conversation and binding generation. Authorized business failures return 200 wit
 a generic actionable notice; protocol/credential/storage failures remain closed.
 
 Backend tests use only the explicitly provided disposable DATABASE_URL. Migrations
-start at 477; index migrations are individual concurrent statements. No upstream
+477–497 retain individual concurrent-index statements. Normal deployment replay
+uses `deploy/migrate-team.sh` to avoid recreating retired group uniqueness after
+the issue-unique index is valid. No upstream
 source writes, production writes, real model invocations, or service restarts.

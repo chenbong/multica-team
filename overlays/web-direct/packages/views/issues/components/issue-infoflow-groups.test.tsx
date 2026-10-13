@@ -24,18 +24,23 @@ describe("issue group entry", () => {
     render(view());
     expect(screen.getByRole("link", { name: "Open InfoFlow group" })).toHaveAttribute("href", state.data[0]!.url);
     expect(screen.getByRole("link")).toHaveAttribute("title", "Squad");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
   it("hides stale data when fetching fails or permission is revoked", () => {
     state.data = [{ groupId: "123", url: "infoflow://APICenter?data=test" }]; state.isError = true;
     render(view()); expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
-  it("offers a keyboard-accessible group chooser", async () => {
+  it("does not render a dropdown or guess when given multiple groups", () => {
     state.data = [{ groupId: "123", name: "Squad A", url: "infoflow://APICenter?data=a" }, { groupId: "456", url: "infoflow://APICenter?data=b" }];
-    const user = userEvent.setup(); render(view());
-    await user.tab(); await user.keyboard("{Enter}");
-    expect(await screen.findByRole("menuitem", { name: "Squad A" })).toHaveAttribute("href", state.data[0]!.url);
-    expect(screen.getByRole("menuitem", { name: "InfoFlow group 456" })).toHaveAttribute("href", state.data[1]!.url);
-    await user.keyboard("{Escape}");
-    expect(screen.getByRole("button", { name: "Open InfoFlow group" })).toHaveFocus();
+    render(view());
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+  it("keeps the single group link keyboard accessible", async () => {
+    state.data = [{ groupId: "123", url: "infoflow://APICenter?data=a" }];
+    const user = userEvent.setup(); render(view()); await user.tab();
+    expect(screen.getByRole("link", { name: "Open InfoFlow group" })).toHaveFocus();
   });
 });

@@ -63,7 +63,7 @@ func TestInfoFlowRebindRequiresOriginalAuthority(t *testing.T) {
 			beforeTasks := infoFlowCount(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id IN ($1,$2)`, f.issue, target)
 			req := f.req
 			req.Sender, req.AgentID, req.RobotID = strings.Split(email, "@")[0], bobAgent, "bob-robot"
-			for _, destination := range []string{f.issue, target} {
+			for _, destination := range []string{f.issue} {
 				req.MessageID, req.IssueRef = uuid.NewString(), destination
 				got := infoFlowCall(t, f.h, req, 200)
 				var issue, generation, binder string
@@ -75,7 +75,7 @@ func TestInfoFlowRebindRequiresOriginalAuthority(t *testing.T) {
 					if n := infoFlowCount(t, `SELECT count(*) FROM infoflow_issue_source WHERE binding_id=$1 AND message_id=$2`, bound.Binding.BindingID, req.MessageID); n != 0 {
 						t.Fatal("denied command saved a mutation receipt")
 					}
-				} else if issue != destination || binder != f.user || got.Binding == nil || got.Binding.IssueID != destination {
+				} else if issue != destination || binder != f.owner && authority != "binder" || got.Binding == nil || got.Binding.IssueID != destination {
 					t.Fatalf("authorized rebind refused: %+v", got)
 				}
 			}
@@ -89,7 +89,7 @@ func TestInfoFlowRebindRequiresOriginalAuthority(t *testing.T) {
 				req.Conversation.ID = req.Conversation.ID[:18]
 				req.MessageID = uuid.NewString()
 				req.IssueRef = f.issue
-				if got := infoFlowCall(t, f.h, req, 200); got.Binding != nil || !strings.Contains(got.Notice, "只有") {
+				if got := infoFlowCall(t, f.h, req, 200); got.Binding != nil || !strings.Contains(got.Notice, "其他群") {
 					t.Fatalf("first binding bypassed target owner: %+v", got)
 				}
 				req.MessageID, req.IssueRef = uuid.NewString(), target
@@ -133,8 +133,16 @@ func TestInfoFlowPinnedMessagesCannotFollowBindingChanges(t *testing.T) {
 				mutation := f.req
 				mutation.MessageID = uuid.NewString()
 				mutation.Operation = "unbind"
+				if kind == "group" {
+					infoFlowPin(t, &mutation)
+				}
 				if change == "rebind" {
+					if kind == "group" {
+						infoFlowCall(t, f.h, mutation, 200)
+						mutation.MessageID = uuid.NewString()
+					}
 					mutation.Operation, mutation.IssueRef = "bind", target
+					mutation.ExpectedBindingID, mutation.ExpectedGeneration = "", ""
 				}
 				changed := infoFlowCall(t, f.h, mutation, 200)
 				if change == "rebind" && kind == "group" {

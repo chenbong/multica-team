@@ -96,7 +96,7 @@ func infoFlowCall(t *testing.T, h *Handler, req infoFlowRelayRequest, status int
 // call helper: retries must retain the original admission version.
 func infoFlowPin(t *testing.T, req *infoFlowRelayRequest) {
 	t.Helper()
-	dbfx.QueryRow(t, `SELECT id::text,generation::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind=$2 AND conversation_id=$3 AND ($2='group' OR (robot_id=$4 AND agent_id=$5)) AND issue_id IS NOT NULL`, req.WorkspaceID, req.Conversation.Kind, req.Conversation.ID, req.RobotID, req.AgentID).Scan(&req.ExpectedBindingID, &req.ExpectedGeneration)
+	dbfx.QueryRow(t, `SELECT id::text,generation::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind=$2 AND conversation_id=$3 AND ($2='group' OR (robot_id=$4 AND agent_id=$5)) AND issue_id IS NOT NULL AND ($6='' OR issue_id::text=$6)`, req.WorkspaceID, req.Conversation.Kind, req.Conversation.ID, req.RobotID, req.AgentID, req.IssueRef).Scan(&req.ExpectedBindingID, &req.ExpectedGeneration)
 }
 
 func (f infoFlowTestFixture) bind(t *testing.T) infoFlowRelayResponse {
@@ -132,6 +132,7 @@ func TestInfoFlowConversationModeIsMetadataOnly(t *testing.T) {
 			}
 			lookup := req
 			lookup.Operation, lookup.MessageID = "binding", ""
+			lookup.IssueRef = ""
 			if got := infoFlowCall(t, f.h, lookup, 200); got.ConversationMode != "chat" || got.Binding != nil {
 				t.Fatalf("unbound mode: %+v", got)
 			}
@@ -162,6 +163,9 @@ func TestInfoFlowConversationModeIsMetadataOnly(t *testing.T) {
 			dbfx.Exec(t, `INSERT INTO member(id,workspace_id,user_id,role) VALUES($1,$2,$3,'admin')`, f.member, testWorkspaceID, f.user)
 			unbind := req
 			unbind.Operation, unbind.MessageID = "unbind", uuid.NewString()
+			if kind == "group" {
+				infoFlowPin(t, &unbind)
+			}
 			unbound := infoFlowCall(t, f.h, unbind, 200)
 			if unbound.ConversationMode != "chat" || unbound.Binding == nil || unbound.Binding.IssueID != f.issue {
 				t.Fatalf("unbind should retain link but switch mode: %+v", unbound)
@@ -273,6 +277,7 @@ func TestInfoFlowUnboundChatBypassKeepsAcceptedReplaysOwned(t *testing.T) {
 	dbfx.User(t, "Nonmember fixture", outsider+"@example.test")
 	req := f.req
 	req.Operation, req.Sender, req.Content = "message", outsider, "Ordinary unbound Chat"
+	req.IssueRef = ""
 	for _, sender := range []string{outsider, "unmapped-" + uuid.NewString()} {
 		req.Sender = sender
 		req.MessageID = uuid.NewString()
@@ -308,6 +313,7 @@ func TestInfoFlowUnboundChatBypassKeepsAcceptedReplaysOwned(t *testing.T) {
 	}
 	remove := f.req
 	remove.Operation = "unbind"
+	infoFlowPin(t, &remove)
 	remove.MessageID = uuid.NewString()
 	infoFlowCall(t, f.h, remove, 200)
 	preflight := accepted
@@ -366,6 +372,7 @@ func TestInfoFlowCreateMediaPreflightIsAuthorizedAndReadOnly(t *testing.T) {
 	}
 	// A normal unbound message/preflight remains on the legacy Chat path.
 	denied.Command = ""
+	denied.IssueRef = ""
 	if out := infoFlowCall(t, f.h, denied, 200); out.Handled {
 		t.Fatalf("ordinary preflight changed: %+v", out)
 	}

@@ -18,12 +18,16 @@ describe("InfoFlow group destinations", () => {
     expect(decoded).toEqual({ APIName: "BdHiJs.service.hi.open", version: 65, data: { id, type: "2" } });
     expect(decoded.data).not.toHaveProperty("draft");
   });
-  it("uses the authenticated issue route and deduplicates groups", async () => {
-    const fetch = response({ groups: [{ group_id: "123", name: "Squad", url: "unused" }, { group_id: "123", url: "unused" }] });
+  it("uses the authenticated issue route for its single group", async () => {
+    const fetch = response({ groups: [{ group_id: "123", name: "Squad", url: "unused" }] });
     expect(await new ApiClient("https://api.example.test").getIssueInfoFlowGroups("TEST-1")).toEqual([
       { groupId: "123", name: "Squad", url: infoFlowGroupURL("123") },
     ]);
     expect(String(fetch.mock.calls[0]?.[0])).toContain("/api/issues/TEST-1/infoflow-groups");
+  });
+  it.each(["123", "456"])("rejects extra group entries instead of picking a destination (%s)", async (second) => {
+    response({ groups: [{ group_id: "123", url: "unused" }, { group_id: second, url: "unused" }] });
+    await expect(new ApiClient("https://api.example.test").getIssueInfoFlowGroups("TEST-1")).rejects.toThrow("Invalid InfoFlow group list");
   });
   it.each(["javascript:alert(1)", "https://external.example/", "infoflow://APICenter?data=unsafe"])("never navigates to a server-provided arbitrary URL: %s", async (url) => {
     response({ groups: [{ group_id: "123", url }] });

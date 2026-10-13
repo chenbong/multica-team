@@ -17,6 +17,11 @@ import (
 
 func infoFlowGroupStatus(t *testing.T, f infoFlowTestFixture, req infoFlowGroupStatusRequest, status int) infoFlowRelayResponse {
 	t.Helper()
+	if req.BindingID == "" {
+		// Fixtures may intentionally use a stale generation; choose the exact
+		// original binding by issue rather than guessing from the group alone.
+		dbfx.QueryRow(t, `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind='group' AND conversation_id=$2 AND (issue_id=$3 OR generation::text=$4) ORDER BY bound_at DESC LIMIT 1`, req.WorkspaceID, req.Conversation.ID, f.issue, req.Generation).Scan(&req.BindingID)
+	}
 	var out infoFlowRelayResponse
 	r := testutil.WithHeaders(testutil.JSONRequest("POST", "/group-status", req), "Authorization", "Bearer "+infoFlowTestToken)
 	testutil.Call(t, f.h.InfoFlowIssueGroupStatus, r).Want(status).JSON(&out)
@@ -39,14 +44,13 @@ func TestInfoFlowSanitizeNestedMentions(t *testing.T) {
 	}
 }
 
-func TestInfoFlowMultipleGroupsConcurrentComments(t *testing.T) {
+func TestInfoFlowPrivateAndGroupConcurrentComments(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	f.bind(t)
 	second := f.req
-	second.Conversation.ID = fmt.Sprint(time.Now().UnixNano())
+	second.Conversation = infoFlowConversation{Kind: "private", ID: f.req.Sender}
 	second.MessageID = uuid.NewString()
-	b := infoFlowCall(t, f.h, second, 200)
-	infoFlowActivate(t, f, second, b.Binding.Generation)
+	infoFlowCall(t, f.h, second, 200)
 	done := make(chan *httptest.ResponseRecorder, 2)
 	start := make(chan struct{})
 	for _, req := range []infoFlowRelayRequest{f.req, second} {
@@ -363,7 +367,7 @@ func TestInfoFlowGroupRejectHumanUnassignedAndInvalidIDs(t *testing.T) {
 	}
 }
 
-func TestInfoFlowGroupGlobalUniqueAndTrustedDiscovery(t *testing.T) {
+func TestInfoFlowGroupWorkspaceScopedDiscovery(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	bound := f.bind(t)
 	ws := dbfx.Workspace(t, "Other group workspace", "if-group-"+uuid.NewString())
@@ -373,10 +377,10 @@ func TestInfoFlowGroupGlobalUniqueAndTrustedDiscovery(t *testing.T) {
 	req := f.req
 	req.WorkspaceID = ws
 	req.AgentID = otherAgent
-	req.RobotID = "other-workspace"
+	req.RobotID = f.req.RobotID
 	req.IssueRef = otherIssue
 	req.MessageID = uuid.NewString()
-	if got := infoFlowCall(t, f.h, req, 200); got.Binding != nil || got.CanReconcileGroup || !strings.Contains(got.Notice, "其他工作区") {
+	if got := infoFlowCall(t, f.h, req, 200); got.Binding == nil || !got.CanReconcileGroup || got.Binding.IssueID != otherIssue {
 		t.Fatalf("cross-workspace bind: %+v", got)
 	}
 	var out struct {
@@ -395,6 +399,7 @@ func TestInfoFlowGroupGlobalUniqueAndTrustedDiscovery(t *testing.T) {
 	}
 	req = f.req
 	req.Operation = "unbind"
+	infoFlowPin(t, &req)
 	req.MessageID = uuid.NewString()
 	infoFlowCall(t, f.h, req, 200)
 	req.WorkspaceID = ws
@@ -403,6 +408,7 @@ func TestInfoFlowGroupGlobalUniqueAndTrustedDiscovery(t *testing.T) {
 	req.IssueRef = otherIssue
 	req.MessageID = uuid.NewString()
 	req.Operation = "bind"
+	req.ExpectedBindingID, req.ExpectedGeneration = "", ""
 	if got := infoFlowCall(t, f.h, req, 200); got.Binding == nil || got.Binding.IssueID != otherIssue {
 		t.Fatalf("unbound cross-workspace transfer rejected: %+v", got)
 	}

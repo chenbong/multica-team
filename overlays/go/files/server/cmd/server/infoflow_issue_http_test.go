@@ -240,7 +240,7 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 					t.Fatal("pending group exposed")
 				}
 				call(t, http.MethodPost, "/api/integrations/infoflow/issue-groups", scope, trustedHeaders, 200)
-				status := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace, "conversation": body["conversation"], "generation": bound.Binding.Generation, "leader_agent_id": agent, "leader_robot_id": robot, "leader_present": true}
+				status := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace, "conversation": body["conversation"], "binding_id": bound.Binding.BindingID, "generation": bound.Binding.Generation, "leader_agent_id": agent, "leader_robot_id": robot, "leader_present": true}
 				active := decode(t, call(t, http.MethodPost, "/api/integrations/infoflow/issue-group-status", status, trustedHeaders, 200))
 				if active.Binding == nil || active.Binding.Group == nil || active.Binding.Group.State != "active" {
 					t.Fatalf("status: %+v", active)
@@ -323,6 +323,50 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 		}
 		if got := f.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1`, issue); got != 0 {
 			t.Fatalf("workspace denial caused %d tasks", got)
+		}
+	})
+	t.Run("group_multi_issue_routing_and_binding_specific_presence", func(t *testing.T) {
+		second := f.Issue(t, "Second HTTP issue", testutil.Cols{"assignee_type": "agent", "assignee_id": agent})
+		body := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace, "conversation": groupMessage["conversation"], "sender": actorSender, "message_id": "second-bind-" + suffix, "operation": "bind", "issue_ref": second}
+		bound := decode(t, call(t, http.MethodPost, relayPath, body, trustedHeaders, 200))
+		if bound.Binding == nil || bound.Binding.IssueID != second {
+			t.Fatalf("second binding missing: %+v", bound)
+		}
+		f.Cleanup(t, `DELETE FROM infoflow_issue_binding WHERE id=$1`, bound.Binding.BindingID)
+		f.Cleanup(t, `DELETE FROM infoflow_issue_source WHERE binding_id=$1`, bound.Binding.BindingID)
+		status := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace, "conversation": body["conversation"], "generation": bound.Binding.Generation, "leader_agent_id": agent, "leader_robot_id": robot, "leader_present": true}
+		call(t, http.MethodPost, "/api/integrations/infoflow/issue-group-status", status, trustedHeaders, 400)
+		status["binding_id"] = bound.Binding.BindingID
+		call(t, http.MethodPost, "/api/integrations/infoflow/issue-group-status", status, trustedHeaders, 200)
+		for _, task := range []string{issue, second} {
+			data := call(t, http.MethodGet, "/api/issues/"+task+"/infoflow-groups", nil, map[string]string{"Authorization": "Bearer " + pat, "X-Workspace-ID": workspace}, 200)
+			var links struct {
+				Groups []map[string]string `json:"groups"`
+			}
+			if json.Unmarshal(data, &links) != nil || len(links.Groups) != 1 || links.Groups[0]["group_id"] != "9223372036854775806" {
+				t.Fatalf("issue group response must remain a singleton array: %s", data)
+			}
+		}
+		body["operation"], body["message_id"], body["content"] = "binding", "ambiguous-"+suffix, "continue"
+		delete(body, "issue_ref")
+		ambiguous := decode(t, call(t, http.MethodPost, relayPath, body, trustedHeaders, 200))
+		if !ambiguous.Handled || ambiguous.CanComment || ambiguous.Binding != nil || !strings.Contains(ambiguous.Notice, "多个任务") {
+			t.Fatalf("ambiguous HTTP request fell through: %+v", ambiguous)
+		}
+		body["content"] = "继续 " + bound.Binding.Identifier
+		selected := decode(t, call(t, http.MethodPost, relayPath, body, trustedHeaders, 200))
+		if selected.Binding == nil || selected.Binding.IssueID != second {
+			t.Fatalf("explicit HTTP route failed: %+v", selected)
+		}
+		body["operation"], body["command"], body["issue_ref"] = "unbind", "unbind", bound.Binding.Identifier
+		call(t, http.MethodPost, relayPath, body, trustedHeaders, 409)
+		body["expected_binding_id"], body["expected_generation"] = bound.Binding.BindingID, bound.Binding.Generation
+		unbound := decode(t, call(t, http.MethodPost, relayPath, body, trustedHeaders, 200))
+		if unbound.Binding == nil || unbound.Binding.IssueID != second {
+			t.Fatalf("unbind target: %+v", unbound)
+		}
+		if f.Count(t, `SELECT count(*) FROM infoflow_issue_binding WHERE conversation_kind='group' AND workspace_id=$1 AND issue_id=$2`, workspace, issue) != 1 {
+			t.Fatal("second unbind removed first HTTP binding")
 		}
 	})
 	t.Run("membership_revocation_precedes_cached_response", func(t *testing.T) {

@@ -150,15 +150,15 @@ func (h *Handler) InfoFlowIssueGroups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	rows, err := tx.Query(r.Context(), `SELECT conversation_id FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind='group' AND issue_id IS NOT NULL ORDER BY conversation_id`, s.WorkspaceID)
+	rows, err := tx.Query(r.Context(), `SELECT conversation_id,id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind='group' AND issue_id IS NOT NULL ORDER BY conversation_id,id`, s.WorkspaceID)
 	if err != nil {
 		infoFlowError(w, 500, "groups")
 		return
 	}
-	var ids []string
+	var ids [][2]string
 	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
+		var id [2]string
+		if err = rows.Scan(&id[0], &id[1]); err != nil {
 			break
 		}
 		ids = append(ids, id)
@@ -174,8 +174,8 @@ func (h *Handler) InfoFlowIssueGroups(w http.ResponseWriter, r *http.Request) {
 	sh, _ := h.infoFlowScoped(tx)
 	out := []infoFlowBoundGroup{}
 	for _, id := range ids {
-		c := infoFlowConversation{Kind: "group", ID: id}
-		b, e := infoFlowLoadBinding(r.Context(), tx, s, c)
+		c := infoFlowConversation{Kind: "group", ID: id[0]}
+		b, e := infoFlowLoadBindingID(r.Context(), tx, s, c, id[1])
 		if errors.Is(e, pgx.ErrNoRows) {
 			continue
 		}
@@ -193,6 +193,7 @@ func (h *Handler) InfoFlowIssueGroups(w http.ResponseWriter, r *http.Request) {
 type infoFlowGroupStatusRequest struct {
 	infoFlowScope
 	Conversation  infoFlowConversation `json:"conversation"`
+	BindingID     string               `json:"binding_id"`
 	Generation    string               `json:"generation"`
 	LeaderAgentID string               `json:"leader_agent_id"`
 	LeaderRobotID string               `json:"leader_robot_id"`
@@ -214,6 +215,9 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 	if _, ok := parseUUIDOrBadRequest(w, req.Generation, "generation"); !ok {
 		return
 	}
+	if _, ok := parseUUIDOrBadRequest(w, req.BindingID, "binding_id"); !ok {
+		return
+	}
 	// The trusted Bridge must submit the configured leader mapping, never the
 	// unrelated robot whose inbound event happened to initiate reconciliation.
 	if (req.LeaderPresent || req.LeaderRobotID != "") && (req.LeaderRobotID != req.RobotID || !strings.EqualFold(req.LeaderAgentID, req.AgentID)) {
@@ -230,7 +234,7 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 		infoFlowError(w, 500, "lock")
 		return
 	}
-	b, err := infoFlowLoadBinding(r.Context(), tx, req.infoFlowScope, req.Conversation)
+	b, err := infoFlowLoadBindingID(r.Context(), tx, req.infoFlowScope, req.Conversation, req.BindingID)
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && (!b.IssueID.Valid || uuidToString(b.Generation) != strings.ToLower(req.Generation)) {
 		infoFlowError(w, 409, "stale binding")
 		return
@@ -261,7 +265,7 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 		infoFlowError(w, 500, "status")
 		return
 	}
-	b, err = infoFlowLoadBinding(r.Context(), tx, req.infoFlowScope, req.Conversation)
+	b, err = infoFlowLoadBindingID(r.Context(), tx, req.infoFlowScope, req.Conversation, req.BindingID)
 	if err != nil {
 		infoFlowError(w, 500, "binding")
 		return
@@ -304,15 +308,15 @@ func (h *Handler) GetIssueInfoFlowGroups(w http.ResponseWriter, r *http.Request)
 	}
 	defer tx.Rollback(r.Context())
 	ws := uuidToString(i.WorkspaceID)
-	rows, err := tx.Query(r.Context(), `SELECT conversation_id FROM infoflow_issue_binding WHERE workspace_id=$1 AND issue_id=$2 AND conversation_kind='group' ORDER BY conversation_id`, ws, i.ID)
+	rows, err := tx.Query(r.Context(), `SELECT conversation_id,id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND issue_id=$2 AND conversation_kind='group' ORDER BY conversation_id`, ws, i.ID)
 	if err != nil {
 		writeError(w, 500, "Failed to load groups")
 		return
 	}
-	var ids []string
+	var ids [][2]string
 	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
+		var id [2]string
+		if err = rows.Scan(&id[0], &id[1]); err != nil {
 			break
 		}
 		ids = append(ids, id)
@@ -327,11 +331,15 @@ func (h *Handler) GetIssueInfoFlowGroups(w http.ResponseWriter, r *http.Request)
 	}
 	sh, _ := h.infoFlowScoped(tx)
 	out := []map[string]string{}
+	if len(ids) > 1 {
+		writeJSON(w, 200, map[string]any{"groups": out})
+		return
+	}
 	for _, id := range ids {
-		if !infoFlowValidGroupID(id) {
+		if !infoFlowValidGroupID(id[0]) {
 			continue
 		}
-		b, e := infoFlowLoadBinding(r.Context(), tx, infoFlowScope{WorkspaceID: ws}, infoFlowConversation{Kind: "group", ID: id})
+		b, e := infoFlowLoadBindingID(r.Context(), tx, infoFlowScope{WorkspaceID: ws}, infoFlowConversation{Kind: "group", ID: id[0]}, id[1])
 		if errors.Is(e, pgx.ErrNoRows) {
 			continue
 		}
@@ -343,7 +351,7 @@ func (h *Handler) GetIssueInfoFlowGroups(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		if v := sh.infoFlowGroupView(r.Context(), b, ws); v.State == "active" {
-			out = append(out, map[string]string{"group_id": id, "url": infoFlowGroupURL(id)})
+			out = append(out, map[string]string{"group_id": id[0], "url": infoFlowGroupURL(id[0])})
 		}
 	}
 	writeJSON(w, 200, map[string]any{"groups": out})
