@@ -172,3 +172,13 @@ describe("enabled flag", () => {
     expect(files[0]).toMatchObject({ content: "new", enabled: false });
   });
 });
+
+describe("auto sync flag", () => {
+  it("is sent only when on and counts toward dirty tracking", () => {
+    const off = [file("claude/CLAUDE.md", "x", { source: "runtime", sourceRuntimeId: "rt", sourcePath: "~/.claude/CLAUDE.md" })];
+    const on = [{ ...off[0]!, autoSync: true }];
+    expect(draftToRequest(off)[0]).not.toHaveProperty("auto_sync");
+    expect(draftToRequest(on)[0]).toMatchObject({ auto_sync: true });
+    expect(draftSignature(on)).not.toBe(draftSignature(off));
+  });
+});

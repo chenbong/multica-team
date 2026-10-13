@@ -229,6 +229,15 @@ type AgentData struct {
 	// Memory is the agent's memory file set (multica-team overlay). It is
 	// written under .multica/memory/ and rendered into the runtime brief.
 	Memory []AgentMemoryFileData `json:"memory,omitempty"`
+	// MemoryWriteback, when set and not "off", asks the daemon to report
+	// memory edits after the run (memory_writeback.go).
+	MemoryWriteback *AgentMemoryWritebackData `json:"memory_writeback,omitempty"`
+}
+
+// AgentMemoryWritebackData is the agent's write-back policy for this task.
+type AgentMemoryWritebackData struct {
+	Mode           string `json:"mode"`
+	CaptureRuntime bool   `json:"capture_runtime"`
 }
 
 // AgentMemoryFileData is one agent memory file from the claim payload.

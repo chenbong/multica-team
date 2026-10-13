@@ -156,6 +156,7 @@ type TaskContextForEnv struct {
 	AgentInstructions             string // agent identity/persona instructions, injected into CLAUDE.md
 	AgentSkills                   []SkillContextForEnv
 	AgentMemory                   []MemoryFileContextForEnv // agent memory files (multica-team overlay, agent_memory.go)
+	AgentMemoryWriteback          string                    // "review" / "auto" when edits are reported back; "" otherwise
 	DisabledRuntimeSkills         []RuntimeSkillRefForEnv
 	Repos                         []RepoContextForEnv     // workspace repos available for checkout
 	ProjectID                     string                  // active project for this task, when present

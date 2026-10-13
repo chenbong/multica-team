@@ -442,6 +442,9 @@ func (h *Handler) ReportLocalMemoryResult(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to persist completion")
 		return
 	}
+	if req.Kind == RuntimeLocalMemoryKindRead {
+		h.applyAgentMemorySync(r.Context(), runtimeID, result.Files)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

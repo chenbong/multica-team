@@ -1,0 +1,220 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/multica-ai/multica/server/internal/testutil"
+)
+
+func reportAgentMemoryChanges(t *testing.T, taskID string, changes []DaemonAgentMemoryChange) DaemonAgentMemoryChangesResponse {
+	t.Helper()
+	w := httptest.NewRecorder()
+	req := withURLParams(newDaemonTokenRequest(http.MethodPost, "/api/daemon/tasks/"+taskID+"/memory-changes",
+		DaemonAgentMemoryChangesRequest{Changes: changes}, testWorkspaceID, "agent-memory-daemon"), "taskId", taskID)
+	testHandler.ReportAgentMemoryChanges(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("report memory changes: %d %s", w.Code, w.Body.String())
+	}
+	var resp DaemonAgentMemoryChangesResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	return resp
+}
+
+func callAgentMemoryRoute(t *testing.T, handler func(http.ResponseWriter, *http.Request), method, path string, body any, params ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	handler(w, withURLParams(newRequestAsUser(testUserID, method, path, body), params...))
+	return w
+}
+
+func listMemoryProposals(t *testing.T, agentID, status string) []AgentMemoryProposalResponse {
+	t.Helper()
+	w := callAgentMemoryRoute(t, testHandler.ListAgentMemoryProposals, http.MethodGet,
+		"/api/agents/"+agentID+"/memory/proposals?status="+status, nil, "id", agentID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list proposals: %d %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Proposals []AgentMemoryProposalResponse `json:"proposals"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	return resp.Proposals
+}
+
+func memoryContent(t *testing.T, agentID string) map[string]string {
+	t.Helper()
+	w := callAgentMemory(t, testUserID, http.MethodGet, agentID, nil)
+	var resp AgentMemoryResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	out := map[string]string{}
+	for _, f := range resp.Files {
+		out[f.Path] = f.Content
+	}
+	return out
+}
+
+func TestAgentMemoryWritebackReviewAutoAndOff(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Agent memory writeback runtime")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Agent memory writeback agent")
+	taskID := dbfx.Task(t, agentID, testutil.Cols{"runtime_id": runtimeID, "issue_id": issueID})
+	if w := callAgentMemory(t, testUserID, http.MethodPut, agentID, map[string]any{"files": []map[string]any{
+		{"path": "a.md", "content": "one"},
+		{"path": "gone.md", "content": "bye"},
+	}}); w.Code != http.StatusOK {
+		t.Fatalf("seed memory: %d %s", w.Code, w.Body.String())
+	}
+
+	// Review mode (default): nothing is applied, every change waits.
+	resp := reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{
+		{Path: "a.md", Action: "upsert", Content: "two", BaseContent: strPtr("one"), Origin: "agent"},
+		{Path: "new.md", Action: "upsert", Content: "fresh", Origin: "agent"},
+		{Path: "gone.md", Action: "delete", BaseContent: strPtr("bye"), Origin: "agent"},
+		{Path: "same.md", Action: "delete", Origin: "agent"},
+		{Path: "../escape.md", Action: "upsert", Content: "x", Origin: "agent"},
+	})
+	if resp.Mode != "review" || resp.Proposed != 3 || resp.Applied != 0 || resp.Skipped != 2 {
+		t.Fatalf("review report = %+v", resp)
+	}
+	pending := listMemoryProposals(t, agentID, "pending")
+	if len(pending) != 3 {
+		t.Fatalf("pending = %+v", pending)
+	}
+	byPath := map[string]AgentMemoryProposalResponse{}
+	for _, p := range pending {
+		byPath[p.Path] = p
+	}
+	if p := byPath["a.md"]; p.CurrentContent == nil || *p.CurrentContent != "one" || p.Content != "two" {
+		t.Fatalf("a.md proposal = %+v", p)
+	}
+	if got := memoryContent(t, agentID); got["a.md"] != "one" {
+		t.Fatalf("review mode applied a change: %v", got)
+	}
+
+	accept := func(id string) *httptest.ResponseRecorder {
+		return callAgentMemoryRoute(t, testHandler.AcceptAgentMemoryProposal, http.MethodPost,
+			"/api/agents/"+agentID+"/memory/proposals/"+id+"/accept", nil, "id", agentID, "proposalId", id)
+	}
+	if w := accept(byPath["a.md"].ID); w.Code != http.StatusOK {
+		t.Fatalf("accept a.md: %d %s", w.Code, w.Body.String())
+	}
+	if w := accept(byPath["gone.md"].ID); w.Code != http.StatusOK {
+		t.Fatalf("accept delete: %d %s", w.Code, w.Body.String())
+	}
+	if w := callAgentMemoryRoute(t, testHandler.RejectAgentMemoryProposal, http.MethodPost,
+		"/api/agents/"+agentID+"/memory/proposals/"+byPath["new.md"].ID+"/reject", nil,
+		"id", agentID, "proposalId", byPath["new.md"].ID); w.Code != http.StatusOK {
+		t.Fatalf("reject: %d %s", w.Code, w.Body.String())
+	}
+	if w := accept(byPath["a.md"].ID); w.Code != http.StatusConflict {
+		t.Fatalf("second accept: want 409, got %d", w.Code)
+	}
+	got := memoryContent(t, agentID)
+	if got["a.md"] != "two" || got["new.md"] != "" || len(got) != 1 {
+		t.Fatalf("after review = %v", got)
+	}
+
+	// A newer proposal for the same path supersedes the older one.
+	reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{{Path: "b.md", Action: "upsert", Content: "v1", Origin: "agent"}})
+	reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{{Path: "b.md", Action: "upsert", Content: "v2", Origin: "agent"}})
+	if pending := listMemoryProposals(t, agentID, "pending"); len(pending) != 1 || pending[0].Content != "v2" {
+		t.Fatalf("supersede: %+v", pending)
+	}
+
+	// Auto mode applies clean changes, keeps conflicts for review, and
+	// drops runtime-origin changes when capture is off.
+	if w := callAgentMemoryRoute(t, testHandler.UpdateAgentMemorySettings, http.MethodPut, "/api/agents/"+agentID+"/memory/settings",
+		map[string]any{"writeback": "auto", "capture_runtime_memory": false}, "id", agentID); w.Code != http.StatusOK {
+		t.Fatalf("settings: %d %s", w.Code, w.Body.String())
+	}
+	resp = reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{
+		{Path: "c.md", Action: "upsert", Content: "auto", Origin: "agent"},
+		{Path: "a.md", Action: "upsert", Content: "three", BaseContent: strPtr("stale"), Origin: "agent"},
+		{Path: "auto/MEMORY.md", Action: "upsert", Content: "native", Origin: "runtime"},
+	})
+	if resp.Mode != "auto" || resp.Proposed != 2 || resp.Applied != 1 || resp.Skipped != 1 {
+		t.Fatalf("auto report = %+v", resp)
+	}
+	got = memoryContent(t, agentID)
+	if got["c.md"] != "auto" || got["a.md"] != "two" {
+		t.Fatalf("after auto = %v", got)
+	}
+	var conflict *AgentMemoryProposalResponse
+	for _, p := range listMemoryProposals(t, agentID, "pending") {
+		if p.Path == "a.md" {
+			conflict = &p
+		}
+	}
+	if conflict == nil || !strings.Contains(conflict.Note, "changed") {
+		t.Fatalf("conflict proposal = %+v", conflict)
+	}
+
+	// The claim tells a memory-aware daemon about the policy.
+	if wb := testHandler.agentMemoryWritebackForClaim(ctx, parseUUID(agentID)); wb == nil || wb.Mode != "auto" || wb.CaptureRuntime {
+		t.Fatalf("claim write-back = %+v", wb)
+	}
+
+	// Off: reports are ignored and the claim carries no policy.
+	callAgentMemoryRoute(t, testHandler.UpdateAgentMemorySettings, http.MethodPut, "/api/agents/"+agentID+"/memory/settings",
+		map[string]any{"writeback": "off"}, "id", agentID)
+	if resp := reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{{Path: "d.md", Action: "upsert", Content: "x", Origin: "agent"}}); resp.Proposed != 0 || resp.Skipped != 1 {
+		t.Fatalf("off report = %+v", resp)
+	}
+	if wb := testHandler.agentMemoryWritebackForClaim(ctx, parseUUID(agentID)); wb != nil {
+		t.Fatalf("off claim write-back = %+v", wb)
+	}
+}
+
+func TestAgentMemorySourceSync(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	runtimeID := createRuntimeLocalSkillTestRuntime(t, testUserID)
+	agentID := createAgentMemoryTestAgent(t, testUserID)
+	h := *testHandler
+	h.LocalMemoryStore = NewInMemoryLocalMemoryStore()
+
+	file := map[string]any{"path": "claude/CLAUDE.md", "content": "v1", "source": "runtime",
+		"source_runtime_id": runtimeID, "source_path": "~/.claude/CLAUDE.md", "auto_sync": true}
+	if w := callAgentMemory(t, testUserID, http.MethodPut, agentID, map[string]any{"files": []map[string]any{file}}); w.Code != http.StatusOK {
+		t.Fatalf("enable sync: %d %s", w.Code, w.Body.String())
+	}
+	// Someone who does not own the source runtime cannot turn sync on.
+	other := dbfx.Agent(t, "agent-memory-sync-other", dbfx.Runtime(t, "agent-memory-sync-other-runtime"), testutil.Cols{"owner_id": testUserID})
+	memberID := createRuntimeLocalSkillTestMember(t, "admin")
+	if w := callAgentMemory(t, memberID, http.MethodPut, other, map[string]any{"files": []map[string]any{file}}); w.Code != http.StatusBadRequest {
+		t.Fatalf("non-owner sync: want 400, got %d %s", w.Code, w.Body.String())
+	}
+
+	resetAgentMemorySyncThrottle(runtimeID)
+	h.maybeEnqueueAgentMemorySync(ctx, runtimeID)
+	pending, _ := h.LocalMemoryStore.PopPendingBatch(ctx, runtimeID, 4)
+	if len(pending) != 1 || pending[0].Kind != RuntimeLocalMemoryKindRead || len(pending[0].Keys) != 1 || pending[0].Keys[0] != "~/.claude/CLAUDE.md" {
+		t.Fatalf("sync request = %+v", pending)
+	}
+	// Throttled until the interval passes.
+	h.maybeEnqueueAgentMemorySync(ctx, runtimeID)
+	if again, _ := h.LocalMemoryStore.PopPendingBatch(ctx, runtimeID, 4); len(again) != 0 {
+		t.Fatalf("sync not throttled: %+v", again)
+	}
+
+	h.applyAgentMemorySync(ctx, runtimeID, []RuntimeLocalMemoryFile{{Key: "~/.claude/CLAUDE.md", Content: "v2"}})
+	w := callAgentMemory(t, testUserID, http.MethodGet, agentID, nil)
+	var resp AgentMemoryResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Files) != 1 || resp.Files[0].Content != "v2" || !resp.Files[0].AutoSync || resp.Files[0].SyncedAt == nil {
+		t.Fatalf("after sync = %+v", resp.Files)
+	}
+	if resp.Settings.Writeback != "review" {
+		t.Fatalf("default settings = %+v", resp.Settings)
+	}
+}

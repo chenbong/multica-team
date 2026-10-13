@@ -868,6 +868,26 @@ AGENT_MEMORY_CLIENT_METHODS = '''  /** Agent memory files (owner or workspace ow
     return this.fetch(`/api/runtimes/${runtimeId}/local-memory/${requestId}`);
   }
 
+  /** Sets how the agent's own memory edits come back after a run. */
+  async updateAgentMemorySettings(id: string, data: UpdateAgentMemorySettingsRequest): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory/settings`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async listAgentMemoryProposals(id: string, status = "pending"): Promise<AgentMemoryProposalsResponse> {
+    return this.fetch(`/api/agents/${id}/memory/proposals?status=${encodeURIComponent(status)}`);
+  }
+
+  async acceptAgentMemoryProposal(id: string, proposalId: string): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory/proposals/${proposalId}/accept`, { method: "POST" });
+  }
+
+  async rejectAgentMemoryProposal(id: string, proposalId: string): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory/proposals/${proposalId}/reject`, { method: "POST" });
+  }
+
   async restoreAgent(id: string): Promise<Agent> {'''
 
 AGENT_OVERVIEW_PANE = "packages/views/agents/components/agent-overview-pane.tsx"
@@ -925,10 +945,12 @@ CHANGES["packages/core/api/client.ts"].extend([
     ('import { configStore } from "../config";',
      'import { configStore } from "../config";\n'
      'import type {\n'
+     '  AgentMemoryProposalsResponse,\n'
      '  AgentMemoryResponse,\n'
      '  CreateRuntimeLocalMemoryRequest,\n'
      '  RuntimeLocalMemoryRequest,\n'
      '  UpdateAgentMemoryRequest,\n'
+     '  UpdateAgentMemorySettingsRequest,\n'
      '} from "../types/agent-memory";'),
     ('  async restoreAgent(id: string): Promise<Agent> {', AGENT_MEMORY_CLIENT_METHODS),
 ])

@@ -16,7 +16,7 @@ import {
 import { toast } from "sonner";
 import { api } from "@multica/core/api";
 import type { Agent, AgentRuntime } from "@multica/core/types";
-import type { AgentMemoryLimits } from "@multica/core/types/agent-memory";
+import type { AgentMemoryLimits, AgentMemoryResponse, AgentMemorySettings } from "@multica/core/types/agent-memory";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
 import { Input } from "@multica/ui/components/ui/input";
@@ -41,6 +41,7 @@ import {
   type MemoryDraftIssue,
 } from "./agent-memory";
 import { MemoryRuntimeImportDialog } from "./memory-runtime-import-dialog";
+import { MemoryWritebackPanel } from "./memory-writeback-panel";
 
 type LoadState = { phase: "loading" } | { phase: "error"; message: string } | { phase: "ready" };
 
@@ -70,17 +71,33 @@ export function MemoryTab({
   const [focusRequest, setFocusRequest] = useState(false);
   const [saving, setSaving] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  // Write-back policy and review queue; absent on servers without migration 468.
+  const [settings, setSettings] = useState<AgentMemorySettings | null>(null);
+  const [pendingProposals, setPendingProposals] = useState(0);
   const uploadRef = useRef<HTMLInputElement>(null);
+
+  const applyServerResponse = useCallback(
+    (resp: AgentMemoryResponse, opts?: { settingsOnly?: boolean; keepPath?: string }) => {
+      setSettings(resp.settings ?? null);
+      setPendingProposals(resp.pending_proposals ?? 0);
+      if (opts?.settingsOnly) return;
+      const files = draftFromServer(resp.files);
+      setLimits(resp.limits ?? DEFAULT_MEMORY_LIMITS);
+      setBaseline(files);
+      setDraft(files);
+      setSelectedId(() => {
+        const keep = opts?.keepPath;
+        return (keep ? files.find((f) => f.path === keep)?.localId : undefined) ?? files[0]?.localId ?? null;
+      });
+    },
+    [],
+  );
 
   const fetchMemory = useCallback(async () => {
     setLoad({ phase: "loading" });
     try {
       const resp = await api.getAgentMemory(agent.id);
-      const files = draftFromServer(resp.files);
-      setLimits(resp.limits ?? DEFAULT_MEMORY_LIMITS);
-      setBaseline(files);
-      setDraft(files);
-      setSelectedId(files[0]?.localId ?? null);
+      applyServerResponse(resp);
       setLoad({ phase: "ready" });
     } catch (err) {
       setLoad({
@@ -88,7 +105,7 @@ export function MemoryTab({
         message: err instanceof Error && err.message ? err.message : t(($) => $.tab_body.memory.load_failed),
       });
     }
-  }, [agent.id, t]);
+  }, [agent.id, applyServerResponse, t]);
 
   useEffect(() => {
     void fetchMemory();
@@ -201,11 +218,7 @@ export function MemoryTab({
     const keepPath = selected?.path;
     try {
       const resp = await api.updateAgentMemory(agent.id, { files: draftToRequest(draft) });
-      const files = draftFromServer(resp.files);
-      setLimits(resp.limits ?? limits);
-      setBaseline(files);
-      setDraft(files);
-      setSelectedId(files.find((f) => f.path === keepPath)?.localId ?? files[0]?.localId ?? null);
+      applyServerResponse(resp, { keepPath });
       toast.success(t(($) => $.tab_body.memory.saved_toast));
     } catch (err) {
       toast.error(
@@ -217,7 +230,9 @@ export function MemoryTab({
   };
 
   const sourceLabel = (f: DraftMemoryFile) =>
-    f.source === "upload"
+    f.source === "agent"
+      ? t(($) => $.tab_body.memory.source_agent)
+      : f.source === "upload"
       ? t(($) => $.tab_body.memory.source_upload)
       : f.source === "runtime"
         ? t(($) => $.tab_body.memory.source_runtime)
@@ -251,6 +266,16 @@ export function MemoryTab({
       <p className="max-w-2xl text-pretty text-body leading-6 text-muted-foreground">
         {t(($) => $.tab_body.memory.intro)}
       </p>
+
+      {settings && (
+        <MemoryWritebackPanel
+          agentId={agent.id}
+          settings={settings}
+          pendingCount={pendingProposals}
+          dirty={dirty}
+          onServerResponse={(resp, opts) => applyServerResponse(resp, { ...opts, keepPath: selected?.path })}
+        />
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" size="sm" variant="outline" onClick={addManualFile}>
@@ -409,6 +434,21 @@ export function MemoryTab({
                   <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
               </div>
+              {selected.source === "runtime" && selected.sourceRuntimeId && selected.sourcePath && (
+                <label className="flex items-center gap-2 border-b px-3 py-1.5 text-micro text-muted-foreground">
+                  <Switch
+                    size="sm"
+                    checked={selected.autoSync === true}
+                    onCheckedChange={(checked) => updateSelected({ autoSync: checked })}
+                  />
+                  <span className="min-w-0 flex-1">
+                    {t(($) => $.tab_body.memory.auto_sync_label)}
+                    {selected.autoSync && selected.syncedAt
+                      ? " · " + t(($) => $.tab_body.memory.synced_at, { time: new Date(selected.syncedAt).toLocaleString() })
+                      : ""}
+                  </span>
+                </label>
+              )}
               {(selected.sourcePath || selectedIssues.length > 0 || !selected.enabled) && (
                 <div className="space-y-0.5 border-b px-3 py-1.5 text-micro">
                   {!selected.enabled && (

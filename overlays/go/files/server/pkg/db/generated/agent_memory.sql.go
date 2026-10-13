@@ -28,7 +28,7 @@ func (q *Queries) DeleteAgentMemoryFilesExcept(ctx context.Context, arg DeleteAg
 }
 
 const listAgentMemoryFiles = `-- name: ListAgentMemoryFiles :many
-SELECT id, agent_id, path, content, source, source_runtime_id, source_path, enabled, updated_by, created_at, updated_at
+SELECT id, agent_id, path, content, source, source_runtime_id, source_path, enabled, updated_by, created_at, updated_at, auto_sync, sync_owner_id, synced_at
 FROM agent_memory_file
 WHERE agent_id = $1
 ORDER BY path ASC
@@ -55,6 +55,9 @@ func (q *Queries) ListAgentMemoryFiles(ctx context.Context, agentID pgtype.UUID)
 			&i.UpdatedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.AutoSync,
+			&i.SyncOwnerID,
+			&i.SyncedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -67,14 +70,19 @@ func (q *Queries) ListAgentMemoryFiles(ctx context.Context, agentID pgtype.UUID)
 }
 
 const upsertAgentMemoryFile = `-- name: UpsertAgentMemoryFile :one
-INSERT INTO agent_memory_file (agent_id, path, content, source, source_runtime_id, source_path, enabled, updated_by)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO agent_memory_file (agent_id, path, content, source, source_runtime_id, source_path, enabled, updated_by, auto_sync, sync_owner_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (agent_id, path) DO UPDATE SET
     content = EXCLUDED.content,
     source = EXCLUDED.source,
     source_runtime_id = EXCLUDED.source_runtime_id,
     source_path = EXCLUDED.source_path,
     enabled = EXCLUDED.enabled,
+    auto_sync = EXCLUDED.auto_sync,
+    sync_owner_id = CASE
+        WHEN NOT EXCLUDED.auto_sync THEN NULL
+        ELSE COALESCE(EXCLUDED.sync_owner_id, agent_memory_file.sync_owner_id)
+    END,
     updated_by = CASE
         WHEN agent_memory_file.content IS DISTINCT FROM EXCLUDED.content
             OR agent_memory_file.enabled IS DISTINCT FROM EXCLUDED.enabled THEN EXCLUDED.updated_by
@@ -85,7 +93,7 @@ ON CONFLICT (agent_id, path) DO UPDATE SET
             OR agent_memory_file.enabled IS DISTINCT FROM EXCLUDED.enabled THEN now()
         ELSE agent_memory_file.updated_at
     END
-RETURNING id, agent_id, path, content, source, source_runtime_id, source_path, enabled, updated_by, created_at, updated_at
+RETURNING id, agent_id, path, content, source, source_runtime_id, source_path, enabled, updated_by, created_at, updated_at, auto_sync, sync_owner_id, synced_at
 `
 
 type UpsertAgentMemoryFileParams struct {
@@ -97,6 +105,8 @@ type UpsertAgentMemoryFileParams struct {
 	SourcePath      string      `json:"source_path"`
 	Enabled         bool        `json:"enabled"`
 	UpdatedBy       pgtype.UUID `json:"updated_by"`
+	AutoSync        bool        `json:"auto_sync"`
+	SyncOwnerID     pgtype.UUID `json:"sync_owner_id"`
 }
 
 func (q *Queries) UpsertAgentMemoryFile(ctx context.Context, arg UpsertAgentMemoryFileParams) (AgentMemoryFile, error) {
@@ -109,6 +119,8 @@ func (q *Queries) UpsertAgentMemoryFile(ctx context.Context, arg UpsertAgentMemo
 		arg.SourcePath,
 		arg.Enabled,
 		arg.UpdatedBy,
+		arg.AutoSync,
+		arg.SyncOwnerID,
 	)
 	var i AgentMemoryFile
 	err := row.Scan(
@@ -123,6 +135,9 @@ func (q *Queries) UpsertAgentMemoryFile(ctx context.Context, arg UpsertAgentMemo
 		&i.UpdatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AutoSync,
+		&i.SyncOwnerID,
+		&i.SyncedAt,
 	)
 	return i, err
 }

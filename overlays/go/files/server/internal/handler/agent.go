@@ -780,6 +780,9 @@ type TaskAgentData struct {
 	// Memory is the agent's memory file set (multica-team overlay,
 	// agent_memory.go). Older daemons ignore it.
 	Memory []AgentMemoryFileData `json:"memory,omitempty"`
+	// MemoryWriteback tells a memory-aware daemon whether to report the
+	// agent's memory edits after the run (agent_memory_writeback.go).
+	MemoryWriteback *AgentMemoryWritebackData `json:"memory_writeback,omitempty"`
 }
 
 // visibleTaskHistory omits unused assignee fallbacks created by older versions.

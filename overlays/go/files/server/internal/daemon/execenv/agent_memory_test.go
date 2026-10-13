@@ -100,3 +100,23 @@ func TestWriteAgentMemoryFilesUsesManifest(t *testing.T) {
 		t.Fatalf("manifest should record only the two files written, got %v", manifest.Files)
 	}
 }
+
+func TestWriteAgentMemoryWritebackGuidance(t *testing.T) {
+	var none strings.Builder
+	writeAgentMemory(&none, TaskContextForEnv{})
+	if none.Len() != 0 {
+		t.Fatalf("no memory and no write-back should render nothing, got %q", none.String())
+	}
+
+	var review strings.Builder
+	writeAgentMemory(&review, TaskContextForEnv{AgentMemoryWriteback: "review"})
+	if out := review.String(); !strings.Contains(out, "You have no memory files yet") || !strings.Contains(out, "for review") || strings.Contains(out, "not saved") {
+		t.Fatalf("review guidance = %q", out)
+	}
+
+	var auto strings.Builder
+	writeAgentMemory(&auto, TaskContextForEnv{AgentMemoryWriteback: "auto", AgentMemory: []MemoryFileContextForEnv{{Path: "a.md", Content: "x"}}})
+	if out := auto.String(); !strings.Contains(out, "automatically") || !strings.Contains(out, "### `a.md`") {
+		t.Fatalf("auto guidance = %q", out)
+	}
+}

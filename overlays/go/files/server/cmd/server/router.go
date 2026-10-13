@@ -1613,6 +1613,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/runtimes/{runtimeId}/local-skills/{requestId}/result", h.ReportLocalSkillListResult)
 		r.Post("/runtimes/{runtimeId}/local-skills/import/{requestId}/result", h.ReportLocalSkillImportResult)
 		r.Post("/runtimes/{runtimeId}/local-memory/{requestId}/result", h.ReportLocalMemoryResult)
+		r.Post("/tasks/{taskId}/memory-changes", h.ReportAgentMemoryChanges)
 
 		r.Get("/tasks/{taskId}/status", h.GetTaskStatus)
 		r.Post("/tasks/{taskId}/start", h.StartTask)
@@ -2310,6 +2311,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// owner/admin rule as env (handler/agent_memory.go).
 					r.Get("/memory", h.GetAgentMemory)
 					r.Put("/memory", h.UpdateAgentMemory)
+					r.Put("/memory/settings", h.UpdateAgentMemorySettings)
+					r.Get("/memory/proposals", h.ListAgentMemoryProposals)
+					r.Post("/memory/proposals/{proposalId}/accept", h.AcceptAgentMemoryProposal)
+					r.Post("/memory/proposals/{proposalId}/reject", h.RejectAgentMemoryProposal)
 				})
 			})
 

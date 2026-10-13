@@ -7821,6 +7821,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		AgentInstructions:                instructions,
 		AgentSkills:                      convertSkillsForEnv(skills),
 		AgentMemory:                      convertAgentMemoryForEnv(task.Agent.Memory),
+		AgentMemoryWriteback:             agentMemoryWritebackMode(task.Agent),
 		DisabledRuntimeSkills:            disabledRuntimeSkills,
 		Repos:                            convertReposForEnv(task.Repos),
 		ProjectID:                        task.ProjectID,
@@ -8668,6 +8669,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		taskLog.Info("resuming session", "session_id", task.PriorSessionID)
 	}
 
+	// Agent memory write-back (memory_writeback.go): snapshot what was
+	// delivered and seed the runtime's own memory dir before launch.
+	memWriteback := newMemoryWriteback(task, provider, env.WorkDir, !env.LocalDirectory && env.LocalWorktree == nil, taskLog)
+
 	taskStart := time.Now()
 
 	var customArgs []string
@@ -8888,6 +8893,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		"duration", elapsed.String(),
 		"tools", tools,
 	)
+	if result.Status == "completed" {
+		memWriteback.report(ctx, d.client, task.ID)
+	}
 	taskLog.Debug("agent result detail",
 		"status", result.Status,
 		"output_bytes", len(result.Output),

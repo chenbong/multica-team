@@ -11,11 +11,22 @@ import enSkills from "../../../locales/en/skills.json";
 
 const getAgentMemory = vi.hoisted(() => vi.fn());
 const updateAgentMemory = vi.hoisted(() => vi.fn());
+const updateAgentMemorySettings = vi.hoisted(() => vi.fn());
+const listAgentMemoryProposals = vi.hoisted(() => vi.fn());
+const acceptAgentMemoryProposal = vi.hoisted(() => vi.fn());
+const rejectAgentMemoryProposal = vi.hoisted(() => vi.fn());
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/api", () => ({
-  api: { getAgentMemory, updateAgentMemory },
+  api: {
+    getAgentMemory,
+    updateAgentMemory,
+    updateAgentMemorySettings,
+    listAgentMemoryProposals,
+    acceptAgentMemoryProposal,
+    rejectAgentMemoryProposal,
+  },
 }));
 
 vi.mock("sonner", () => ({
@@ -195,5 +206,88 @@ describe("MemoryTab", () => {
 
     await user.click(screen.getByRole("button", { name: "Enable all" }));
     expect(screen.getByText(/2 of 2 enabled/)).toBeInTheDocument();
+  });
+
+  it("reviews a change the agent reported and switches the write-back mode", async () => {
+    const user = userEvent.setup();
+    const settings = { writeback: "review", capture_runtime_memory: true };
+    getAgentMemory.mockResolvedValue({
+      agent_id: "agent-1",
+      files: [serverFile("a.md", "one")],
+      limits,
+      settings,
+      pending_proposals: 1,
+    });
+    listAgentMemoryProposals.mockResolvedValue({
+      proposals: [
+        {
+          id: "p-1",
+          task_id: "t-1",
+          path: "a.md",
+          action: "upsert",
+          content: "two",
+          base_content: "one",
+          current_content: "one",
+          origin: "agent",
+          status: "pending",
+          note: "",
+          created_at: "2026-10-13T00:00:00Z",
+          resolved_at: null,
+          resolved_by: null,
+        },
+      ],
+    });
+    acceptAgentMemoryProposal.mockResolvedValue({
+      agent_id: "agent-1",
+      files: [serverFile("a.md", "two")],
+      limits,
+      settings,
+      pending_proposals: 0,
+    });
+    updateAgentMemorySettings.mockResolvedValue({
+      agent_id: "agent-1",
+      files: [serverFile("a.md", "two")],
+      limits,
+      settings: { writeback: "auto", capture_runtime_memory: true },
+      pending_proposals: 0,
+    });
+    renderTab();
+
+    expect(await screen.findByText("Changes waiting for review (1)")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^a\.md/ }));
+    expect(screen.getByText("two")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Accept the change to a.md" }));
+    await waitFor(() => expect(acceptAgentMemoryProposal).toHaveBeenCalledWith("agent-1", "p-1"));
+    await waitFor(() => expect(screen.queryByText(/Changes waiting for review/)).not.toBeInTheDocument());
+
+    expect(screen.getByRole("button", { name: "Review" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Automatic" }));
+    await waitFor(() => expect(updateAgentMemorySettings).toHaveBeenCalledWith("agent-1", { writeback: "auto" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Automatic" })).toHaveAttribute("aria-pressed", "true"));
+  });
+
+  it("blocks reviewing while the draft has unsaved edits", async () => {
+    const user = userEvent.setup();
+    getAgentMemory.mockResolvedValue({
+      agent_id: "agent-1",
+      files: [serverFile("a.md", "one")],
+      limits,
+      settings: { writeback: "review", capture_runtime_memory: true },
+      pending_proposals: 1,
+    });
+    listAgentMemoryProposals.mockResolvedValue({
+      proposals: [
+        {
+          id: "p-1", task_id: null, path: "b.md", action: "upsert", content: "new", base_content: null,
+          current_content: null, origin: "runtime", status: "pending", note: "", created_at: "2026-10-13T00:00:00Z",
+          resolved_at: null, resolved_by: null,
+        },
+      ],
+    });
+    renderTab();
+    const accept = await screen.findByRole("button", { name: "Accept the change to b.md" });
+    expect(accept).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: /new file/i }));
+    expect(screen.getByRole("button", { name: "Accept the change to b.md" })).toBeDisabled();
   });
 });

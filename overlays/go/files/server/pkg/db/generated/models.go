@@ -93,6 +93,33 @@ type AgentMemoryFile struct {
 	UpdatedBy       pgtype.UUID        `json:"updated_by"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	AutoSync        bool               `json:"auto_sync"`
+	SyncOwnerID     pgtype.UUID        `json:"sync_owner_id"`
+	SyncedAt        pgtype.Timestamptz `json:"synced_at"`
+}
+
+type AgentMemoryProposal struct {
+	ID          pgtype.UUID        `json:"id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	TaskID      pgtype.UUID        `json:"task_id"`
+	Path        string             `json:"path"`
+	Action      string             `json:"action"`
+	Content     string             `json:"content"`
+	BaseContent pgtype.Text        `json:"base_content"`
+	Origin      string             `json:"origin"`
+	Status      string             `json:"status"`
+	Note        string             `json:"note"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ResolvedAt  pgtype.Timestamptz `json:"resolved_at"`
+	ResolvedBy  pgtype.UUID        `json:"resolved_by"`
+}
+
+type AgentMemorySetting struct {
+	AgentID              pgtype.UUID        `json:"agent_id"`
+	Writeback            string             `json:"writeback"`
+	CaptureRuntimeMemory bool               `json:"capture_runtime_memory"`
+	UpdatedBy            pgtype.UUID        `json:"updated_by"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 }
 
 type AgentRuntime struct {

@@ -86,6 +86,16 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
     超出的只列名字），所以部署服务端后记忆对旧客户端也立即生效，只是没有 `.multica/memory/` 副本。
     「从运行时导入」仍需要新版 CLI/daemon——对旧 daemon 发起导入约 45 秒后以超时提示升级。
 
+    **记忆自动更新**（`migrations/468_agent_memory_writeback`）分两条路：
+    - **运行后写回**：新版 daemon 在任务成功结束后，把智能体对 `.multica/memory/` 的新增、修改、删除，以及 Claude 系运行时
+      在该任务里自动生成的记忆（`~/.claude/projects/<工作目录>/memory/`，映射为 `auto/<文件>`；运行前会先把已接受的
+      `auto/` 文件放回该目录，让它在同一份记忆上续写）上报给服务端（`POST /api/daemon/tasks/{id}/memory-changes`）。
+      每个变更是一条提案；记忆页「从运行中学习」可选 **关闭 / 需审核（默认）/ 自动保存**：需审核时在记忆页对比后接受或
+      拒绝；自动保存时直接生效，但运行期间被人改过的文件、正在同步的文件仍进审核。同一路径的新提案会替代旧的待审提案。
+      本地目录 / worktree 模式不收集运行时原生记忆（那是用户自己项目的记忆）。
+    - **来源同步**：从运行时导入的文件可打开「与来源文件保持同步」（仅该运行时的所有者可开），服务端借心跳每 5 分钟
+      让 daemon 重读一次来源文件并覆盖平台上的副本；运行时换了所有者即停止同步。
+
 ## 可选：OneAPI 模型目录
 
 API 服务可为 `ducc`（Claude 协议）和 `ducx`（Codex 协议）的模型下拉框直接查询 OneAPI，
@@ -215,6 +225,7 @@ Next.js 没有 overlay 机制，所以采用"临时树 + 脚本补丁"的方式�
 - `001_user_daemon_bootstrap_token`：`user` 表新增 daemon 引导令牌字段
 - `457_skill_scope` … `463_skill_team_scope`：Skill 多级别（个人 / 项目 / 团队）与统计相关的索引、字段
 - `467_agent_memory_file`：智能体记忆文件表（随智能体级联删除）
+- `468_agent_memory_writeback`：记忆写回提案、写回设置与来源同步字段
 
 `overlays/sql/` 里放的是 sqlc 查询定义；对应的 `server/pkg/db/generated/*.go` 生成结果
 同时以完整文件形式放在 `overlays/go/files/` 中，两者要一起改。

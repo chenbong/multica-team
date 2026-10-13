@@ -46,6 +46,7 @@ const (
 	AgentMemorySourceManual  = "manual"
 	AgentMemorySourceUpload  = "upload"
 	AgentMemorySourceRuntime = "runtime"
+	AgentMemorySourceAgent   = "agent"
 )
 
 type AgentMemoryLimits struct {
@@ -70,6 +71,8 @@ type AgentMemoryFileResponse struct {
 	SourceRuntimeID *string `json:"source_runtime_id"`
 	SourcePath      string  `json:"source_path"`
 	Enabled         bool    `json:"enabled"`
+	AutoSync        bool    `json:"auto_sync"`
+	SyncedAt        *string `json:"synced_at"`
 	SizeBytes       int     `json:"size_bytes"`
 	UpdatedBy       *string `json:"updated_by"`
 	CreatedAt       string  `json:"created_at"`
@@ -77,9 +80,11 @@ type AgentMemoryFileResponse struct {
 }
 
 type AgentMemoryResponse struct {
-	AgentID string                    `json:"agent_id"`
-	Files   []AgentMemoryFileResponse `json:"files"`
-	Limits  AgentMemoryLimits         `json:"limits"`
+	AgentID          string                    `json:"agent_id"`
+	Files            []AgentMemoryFileResponse `json:"files"`
+	Limits           AgentMemoryLimits         `json:"limits"`
+	Settings         AgentMemorySettings       `json:"settings"`
+	PendingProposals int64                     `json:"pending_proposals"`
 }
 
 type AgentMemoryFileInput struct {
@@ -90,6 +95,9 @@ type AgentMemoryFileInput struct {
 	SourcePath      string `json:"source_path,omitempty"`
 	// Enabled defaults to true when omitted, so older clients keep every file on.
 	Enabled *bool `json:"enabled,omitempty"`
+	// AutoSync mirrors a runtime-imported file from its source file. Only
+	// the owner of that runtime can turn it on.
+	AutoSync bool `json:"auto_sync,omitempty"`
 }
 
 type UpdateAgentMemoryRequest struct {
@@ -112,6 +120,8 @@ func agentMemoryFileToResponse(f db.AgentMemoryFile) AgentMemoryFileResponse {
 		SourceRuntimeID: uuidToPtr(f.SourceRuntimeID),
 		SourcePath:      f.SourcePath,
 		Enabled:         f.Enabled,
+		AutoSync:        f.AutoSync,
+		SyncedAt:        timestampToPtr(f.SyncedAt),
 		SizeBytes:       len(f.Content),
 		UpdatedBy:       uuidToPtr(f.UpdatedBy),
 		CreatedAt:       timestampToString(f.CreatedAt),
@@ -168,6 +178,7 @@ type validatedAgentMemoryFile struct {
 	sourceRuntimeID pgtype.UUID
 	sourcePath      string
 	enabled         bool
+	autoSync        bool
 }
 
 // validateAgentMemoryFiles normalizes and checks a full replacement set.
@@ -209,6 +220,7 @@ func validateAgentMemoryFiles(inputs []AgentMemoryFileInput) ([]validatedAgentMe
 		case AgentMemorySourceManual:
 		case AgentMemorySourceUpload:
 			sourcePath = truncateRunes(strings.TrimSpace(in.SourcePath), 512)
+		case AgentMemorySourceAgent:
 		case AgentMemorySourceRuntime:
 			sourcePath = truncateRunes(strings.TrimSpace(in.SourcePath), 512)
 			if rid := strings.TrimSpace(in.SourceRuntimeID); rid != "" {
@@ -226,7 +238,11 @@ func validateAgentMemoryFiles(inputs []AgentMemoryFileInput) ([]validatedAgentMe
 			sourceRuntimeID: runtimeID,
 			sourcePath:      sourcePath,
 			enabled:         in.Enabled == nil || *in.Enabled,
+			autoSync:        in.AutoSync,
 		})
+		if in.AutoSync && (source != AgentMemorySourceRuntime || !runtimeID.Valid || sourcePath == "") {
+			return nil, fmt.Errorf("memory file %q can only sync when it was imported from a runtime", p)
+		}
 	}
 	// A path cannot be both a file and the parent directory of another file.
 	for folded, p := range seen {
@@ -280,10 +296,20 @@ func (h *Handler) agentMemoryResponse(ctx context.Context, agent db.Agent) (Agen
 	for _, f := range rows {
 		files = append(files, agentMemoryFileToResponse(f))
 	}
+	settings, err := h.loadAgentMemorySettings(ctx, agent.ID)
+	if err != nil {
+		return AgentMemoryResponse{}, err
+	}
+	pending, err := h.Queries.CountPendingAgentMemoryProposals(ctx, agent.ID)
+	if err != nil && !isUndefinedTable(err) {
+		return AgentMemoryResponse{}, err
+	}
 	return AgentMemoryResponse{
-		AgentID: uuidToString(agent.ID),
-		Files:   files,
-		Limits:  agentMemoryLimits(),
+		AgentID:          uuidToString(agent.ID),
+		Files:            files,
+		Limits:           agentMemoryLimits(),
+		Settings:         settings,
+		PendingProposals: pending,
 	}, nil
 }
 
@@ -338,6 +364,18 @@ func (h *Handler) UpdateAgentMemory(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	qtx := h.Queries.WithTx(tx)
 
+	syncOwners, err := h.resolveAgentMemorySyncOwners(r.Context(), agent.ID, member, files)
+	if err != nil {
+		var bad *agentMemoryUserError
+		if errors.As(err, &bad) {
+			writeError(w, http.StatusBadRequest, bad.Error())
+			return
+		}
+		slog.Error("resolve agent memory sync owners failed", "agent_id", uuidToString(agent.ID), "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to save agent memory")
+		return
+	}
+
 	keep := make([]string, 0, len(files))
 	for _, f := range files {
 		keep = append(keep, f.path)
@@ -360,6 +398,8 @@ func (h *Handler) UpdateAgentMemory(w http.ResponseWriter, r *http.Request) {
 			SourcePath:      f.sourcePath,
 			Enabled:         f.enabled,
 			UpdatedBy:       member.UserID,
+			AutoSync:        f.autoSync,
+			SyncOwnerID:     syncOwners[f.path],
 		}); err != nil {
 			slog.Error("upsert agent memory failed", "agent_id", uuidToString(agent.ID), "path", f.path, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to save agent memory")
@@ -369,6 +409,11 @@ func (h *Handler) UpdateAgentMemory(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save agent memory")
 		return
+	}
+	for _, f := range files {
+		if f.autoSync {
+			resetAgentMemorySyncThrottle(uuidToString(f.sourceRuntimeID))
+		}
 	}
 
 	resp, err := h.agentMemoryResponse(r.Context(), agent)

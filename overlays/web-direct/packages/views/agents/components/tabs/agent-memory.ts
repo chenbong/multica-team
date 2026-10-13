@@ -98,6 +98,9 @@ export interface DraftMemoryFile {
   sourcePath?: string;
   /** Only enabled files are delivered with the agent's runs. */
   enabled: boolean;
+  /** Runtime files only: keep mirroring the source file on that machine. */
+  autoSync?: boolean;
+  syncedAt?: string;
 }
 
 let nextLocalId = 0;
@@ -116,6 +119,8 @@ export function draftFromServer(files: AgentMemoryFile[]): DraftMemoryFile[] {
     sourcePath: f.source_path || undefined,
     // Servers from before the enabled flag treat every file as enabled.
     enabled: f.enabled ?? true,
+    autoSync: f.auto_sync ?? false,
+    syncedAt: f.synced_at ?? undefined,
   }));
 }
 
@@ -129,6 +134,7 @@ export function draftToRequest(files: DraftMemoryFile[]): AgentMemoryFileInput[]
       ...(f.sourceRuntimeId ? { source_runtime_id: f.sourceRuntimeId } : {}),
       ...(f.sourcePath ? { source_path: f.sourcePath } : {}),
       enabled: f.enabled,
+      ...(f.autoSync ? { auto_sync: true } : {}),
     };
   });
 }
@@ -137,7 +143,7 @@ export function draftToRequest(files: DraftMemoryFile[]): AgentMemoryFileInput[]
 export function draftSignature(files: DraftMemoryFile[]): string {
   return JSON.stringify(
     draftToRequest(files)
-      .map((f) => [f.path, f.content, f.source ?? "manual", f.source_runtime_id ?? "", f.source_path ?? "", f.enabled !== false])
+      .map((f) => [f.path, f.content, f.source ?? "manual", f.source_runtime_id ?? "", f.source_path ?? "", f.enabled !== false, f.auto_sync === true])
       .sort((a, b) => (String(a[0]) < String(b[0]) ? -1 : String(a[0]) > String(b[0]) ? 1 : 0)),
   );
 }

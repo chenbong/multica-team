@@ -1520,6 +1520,7 @@ func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, suppor
 		}
 	}
 
+	h.maybeEnqueueAgentMemorySync(ctx, runtimeID)
 	ack.PendingLocalMemory = h.popPendingLocalMemory(ctx, runtimeID)
 
 	return ack, m, nil
@@ -2592,6 +2593,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	}
 	if requestHasClientCapability(r, protocol.DaemonCapabilityAgentMemoryV1) {
 		resp.Agent.Memory = memory
+		resp.Agent.MemoryWriteback = h.agentMemoryWritebackForClaim(r.Context(), task.AgentID)
 	} else if section := renderAgentMemoryInstructions(memory); section != "" {
 		// A daemon without agent-memory support drops the Memory field, but it
 		// always renders Instructions into the runtime brief.
