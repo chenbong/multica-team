@@ -38,6 +38,11 @@ Responses always include `can_comment`. No-access is handled:true, silent:false,
 can_comment:false with the requested owner permission notice and minimal binding
 link metadata (issue_id, identifier, workspace_slug, generation; no title/body).
 Member/no-invoke saves the comment and returns the requested agent-owner notice.
+`conversation_mode` is optional presentation metadata (`chat` or `issue`) for
+the current binding state. A successful unbind returns `chat` while retaining
+the previous issue's link metadata. Cached notices refresh this field from the
+current state. The Bridge adds mode labels at IM send time only; no label is
+inserted into issue comments. Agent deliveries always retain issue-origin mode.
 A stale binding is handled and never falls through to Chat.
 Mutation retries use the exact same message_id and payload. A conflicting reuse
 is HTTP 409; bind/unbind/create are idempotent as well as comments. Recheck

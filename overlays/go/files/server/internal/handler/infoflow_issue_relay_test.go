@@ -108,6 +108,61 @@ func infoFlowCount(t *testing.T, sql string, args ...any) int {
 	return n
 }
 
+func TestInfoFlowConversationModeIsMetadataOnly(t *testing.T) {
+	for _, kind := range []string{"private", "group"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newInfoFlowFixture(t)
+			var email string
+			dbfx.QueryRow(t, `SELECT email FROM "user" WHERE id=$1`, f.user).Scan(&email)
+			req := f.req
+			req.Sender = strings.Split(email, "@")[0]
+			req.Conversation.Kind = kind
+			if kind == "private" {
+				req.Conversation.ID = req.Sender
+			}
+			lookup := req
+			lookup.Operation, lookup.MessageID = "binding", ""
+			if got := infoFlowCall(t, f.h, lookup, 200); got.ConversationMode != "chat" || got.Binding != nil {
+				t.Fatalf("unbound mode: %+v", got)
+			}
+			if got := infoFlowCall(t, f.h, req, 200); got.ConversationMode != "issue" || got.Binding == nil {
+				t.Fatalf("bound mode: %+v", got)
+			}
+			message := req
+			message.Operation, message.MessageID, message.Content = "message", uuid.NewString(), "请检查日志"
+			got := infoFlowCall(t, f.h, message, 200)
+			if got.ConversationMode != "issue" || got.CommentID == "" || !strings.Contains(got.Notice, "没有智能体权限") {
+				t.Fatalf("comment-only mode: %+v", got)
+			}
+			var content string
+			dbfx.QueryRow(t, `SELECT content FROM comment WHERE id=$1`, got.CommentID).Scan(&content)
+			if !strings.HasSuffix(content, message.Content) || strings.Contains(content, "[聊天模式]") || strings.Contains(content, "[任务模式]") {
+				t.Fatalf("IM presentation leaked into issue comment: %q", content)
+			}
+			dbfx.Exec(t, `DELETE FROM member WHERE id=$1`, f.member)
+			denied := infoFlowCall(t, f.h, message, 200)
+			if denied.ConversationMode != "issue" || denied.CanComment || !strings.Contains(denied.Notice, "没有工作区权限") {
+				t.Fatalf("denied mode: %+v", denied)
+			}
+			dbfx.Exec(t, `INSERT INTO member(id,workspace_id,user_id,role) VALUES($1,$2,$3,'admin')`, f.member, testWorkspaceID, f.user)
+			unbind := req
+			unbind.Operation, unbind.MessageID = "unbind", uuid.NewString()
+			unbound := infoFlowCall(t, f.h, unbind, 200)
+			if unbound.ConversationMode != "chat" || unbound.Binding == nil || unbound.Binding.IssueID != f.issue {
+				t.Fatalf("unbind should retain link but switch mode: %+v", unbound)
+			}
+			if replay := infoFlowCall(t, f.h, unbind, 200); replay.ConversationMode != "chat" {
+				t.Fatalf("cached unbind mode: %+v", replay)
+			}
+			req.MessageID = uuid.NewString()
+			infoFlowCall(t, f.h, req, 200)
+			if replay := infoFlowCall(t, f.h, unbind, 200); replay.ConversationMode != "issue" {
+				t.Fatalf("cached notice must use current route mode: %+v", replay)
+			}
+		})
+	}
+}
+
 func TestInfoFlowAdmissionAndOriginalAuthor(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	f.bind(t)

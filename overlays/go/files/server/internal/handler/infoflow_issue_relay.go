@@ -61,12 +61,22 @@ type infoFlowBindingView struct {
 }
 
 type infoFlowRelayResponse struct {
-	Handled    bool                 `json:"handled"`
-	Silent     bool                 `json:"silent"`
-	CanComment bool                 `json:"can_comment"`
-	Notice     string               `json:"notice,omitempty"`
-	Binding    *infoFlowBindingView `json:"binding,omitempty"`
-	CommentID  string               `json:"comment_id,omitempty"`
+	ConversationMode string               `json:"conversation_mode,omitempty"`
+	Handled          bool                 `json:"handled"`
+	Silent           bool                 `json:"silent"`
+	CanComment       bool                 `json:"can_comment"`
+	Notice           string               `json:"notice,omitempty"`
+	Binding          *infoFlowBindingView `json:"binding,omitempty"`
+	CommentID        string               `json:"comment_id,omitempty"`
+}
+
+// Routing metadata is separate from the retained issue link on unbind notices.
+// Only the IM bridge renders a mode label; issue/comment content stays untouched.
+func infoFlowConversationMode(b infoFlowBinding) string {
+	if b.IssueID.Valid {
+		return "issue"
+	}
+	return "chat"
 }
 
 type infoFlowBinding struct {
@@ -380,7 +390,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !acceptedBeforeUnbind {
-			out := infoFlowRelayResponse{}
+			out := infoFlowRelayResponse{ConversationMode: "chat"}
 			if req.Operation == "binding" && req.Command != "" {
 				out.Handled = true
 				out.Notice = "当前会话没有绑定任务"
@@ -390,7 +400,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	user, role, identityErr := sh.infoFlowIdentity(r.Context(), req.Sender, req.WorkspaceID)
-	resp := infoFlowRelayResponse{Handled: true, CanComment: identityErr == nil}
+	resp := infoFlowRelayResponse{Handled: true, CanComment: identityErr == nil, ConversationMode: infoFlowConversationMode(b)}
 	resp.Binding = sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, identityErr == nil)
 	if identityErr != nil {
 		if !errors.Is(identityErr, pgx.ErrNoRows) {
@@ -456,6 +466,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				cached.Binding = resp.Binding
 			}
 			cached.CanComment = true
+			cached.ConversationMode = resp.ConversationMode
 			writeJSON(w, 200, cached)
 			return
 		}
@@ -641,6 +652,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp.Binding = sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, true)
+	resp.ConversationMode = infoFlowConversationMode(b)
 	if req.Operation == "unbind" {
 		resp.Binding = previousBindingView
 	}

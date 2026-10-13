@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { withReplyMode } from "./reply-format.js";
 
 export class ReviewNotifications {
   constructor(runtime, { intervalMs = 15000, now = () => Date.now() } = {}) {
@@ -86,7 +87,7 @@ export class ReviewNotifications {
       if (this.stopped) break;
       if (notification.owner !== owner) continue;
       try {
-        await this.runtime.sendDirect(robot.id, owner, notification.content);
+        await this.runtime.sendDirect(robot.id, owner, withReplyMode(notification.content, "issue"));
         state.sent[eventId] = { at: this.now(), issueId: notification.issueId };
         delete state.pending[eventId];
         this.save();

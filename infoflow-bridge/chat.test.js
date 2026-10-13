@@ -48,7 +48,7 @@ test("concurrent messages reuse a session; users separated; reset starts a new s
   await f.send("新对话");
   assert.equal(f.sessions.length, 3);
   await f.bridge.chat.poll();
-  assert.equal(f.replies.filter((r) => r.content.startsWith("answer:")).length, 4);
+  assert.equal(f.replies.filter((r) => r.content.startsWith("[聊天模式]\n\nanswer:")).length, 4);
   assert.equal(f.issues.length, 0);
 });
 

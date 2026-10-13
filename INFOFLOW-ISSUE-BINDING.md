@@ -43,6 +43,15 @@ Replies preserve agent text, add no forced mentions, and append
 existing attachment handler after the sender's membership check. Incoming quote
 IDs link to known comments; no arbitrary cross-issue parent ID is accepted.
 
+Every IM text reply starts with `[聊天模式]` or `[任务模式]`, including each
+long-message part. Labels are added only at the final transport boundary, never
+to platform Chat input, issue comments, prompts, or canonical delivery content.
+The optional `conversation_mode` response metadata distinguishes an active issue
+binding from the old issue link retained on a successful unbind notice. Bind
+success is issue mode; unbind success is Chat mode. Delayed answers keep their
+origin's mode. Existing plaintext delivery digests/checkpoints remain unchanged.
+Verification-code messages are not conversation replies and are not relabeled.
+
 ## Identity and credential boundary
 
 The API exposes dedicated, narrow integration routes. They accept only a
@@ -119,7 +128,7 @@ Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
 
-Local verification on 2026-10-13: 83 Bridge tests; 127 selected handler,
+Local verification on 2026-10-13: 91 Bridge tests; 130 selected handler,
 permission, comment and transfer cases with the race detector; 12 real-router
 HTTP cases with the race detector; syntax checks, Go vet and a Linux/amd64 API
 build passed. No test was skipped in those runs. Team migrations 477–487 passed

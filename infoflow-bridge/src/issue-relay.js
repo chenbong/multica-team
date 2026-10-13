@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { issueRequest } from "./chat.js";
 import { messageIdString } from "./conversation-context.js";
+import { withReplyMode, noticeReplyMode } from "./reply-format.js";
 
 // The service credential only authorizes the trusted inbound bridge. Never put
 // it in agent prompts, CLI profiles, robot admin responses, or daemon requests.
@@ -191,7 +192,7 @@ export class IssueRelay {
           }
           if (!preflight.binding && parsed.operation === "message") return false;
           if (images.length > 5) {
-            await this.sendNotice(conversation, { notice: "一次最多发送 5 张图片，请分开发送。", binding: preflight.binding });
+            await this.sendNotice(conversation, { ...preflight, notice: "一次最多发送 5 张图片，请分开发送。" });
             return true;
           }
           if (!this.stageImages) throw new Error("issue image staging is not configured");
@@ -202,7 +203,7 @@ export class IssueRelay {
             const bytes = await readFile(path);
             totalBytes += bytes.length;
             if (totalBytes > 20 * 1024 * 1024) {
-              await this.sendNotice(conversation, { notice: "图片合计超过 20MB，请分开发送。", binding: preflight.binding });
+              await this.sendNotice(conversation, { ...preflight, notice: "图片合计超过 20MB，请分开发送。" });
               return true;
             }
             const content_type = ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" })[extname(path).toLowerCase()] || "application/octet-stream";
@@ -238,7 +239,7 @@ export class IssueRelay {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
     for (const part of this.replyParts(result.notice, result.binding)) {
       if (this.stopped) throw new Error("issue relay stopped before notice delivery");
-      await this.send(conversation, part, {});
+      await this.send(conversation, withReplyMode(part, noticeReplyMode(result)), {});
     }
   }
 
@@ -285,7 +286,9 @@ export class IssueRelay {
         if (prior && prior.digest !== digest) throw new Error("issue delivery content changed during retry");
         for (let index = prior?.next || 0; index < parts.length; index += 1) {
           if (this.stopped) return;
-          const receipt = await this.send(item.conversation, parts[index], {});
+          // Decorate only at send time: existing checkpoints/digests remain
+          // based on the unmodified parts, so adding a label cannot replay them.
+          const receipt = await this.send(item.conversation, withReplyMode(parts[index], "issue"), {});
           const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId);
           const messageIds = [...(this.sentParts[item.id]?.messageIds || [])];
           if (messageId) messageIds.push(messageId);

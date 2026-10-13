@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bridge } from "./src/bridge.js";
 import { IssueRelay, relayOperation, splitMessage } from "./src/issue-relay.js";
+import { withReplyMode } from "./src/reply-format.js";
 
 const agent = "00000000-0000-4000-8000-000000000001";
 const binding = { issue_id: "issue", identifier: "TEST-1", workspace_slug: "team", generation: 1 };
@@ -151,7 +152,7 @@ test("outbound replies preserve content, append footer, have no @ and ack only a
   await f.bridge.issueRelay.poll();
   await f.bridge.issueRelay.poll();
   assert.equal(f.sent.length, 1);
-  assert.ok(f.sent[0].content.startsWith(content));
+  assert.ok(f.sent[0].content.startsWith(withReplyMode(content, "issue")));
   assert.deepEqual(f.sent[0].options, {});
 });
 
@@ -162,7 +163,7 @@ test("ack failure and process restart do not re-send already checkpointed chunks
   await f.bridge.issueRelay.poll();
   const sentCount = f.sent.length;
   assert.ok(sentCount > 1);
-  assert.ok(f.sent.every(r => r.content.includes("完整任务对话：") && Buffer.byteLength(r.content) <= 1800));
+  assert.ok(f.sent.every(r => r.content.startsWith("[任务模式]\n\n") && r.content.includes("完整任务对话：") && Buffer.byteLength(r.content) <= 1800 + Buffer.byteLength(withReplyMode("", "issue"))));
   f.bridge.issueRelay.stop();
   const restored = new IssueRelay(f.config, {}, async () => { throw new Error("unexpected duplicate send"); }, { warn() {} });
   t.after(() => restored.stop());
