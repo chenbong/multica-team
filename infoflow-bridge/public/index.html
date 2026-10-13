@@ -589,7 +589,8 @@ form.addEventListener("submit", async (event) => {
 });
 
 function resetForm() {
-  form.reset();
+  // Named form controls (including the clear button) can shadow reset().
+  HTMLFormElement.prototype.reset.call(form);
   form.id.value = "";
   form.allowAllInGroups.checked = true;
   document.getElementById("form-title").textContent = "新增机器人";
