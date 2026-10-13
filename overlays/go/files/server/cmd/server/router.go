@@ -1580,6 +1580,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 	// Trusted relay only; never accept a browser session, PAT or actor headers.
 	r.Post("/api/integrations/infoflow/issue-relay", h.InfoFlowIssueRelay)
+	r.Post("/api/integrations/infoflow/issue-groups", h.InfoFlowIssueGroups)
+	r.Post("/api/integrations/infoflow/issue-group-status", h.InfoFlowIssueGroupStatus)
 	r.Post("/api/integrations/infoflow/issue-deliveries", h.InfoFlowIssueDeliveries)
 	r.Post("/api/integrations/infoflow/issue-deliveries/{id}/ack", h.InfoFlowIssueDeliveryAck)
 
@@ -2055,6 +2057,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Post("/batch-delete", h.BatchDeleteIssues)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetIssue)
+					r.Get("/infoflow-groups", h.GetIssueInfoFlowGroups)
 					r.Put("/", h.UpdateIssue)
 					r.Post("/move", h.MoveIssue)
 					r.With(handler.RequireHumanActor).Post("/transfer-preview", h.PreviewIssueTransfer)

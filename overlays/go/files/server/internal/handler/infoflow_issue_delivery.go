@@ -20,6 +20,8 @@ type infoFlowDeliveryRequest struct {
 }
 
 type infoFlowDelivery struct {
+	AuthorAgentID    string               `json:"author_agent_id"`
+	AuthorName       string               `json:"author_name"`
 	ID               string               `json:"id"`
 	Conversation     infoFlowConversation `json:"conversation"`
 	Content          string               `json:"content"`
@@ -58,7 +60,7 @@ CROSS JOIN LATERAL (
  FROM origins HAVING count(DISTINCT (binding_id,generation))=1
  AND bool_and(binding_id=$1 AND generation=$2)
 ) origin
-WHERE c.issue_id=$3 AND c.workspace_id=$4 AND c.author_type='agent' AND c.author_id=$5
+WHERE c.issue_id=$3 AND c.workspace_id=$4 AND c.author_type='agent' AND c.author_id=ANY($5::uuid[])
 AND c.deleted_at IS NULL AND c.created_at >= $6 AND c.type IN ('comment','progress_update')
 AND NOT EXISTS(SELECT 1 FROM infoflow_issue_delivery d WHERE d.binding_id=$1 AND d.generation=$2 AND d.comment_id=c.id)
 ORDER BY c.created_at,c.id LIMIT $7`
@@ -80,7 +82,7 @@ func (h *Handler) InfoFlowIssueDeliveries(w http.ResponseWriter, r *http.Request
 	}
 	// Discover keys, then close rows before taking transaction-scoped locks.
 	rows, err := h.DB.Query(r.Context(), `SELECT conversation_kind,conversation_id FROM infoflow_issue_binding
-		WHERE robot_id=$1 AND workspace_id=$2 AND agent_id=$3 AND issue_id IS NOT NULL ORDER BY last_polled_at NULLS FIRST,conversation_kind,conversation_id`, req.RobotID, req.WorkspaceID, req.AgentID)
+		WHERE workspace_id=$2 AND issue_id IS NOT NULL AND ((conversation_kind='private' AND robot_id=$1 AND agent_id=$3) OR (conversation_kind='group' AND leader_robot_id=$1)) ORDER BY last_polled_at NULLS FIRST,conversation_kind,conversation_id`, req.RobotID, req.WorkspaceID, req.AgentID)
 	if err != nil {
 		infoFlowError(w, 500, "bindings")
 		return
@@ -139,6 +141,13 @@ func (h *Handler) infoFlowPollConversation(ctx context.Context, s infoFlowScope,
 	if view == nil {
 		return nil, nil
 	}
+	authors := []string{s.AgentID}
+	if c.Kind == "group" {
+		if view.Group == nil || view.Group.State != "active" || view.Group.LeaderRobotID != s.RobotID || view.Group.LeaderAgentID != strings.ToLower(s.AgentID) {
+			return nil, nil
+		}
+		authors = view.Group.AgentIDs
+	}
 	agent, err := sh.Queries.GetAgent(ctx, parseUUID(s.AgentID))
 	if err != nil || uuidToString(agent.WorkspaceID) != strings.ToLower(s.WorkspaceID) || agent.ArchivedAt.Valid {
 		return nil, nil
@@ -151,7 +160,7 @@ func (h *Handler) infoFlowPollConversation(ctx context.Context, s infoFlowScope,
 			return nil, err
 		}
 	}
-	rows, err := tx.Query(ctx, infoFlowDeliveryCandidates, b.ID, b.Generation, b.IssueID, s.WorkspaceID, s.AgentID, b.BoundAt, limit)
+	rows, err := tx.Query(ctx, infoFlowDeliveryCandidates, b.ID, b.Generation, b.IssueID, s.WorkspaceID, authors, b.BoundAt, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -180,16 +189,17 @@ func (h *Handler) infoFlowPollConversation(ctx context.Context, s infoFlowScope,
 			return nil, err
 		}
 	}
-	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,s.message_id FROM infoflow_issue_delivery d JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id
+	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,s.message_id,c.author_id::text,COALESCE(a.name,'智能体') FROM infoflow_issue_delivery d JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON a.id=c.author_id AND a.workspace_id=c.workspace_id
 		WHERE d.binding_id=$1 AND d.generation=$2 AND d.acked_at IS NULL AND c.issue_id=$3 AND c.workspace_id=$4 AND c.deleted_at IS NULL
-		ORDER BY d.created_at,d.id LIMIT $5`, b.ID, b.Generation, b.IssueID, s.WorkspaceID, limit)
+		AND c.author_type='agent' AND c.author_id=ANY($6::uuid[])
+		ORDER BY d.created_at,d.id LIMIT $5`, b.ID, b.Generation, b.IssueID, s.WorkspaceID, limit, authors)
 	if err != nil {
 		return nil, err
 	}
 	var out []infoFlowDelivery
 	for rows.Next() {
 		v := infoFlowDelivery{Conversation: c, IssueID: view.IssueID, Binding: view}
-		if err = rows.Scan(&v.ID, &v.CommentID, &v.Content, &v.ReplyToMessageID); err != nil {
+		if err = rows.Scan(&v.ID, &v.CommentID, &v.Content, &v.ReplyToMessageID, &v.AuthorAgentID, &v.AuthorName); err != nil {
 			break
 		}
 		out = append(out, v)
@@ -240,7 +250,7 @@ func (h *Handler) InfoFlowIssueDeliveryAck(w http.ResponseWriter, r *http.Reques
 	defer tx.Rollback(r.Context())
 	var c infoFlowConversation
 	err = tx.QueryRow(r.Context(), `SELECT b.conversation_kind,b.conversation_id FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id
-		WHERE d.id=$1 AND b.robot_id=$2 AND b.workspace_id=$3 AND b.agent_id=$4`, id, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&c.Kind, &c.ID)
+		WHERE d.id=$1 AND b.workspace_id=$3 AND ((b.conversation_kind='private' AND b.robot_id=$2 AND b.agent_id=$4) OR (b.conversation_kind='group' AND (b.leader_robot_id=$2 OR (b.leader_robot_id IS NULL AND b.robot_id=$2 AND b.agent_id=$4))))`, id, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&c.Kind, &c.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		infoFlowError(w, 404, "delivery")
 		return
@@ -253,13 +263,30 @@ func (h *Handler) InfoFlowIssueDeliveryAck(w http.ResponseWriter, r *http.Reques
 		infoFlowError(w, 500, "lock")
 		return
 	}
+	if c.Kind == "group" {
+		b, e := infoFlowLoadBinding(r.Context(), tx, req.infoFlowScope, c)
+		if e != nil {
+			infoFlowError(w, 409, "stale binding")
+			return
+		}
+		sh, _ := h.infoFlowScoped(tx)
+		g := sh.infoFlowGroupView(r.Context(), b, req.WorkspaceID)
+		if g.LeaderAgentID != "" && g.LeaderAgentID != strings.ToLower(req.AgentID) {
+			infoFlowError(w, 404, "coordinator")
+			return
+		}
+		if !b.IssueID.Valid || g.State != "active" || g.LeaderRobotID != req.RobotID || g.LeaderAgentID != strings.ToLower(req.AgentID) {
+			infoFlowError(w, 409, "stale coordinator")
+			return
+		}
+	}
 	if req.MessageIDs == nil {
 		req.MessageIDs = []string{}
 	}
 	res, err := tx.Exec(r.Context(), `UPDATE infoflow_issue_delivery d SET acked_at=COALESCE(d.acked_at,clock_timestamp()),
 		external_message_id=COALESCE(d.external_message_id,NULLIF($5,'')),
 		external_message_ids=ARRAY(SELECT DISTINCT unnest(d.external_message_ids || $6::text[]))
-		FROM infoflow_issue_binding b,comment c,issue i WHERE d.id=$1 AND b.id=d.binding_id AND b.robot_id=$2 AND b.workspace_id=$3 AND b.agent_id=$4
+		FROM infoflow_issue_binding b,comment c,issue i WHERE d.id=$1 AND b.id=d.binding_id AND b.workspace_id=$3 AND ((b.conversation_kind='private' AND b.robot_id=$2 AND b.agent_id=$4) OR (b.conversation_kind='group' AND b.leader_robot_id=$2))
 		AND d.generation=b.generation AND c.id=d.comment_id AND c.issue_id=b.issue_id AND c.deleted_at IS NULL
 		AND i.id=b.issue_id AND i.workspace_id=b.workspace_id`, id, req.RobotID, req.WorkspaceID, req.AgentID, req.MessageID, req.MessageIDs)
 	if err != nil {

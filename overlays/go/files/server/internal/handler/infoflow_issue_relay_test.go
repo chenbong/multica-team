@@ -51,10 +51,10 @@ func newInfoFlowFixture(t *testing.T) infoFlowTestFixture {
 	member := dbfx.Member(t, testWorkspaceID, user, "admin")
 	runtime := dbfx.Runtime(t, "InfoFlow local fixture", testutil.Cols{"owner_id": owner, "visibility": "public"})
 	agent := dbfx.Agent(t, "InfoFlow fixture agent", runtime, testutil.Cols{"owner_id": owner})
-	issue := dbfx.Issue(t, "InfoFlow secret title", testutil.Cols{"creator_id": owner})
+	issue := dbfx.Issue(t, "InfoFlow secret title", testutil.Cols{"creator_id": owner, "assignee_type": "agent", "assignee_id": agent})
 	h := *testHandler
 	h.Bus = events.New()
-	req := infoFlowRelayRequest{infoFlowScope: infoFlowScope{RobotID: uuid.NewString(), AgentID: agent, WorkspaceID: testWorkspaceID}, Conversation: infoFlowConversation{Kind: "group", ID: uuid.NewString()}, Sender: sender, MessageID: uuid.NewString(), Operation: "bind", IssueRef: issue}
+	req := infoFlowRelayRequest{infoFlowScope: infoFlowScope{RobotID: uuid.NewString(), AgentID: agent, WorkspaceID: testWorkspaceID}, Conversation: infoFlowConversation{Kind: "group", ID: fmt.Sprint(time.Now().UnixNano())}, Sender: sender, MessageID: uuid.NewString(), Operation: "bind", IssueRef: issue}
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for _, sql := range []string{
@@ -95,8 +95,11 @@ func infoFlowCall(t *testing.T, h *Handler, req infoFlowRelayRequest, status int
 func (f infoFlowTestFixture) bind(t *testing.T) infoFlowRelayResponse {
 	t.Helper()
 	out := infoFlowCall(t, f.h, f.req, 200)
-	if out.Binding == nil || out.Binding.IssueID != f.issue || !out.Handled || !out.CanComment {
+	if out.Binding == nil || out.Binding.IssueID != f.issue || !out.Handled {
 		t.Fatalf("bind: %+v", out)
+	}
+	if f.req.Conversation.Kind == "group" {
+		out = infoFlowActivate(t, f, f.req, out.Binding.Generation)
 	}
 	return out
 }
@@ -125,8 +128,12 @@ func TestInfoFlowConversationModeIsMetadataOnly(t *testing.T) {
 			if got := infoFlowCall(t, f.h, lookup, 200); got.ConversationMode != "chat" || got.Binding != nil {
 				t.Fatalf("unbound mode: %+v", got)
 			}
-			if got := infoFlowCall(t, f.h, req, 200); got.ConversationMode != "issue" || got.Binding == nil {
+			gotBind := infoFlowCall(t, f.h, req, 200)
+			if got := gotBind; got.ConversationMode != "issue" || got.Binding == nil {
 				t.Fatalf("bound mode: %+v", got)
+			}
+			if kind == "group" {
+				infoFlowActivate(t, f, req, gotBind.Binding.Generation)
 			}
 			message := req
 			message.Operation, message.MessageID, message.Content = "message", uuid.NewString(), "请检查日志"
@@ -536,7 +543,7 @@ func TestInfoFlowPermissionRevocationWaitsForAcceptedTransaction(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var waiting bool
-		err = testPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%CreateComment%')`).Scan(&waiting)
+		err = testPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE '%CreateComment%' OR query LIKE '%COALESCE(assignee_type%' OR query LIKE '%FOR NO KEY UPDATE%'))`).Scan(&waiting)
 		if err != nil {
 			t.Fatal(err)
 		}

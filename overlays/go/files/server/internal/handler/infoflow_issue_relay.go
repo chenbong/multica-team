@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,21 +55,24 @@ type infoFlowRelayRequest struct {
 }
 
 type infoFlowBindingView struct {
-	IssueID       string `json:"issue_id"`
-	Identifier    string `json:"identifier"`
-	WorkspaceSlug string `json:"workspace_slug"`
-	Title         string `json:"title,omitempty"`
-	Generation    string `json:"generation"`
+	BindingID     string             `json:"binding_id"`
+	Group         *infoFlowGroupView `json:"group,omitempty"`
+	IssueID       string             `json:"issue_id"`
+	Identifier    string             `json:"identifier"`
+	WorkspaceSlug string             `json:"workspace_slug"`
+	Title         string             `json:"title,omitempty"`
+	Generation    string             `json:"generation"`
 }
 
 type infoFlowRelayResponse struct {
-	ConversationMode string               `json:"conversation_mode,omitempty"`
-	Handled          bool                 `json:"handled"`
-	Silent           bool                 `json:"silent"`
-	CanComment       bool                 `json:"can_comment"`
-	Notice           string               `json:"notice,omitempty"`
-	Binding          *infoFlowBindingView `json:"binding,omitempty"`
-	CommentID        string               `json:"comment_id,omitempty"`
+	CanReconcileGroup bool                 `json:"can_reconcile_group,omitempty"`
+	ConversationMode  string               `json:"conversation_mode,omitempty"`
+	Handled           bool                 `json:"handled"`
+	Silent            bool                 `json:"silent"`
+	CanComment        bool                 `json:"can_comment"`
+	Notice            string               `json:"notice,omitempty"`
+	Binding           *infoFlowBindingView `json:"binding,omitempty"`
+	CommentID         string               `json:"comment_id,omitempty"`
 }
 
 // Routing metadata is separate from the retained issue link on unbind notices.
@@ -80,11 +85,16 @@ func infoFlowConversationMode(b infoFlowBinding) string {
 }
 
 type infoFlowBinding struct {
-	ID         pgtype.UUID
-	IssueID    pgtype.UUID
-	BinderID   pgtype.UUID
-	Generation pgtype.UUID
-	BoundAt    time.Time
+	ID               pgtype.UUID
+	IssueID          pgtype.UUID
+	BinderID         pgtype.UUID
+	Generation       pgtype.UUID
+	BoundAt          time.Time
+	Kind             string
+	GroupTopology    []byte
+	GroupState       string
+	LeaderRobotID    string
+	LeaderVerifiedAt pgtype.Timestamptz
 }
 
 var infoFlowUsername = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -139,6 +149,10 @@ func (s infoFlowScope) valid() bool {
 }
 
 func (s infoFlowScope) lockKey(c infoFlowConversation) string {
+	if c.Kind == "group" {
+		b, _ := json.Marshal([]string{c.Kind, c.ID})
+		return "infoflow-issue-group:" + string(b)
+	}
 	b, _ := json.Marshal([]string{s.RobotID, strings.ToLower(s.WorkspaceID), strings.ToLower(s.AgentID), c.Kind, c.ID})
 	return "infoflow-issue:" + string(b)
 }
@@ -150,9 +164,9 @@ func infoFlowLock(ctx context.Context, tx pgx.Tx, s infoFlowScope, c infoFlowCon
 
 func infoFlowLoadBinding(ctx context.Context, tx pgx.Tx, s infoFlowScope, c infoFlowConversation) (infoFlowBinding, error) {
 	var b infoFlowBinding
-	err := tx.QueryRow(ctx, `SELECT id,issue_id,binder_id,generation,bound_at FROM infoflow_issue_binding
-		WHERE robot_id=$1 AND workspace_id=$2 AND agent_id=$3 AND conversation_kind=$4 AND conversation_id=$5`,
-		s.RobotID, s.WorkspaceID, s.AgentID, c.Kind, c.ID).Scan(&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt)
+	err := tx.QueryRow(ctx, `SELECT id,issue_id,binder_id,generation,bound_at,conversation_kind,group_topology,group_state,COALESCE(leader_robot_id,''),leader_verified_at FROM infoflow_issue_binding
+		WHERE workspace_id=$2 AND conversation_kind=$4 AND conversation_id=$5 AND ($4='group' OR (robot_id=$1 AND agent_id::text=lower($3)))`,
+		s.RobotID, s.WorkspaceID, s.AgentID, c.Kind, c.ID).Scan(&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt, &b.Kind, &b.GroupTopology, &b.GroupState, &b.LeaderRobotID, &b.LeaderVerifiedAt)
 	return b, err
 }
 
@@ -271,6 +285,10 @@ func (h *Handler) infoFlowBindingView(ctx context.Context, b infoFlowBinding, ws
 		return nil
 	}
 	out.Generation = uuidToString(b.Generation)
+	out.BindingID = uuidToString(b.ID)
+	if b.Kind == "group" {
+		out.Group = h.infoFlowGroupView(ctx, b, wsID)
+	}
 	if full {
 		out.Title = title
 	}
@@ -313,6 +331,10 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		infoFlowError(w, 400, "invalid request")
 		return
 	}
+	if req.Conversation.Kind == "group" && !infoFlowValidGroupID(req.Conversation.ID) {
+		infoFlowError(w, 400, "group id")
+		return
+	}
 	switch req.Operation {
 	case "message", "bind", "unbind", "create":
 		if req.MessageID == "" {
@@ -339,6 +361,17 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		infoFlowError(w, 500, "binding")
 		return
+	}
+	if req.Conversation.Kind == "group" && !b.IssueID.Valid {
+		var elsewhere bool
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind='group' AND conversation_id=$1 AND workspace_id<>$2 AND issue_id IS NOT NULL)`, req.Conversation.ID, req.WorkspaceID).Scan(&elsewhere); err != nil {
+			infoFlowError(w, 500, "group")
+			return
+		}
+		if elsewhere {
+			writeJSON(w, 200, infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Notice: "该群已绑定其他工作区的任务，请先解除原绑定或联系负责机器人"})
+			return
+		}
 	}
 	// Lock the agent before its grants, matching owner updates. Revocation of
 	// either permission_mode or an existing target waits for the accepted write.
@@ -400,6 +433,17 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	user, role, identityErr := sh.infoFlowIdentity(r.Context(), req.Sender, req.WorkspaceID)
+	// Multiple bound groups may submit to one issue concurrently. Acquire the
+	// eventual comment-write lock before reading topology; two FOR SHARE locks
+	// upgraded later by CreateComment would otherwise deadlock each other.
+	if identityErr == nil && req.Conversation.Kind == "group" && req.Operation == "message" && b.IssueID.Valid {
+		var live pgtype.UUID
+		e := tx.QueryRow(r.Context(), `SELECT id FROM issue WHERE id=$1 AND workspace_id=$2 FOR NO KEY UPDATE`, b.IssueID, req.WorkspaceID).Scan(&live)
+		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+			infoFlowError(w, 500, "issue admission lock")
+			return
+		}
+	}
 	resp := infoFlowRelayResponse{Handled: true, CanComment: identityErr == nil, ConversationMode: infoFlowConversationMode(b)}
 	resp.Binding = sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, identityErr == nil)
 	if identityErr != nil {
@@ -414,6 +458,14 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	r.Header.Set("X-User-ID", uuidToString(user.ID))
 	r.Header.Set("X-User-Email", user.Email)
 	canManage := uuidToString(agent.OwnerID) == uuidToString(user.ID) || role == "owner" || role == "admin" || (b.BinderID.Valid && b.BinderID == user.ID)
+	if req.Conversation.Kind == "group" && b.IssueID.Valid {
+		canManage = role == "owner" || role == "admin" || (b.BinderID.Valid && b.BinderID == user.ID)
+		if resp.Binding != nil && resp.Binding.Group != nil && resp.Binding.Group.LeaderAgentID != "" {
+			if leader, e := sh.Queries.GetAgent(r.Context(), parseUUID(resp.Binding.Group.LeaderAgentID)); e == nil && leader.OwnerID == user.ID {
+				canManage = true
+			}
+		}
+	}
 	if createPreflight {
 		// Read-only media admission for /create, including unbound sessions.
 		// CanComment here means media may be downloaded for the create request;
@@ -435,6 +487,17 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Operation == "binding" {
+		resp.CanReconcileGroup = req.Conversation.Kind == "group" && b.IssueID.Valid && canManage
+		if resp.Binding != nil && resp.Binding.Group != nil {
+			g := resp.Binding.Group
+			if g.State != "active" {
+				resp.CanComment = false
+				resp.Notice = g.Reason
+			} else if !slices.Contains(g.AgentIDs, strings.ToLower(req.AgentID)) {
+				resp.CanComment = false
+				resp.Notice = "该机器人不属于任务负责人或当前小队，请联系队长机器人"
+			}
+		}
 		if !b.IssueID.Valid {
 			// This is a preflight for an already accepted input, not a new
 			// unbound Chat message. Do not redownload media or fall through.
@@ -467,6 +530,26 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			}
 			cached.CanComment = true
 			cached.ConversationMode = resp.ConversationMode
+			if req.Conversation.Kind == "group" {
+				cached.CanReconcileGroup = false
+				if resp.Binding == nil {
+					cached.Binding = nil
+					cached.CanComment = false
+					if req.Operation == "bind" || req.Operation == "create" {
+						cached.Notice = "任务操作已处理，当前群未绑定任务"
+					}
+				}
+			}
+			if resp.Binding != nil && resp.Binding.Group != nil {
+				cached.CanReconcileGroup = canManage
+				cached.CanComment = resp.Binding.Group.State == "active"
+				if req.Operation == "bind" || req.Operation == "create" {
+					cached.Notice = "群聊任务绑定已启用"
+					if !cached.CanComment {
+						cached.Notice = resp.Binding.Group.Reason
+					}
+				}
+			}
 			writeJSON(w, 200, cached)
 			return
 		}
@@ -475,10 +558,41 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Operation != "message" && !canManage {
+	if req.Operation != "message" && !canManage && !(req.Conversation.Kind == "group" && req.Operation == "bind") {
 		resp.Notice = "只有智能体所有者、工作区管理员或当前绑定人可以修改任务绑定"
 		writeJSON(w, 200, resp)
 		return
+	}
+	if req.Conversation.Kind == "group" && req.Operation == "message" && resp.Binding != nil {
+		g := resp.Binding.Group
+		if g == nil || g.State != "active" {
+			resp.CanComment = false
+			resp.Notice = "等待确认队长或负责智能体的机器人已入群"
+			if g != nil && g.Reason != "" {
+				resp.Notice = g.Reason
+			}
+			writeJSON(w, 200, resp)
+			return
+		}
+		if !slices.Contains(g.AgentIDs, strings.ToLower(req.AgentID)) {
+			resp.CanComment = false
+			resp.Notice = "该机器人不属于任务负责人或当前小队，请联系队长机器人"
+			writeJSON(w, 200, resp)
+			return
+		}
+	}
+	if req.Conversation.Kind == "group" && (req.Operation == "bind" || req.Operation == "create") {
+		var elsewhere bool
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind='group' AND conversation_id=$1 AND workspace_id<>$2 AND issue_id IS NOT NULL)`, req.Conversation.ID, req.WorkspaceID).Scan(&elsewhere); err != nil {
+			infoFlowError(w, 500, "group")
+			return
+		}
+		if elsewhere {
+			resp.CanComment = false
+			resp.Notice = "该群已绑定其他工作区的任务，请先解除原绑定"
+			writeJSON(w, 200, resp)
+			return
+		}
 	}
 	canInvoke := sh.canInvokeAgent(r.Context(), agent, "member", uuidToString(user.ID), "", req.WorkspaceID)
 	if req.Operation == "create" && !canInvoke {
@@ -495,6 +609,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !b.ID.Valid {
+		b.Kind = req.Conversation.Kind
 		b.ID, b.Generation = dbid.NewV7(), dbid.NewV7()
 		_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_binding(id,robot_id,workspace_id,agent_id,conversation_kind,conversation_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7)`, b.ID, req.RobotID, req.WorkspaceID, req.AgentID, req.Conversation.Kind, req.Conversation.ID, b.Generation)
 		if err != nil {
@@ -548,8 +663,33 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			b.Generation = dbid.NewV7()
 		}
 		b.IssueID = issue.ID
-		b.BinderID = user.ID
 		resp.Notice = "已绑定任务"
+		if req.Conversation.Kind == "group" {
+			t, reason, e := sh.infoFlowTopology(r.Context(), b.IssueID, req.WorkspaceID)
+			if e != nil {
+				infoFlowError(w, 500, "topology")
+				return
+			}
+			if reason != "" {
+				resp.CanComment = false
+				resp.Notice = reason
+				writeJSON(w, 200, resp)
+				return
+			}
+			leader, e := sh.Queries.GetAgent(r.Context(), parseUUID(t.LeaderAgentID))
+			if e != nil {
+				infoFlowError(w, 500, "leader")
+				return
+			}
+			if uuidToString(leader.OwnerID) != uuidToString(user.ID) && role != "owner" && role != "admin" && !(b.BinderID.Valid && b.BinderID == user.ID) {
+				resp.CanComment = false
+				resp.Notice = "只有任务负责人、队长所有者、工作区管理员或当前绑定人可以修改群聊绑定"
+				writeJSON(w, 200, resp)
+				return
+			}
+			b.GroupTopology, _ = json.Marshal(t)
+		}
+		b.BinderID = user.ID
 	case "unbind":
 		b.IssueID = pgtype.UUID{}
 		b.Generation = dbid.NewV7()
@@ -560,7 +700,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		// Strip external structured actor references. Only the configured agent
 		// gets a server-authored mention; arbitrary member/squad/all mentions are
 		// inert text and cannot cause notifications or agent dispatch.
-		content = util.MentionRe.ReplaceAllString(content, "$1")
+		content = infoFlowSanitizeMentions(content)
 		if content == "" && len(req.Attachments) > 0 {
 			content = "[附件]"
 		}
@@ -616,7 +756,21 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			// A concurrent NEW grant must not change the already-returned
 			// no-invoke decision into a run during the handler's second check.
 			if !canInvoke {
-				body["suppress_agent_ids"] = []string{req.AgentID}
+				suppressed := []string{req.AgentID}
+				if resp.Binding != nil && resp.Binding.Group != nil {
+					suppressed = append(suppressed, resp.Binding.Group.AgentIDs...)
+				}
+				if parent.Valid {
+					var author string
+					e := tx.QueryRow(r.Context(), `SELECT author_id::text FROM comment WHERE id=$1 AND issue_id=$2 AND author_type='agent'`, parent, b.IssueID).Scan(&author)
+					if e == nil {
+						suppressed = append(suppressed, author)
+					} else if !errors.Is(e, pgx.ErrNoRows) {
+						infoFlowError(w, 500, "parent author")
+						return
+					}
+				}
+				body["suppress_agent_ids"] = suppressed
 			}
 			if parent.Valid {
 				body["parent_id"] = uuidToString(parent)
@@ -650,6 +804,32 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			infoFlowError(w, 500, "binding update")
 			return
 		}
+		if req.Conversation.Kind == "group" {
+			if req.Operation == "create" {
+				t, reason, e := sh.infoFlowTopology(r.Context(), b.IssueID, req.WorkspaceID)
+				if e != nil || reason != "" {
+					infoFlowError(w, 409, "topology")
+					return
+				}
+				b.GroupTopology, _ = json.Marshal(t)
+			}
+			_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET group_topology=$2,group_state='pending',leader_robot_id=NULL,leader_verified_at=NULL WHERE id=$1`, b.ID, b.GroupTopology)
+			if err != nil {
+				infoFlowError(w, 500, "group update")
+				return
+			}
+			b.GroupState = "pending"
+			b.LeaderRobotID = ""
+			b.LeaderVerifiedAt = pgtype.Timestamptz{}
+			if req.Operation != "unbind" {
+				resp.Notice = "任务已关联，等待确认队长或负责智能体的机器人已入群"
+				if req.Operation == "create" {
+					resp.Notice = "已创建任务，等待确认负责智能体的机器人已入群后启用群聊绑定"
+				}
+				resp.CanComment = false
+				resp.CanReconcileGroup = true
+			}
+		}
 	}
 	resp.Binding = sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, true)
 	resp.ConversationMode = infoFlowConversationMode(b)
@@ -669,6 +849,26 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	committed = true
 	flush()
 	writeJSON(w, 200, resp)
+}
+
+func infoFlowValidGroupID(id string) bool {
+	if id == "" || id[0] == '0' {
+		return false
+	}
+	for _, c := range id {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	v, err := strconv.ParseUint(id, 10, 63)
+	return err == nil && v > 0
+}
+
+// Replacing a nested markdown label can reassemble a new syntactically valid
+// mention. Neutralize every remaining protocol prefix after label extraction;
+// unlike repeated regex replacements, this remains linear for hostile nesting.
+func infoFlowSanitizeMentions(content string) string {
+	return strings.ReplaceAll(util.MentionRe.ReplaceAllString(content, "$1"), "mention://", "mention: //")
 }
 
 func (h *Handler) infoFlowQuote(ctx context.Context, b infoFlowBinding, messageID string) (pgtype.UUID, error) {

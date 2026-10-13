@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -395,10 +396,14 @@ func infoFlowTransferBinding(t *testing.T, f transferFixture, kind string) (stri
 	t.Helper()
 	agent := dbfx.Agent(t, "Transfer-bound agent", testRuntimeID)
 	generation := uuid.NewString()
+	conversationID := "transfer-conversation-" + uuid.NewString()
+	if kind == "group" {
+		conversationID = strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
 	binding := dbfx.Insert(t, "infoflow_issue_binding", testutil.Cols{
 		"id": uuid.NewString(), "robot_id": "transfer-" + uuid.NewString(),
 		"workspace_id": uuidToString(f.source), "agent_id": agent,
-		"conversation_kind": kind, "conversation_id": "transfer-conversation-" + uuid.NewString(),
+		"conversation_kind": kind, "conversation_id": conversationID,
 		"issue_id": uuidToString(f.issue), "binder_id": uuidToString(f.actor), "generation": generation,
 	})
 	dbfx.Cleanup(t, `DELETE FROM infoflow_issue_source WHERE binding_id=$1`, binding)

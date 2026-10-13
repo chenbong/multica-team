@@ -91,7 +91,7 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 	f.WorkspaceID, f.UserID = workspace, owner
 	runtime := f.Runtime(t, "Offline HTTP fixture runtime", testutil.Cols{"status": "offline"})
 	agent := f.Agent(t, "Private HTTP fixture agent", runtime)
-	issue := f.Issue(t, "InfoFlow real-router authorization fixture")
+	issue := f.Issue(t, "InfoFlow real-router authorization fixture", testutil.Cols{"assignee_type": "agent", "assignee_id": agent})
 	robot := "http-robot-" + suffix
 
 	// Only remove rows belonging to this test's random scope. Fixture builders
@@ -149,6 +149,10 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 		Notice     string `json:"notice"`
 		CommentID  string `json:"comment_id"`
 		Binding    *struct {
+			Group *struct {
+				State         string `json:"state"`
+				LeaderAgentID string `json:"leader_agent_id"`
+			} `json:"group"`
 			IssueID       string `json:"issue_id"`
 			Identifier    string `json:"identifier"`
 			WorkspaceSlug string `json:"workspace_slug"`
@@ -166,7 +170,7 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 	const relayPath = "/api/integrations/infoflow/issue-relay"
 	scope := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace}
 	trustedHeaders := map[string]string{"Authorization": "Bearer " + serviceToken}
-	paths := []string{relayPath, "/api/integrations/infoflow/issue-deliveries", "/api/integrations/infoflow/issue-deliveries/" + uuid.NewString() + "/ack"}
+	paths := []string{relayPath, "/api/integrations/infoflow/issue-groups", "/api/integrations/infoflow/issue-group-status", "/api/integrations/infoflow/issue-deliveries", "/api/integrations/infoflow/issue-deliveries/" + uuid.NewString() + "/ack"}
 
 	t.Run("ordinary_PAT_is_valid_but_never_a_relay_credential", func(t *testing.T) {
 		call(t, http.MethodGet, "/api/me", nil, map[string]string{"Authorization": "Bearer " + pat}, http.StatusOK)
@@ -211,7 +215,7 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 		t.Run(kind+"_uses_verified_sender_and_preserves_no_invoke_comment", func(t *testing.T) {
 			conversationID := actorSender
 			if kind == "group" {
-				conversationID = "group-" + suffix
+				conversationID = "9223372036854775806"
 			}
 			body := map[string]any{
 				"robot_id": robot, "agent_id": agent, "workspace_id": workspace,
@@ -220,8 +224,29 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 				"operation": "bind", "issue_ref": issue,
 			}
 			bound := decode(t, call(t, http.MethodPost, relayPath, body, trustedHeaders, http.StatusOK))
-			if !bound.Handled || !bound.CanComment || bound.Binding == nil || bound.Binding.IssueID != issue || bound.Binding.Generation == "" || bound.Binding.WorkspaceSlug == "" || bound.Binding.Identifier == "" {
+			if !bound.Handled || bound.Binding == nil || bound.Binding.IssueID != issue || bound.Binding.Generation == "" || bound.Binding.WorkspaceSlug == "" || bound.Binding.Identifier == "" {
 				t.Fatalf("service-authenticated binding was not accepted: %+v", bound)
+			}
+			if kind == "group" {
+				if bound.CanComment || bound.Binding.Group == nil || bound.Binding.Group.State != "pending" {
+					t.Fatalf("group not pending: %+v", bound)
+				}
+				memberHeaders := map[string]string{"Authorization": "Bearer " + pat, "X-Workspace-ID": workspace}
+				groupPath := "/api/issues/" + issue + "/infoflow-groups"
+				call(t, http.MethodGet, groupPath, nil, nil, http.StatusUnauthorized)
+				call(t, http.MethodGet, groupPath, nil, trustedHeaders, http.StatusUnauthorized)
+				if data := call(t, http.MethodGet, groupPath, nil, memberHeaders, 200); strings.Contains(string(data), conversationID) {
+					t.Fatal("pending group exposed")
+				}
+				call(t, http.MethodPost, "/api/integrations/infoflow/issue-groups", scope, trustedHeaders, 200)
+				status := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace, "conversation": body["conversation"], "generation": bound.Binding.Generation, "leader_agent_id": agent, "leader_robot_id": robot, "leader_present": true}
+				active := decode(t, call(t, http.MethodPost, "/api/integrations/infoflow/issue-group-status", status, trustedHeaders, 200))
+				if active.Binding == nil || active.Binding.Group == nil || active.Binding.Group.State != "active" {
+					t.Fatalf("status: %+v", active)
+				}
+				if data := call(t, http.MethodGet, groupPath, nil, memberHeaders, 200); !strings.Contains(string(data), conversationID) || !strings.Contains(string(data), "infoflow://APICenter") {
+					t.Fatalf("active link not exposed: %s", data)
+				}
 			}
 			body["operation"], body["message_id"], body["content"] = "message", kind+"-message-"+suffix, "Incoming human comment from "+kind
 			delete(body, "issue_ref")

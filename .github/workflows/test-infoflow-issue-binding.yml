@@ -27,6 +27,7 @@ jobs:
       DATABASE_URL: postgres://test:test@127.0.0.1:55439/infoflow_binding_test?sslmode=disable
       MULTICA_RUN_REAL_AGENT_SMOKE: "0"
       MULTICA_INFOFLOW_HTTP_TEST: "1"
+      MULTICA_INFOFLOW_MIGRATION_TEST: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,14 +43,18 @@ jobs:
         working-directory: infoflow-bridge
         run: >-
           node --test chat.test.js conversation-context.test.js
-          issue-relay.test.js issue-relay-reliability.test.js reply-mode.test.js
+          issue-relay.test.js issue-relay-reliability.test.js issue-groups.test.js reply-mode.test.js
           reactions.test.js review-notifications.test.js
       - name: Prepare isolated database and Go overlay
         run: |
           set -euo pipefail
-          (cd multica/server && go run ./cmd/migrate up)
-          for migration in migrations/001*.up.sql migrations/45*.up.sql migrations/46*.up.sql migrations/47*.up.sql migrations/48*.up.sql; do
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE infoflow_binding_migrations_test'
+          for relay_database in infoflow_binding_test infoflow_binding_migrations_test; do
+            relay_database_url="postgres://test:test@127.0.0.1:55439/$relay_database?sslmode=disable"
+            (cd multica/server && DATABASE_URL="$relay_database_url" go run ./cmd/migrate up)
+            for migration in migrations/001*.up.sql migrations/45*.up.sql migrations/46*.up.sql migrations/47*.up.sql migrations/48*.up.sql migrations/49*.up.sql; do
+              psql "$relay_database_url" -v ON_ERROR_STOP=1 -f "$migration"
+            done
           done
           python3 overlays/prepare.py
           python3 overlays/prepare.py --check
@@ -58,7 +63,37 @@ jobs:
         run: |
           set -euo pipefail
           export GOFLAGS="-overlay=$GITHUB_WORKSPACE/overlays/go-overlay.json -mod=readonly"
-          go test ./internal/handler -run '^TestInfoFlow' -count=1 -v
-          go test ./cmd/server -run '^TestInfoFlow' -count=1 -v
+          go test -race ./internal/handler -run '^TestInfoFlow' -count=1 -v
+          go test -race ./cmd/server -run '^TestInfoFlow' -count=1 -v
           go vet ./internal/handler ./cmd/server
           git -C .. diff --exit-code
+  group-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10.28.2"
+      - name: Prepare isolated frontend
+        run: |
+          set -euo pipefail
+          mkdir -p build/group-web
+          rsync -a --exclude .git multica/ build/group-web/
+          rsync -a overlays/web-direct/ build/group-web/
+          MULTICA_WEB_TARGET="$PWD/build/group-web" python3 overlays/web-patch.py apply
+          cd build/group-web
+          pnpm install --filter '@multica/web...' --frozen-lockfile
+      - name: Verify group entry and API boundary
+        run: |
+          set -euo pipefail
+          cd build/group-web
+          pnpm --filter @multica/core exec vitest run api/infoflow-groups.test.ts issues/infoflow-groups.test.ts
+          pnpm --filter @multica/views exec vitest run issues/components/issue-infoflow-groups.test.tsx
+          pnpm --filter @multica/views exec tsc --noEmit
+          git -C "$GITHUB_WORKSPACE/multica" diff --exit-code

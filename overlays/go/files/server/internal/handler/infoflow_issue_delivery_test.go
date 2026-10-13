@@ -151,7 +151,7 @@ func TestInfoFlowDeliveryPrivateGroupIsolationAndAmbiguity(t *testing.T) {
 func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	// Fixture.Insert intentionally bypasses the application's issue counter.
-	dbfx.Exec(t, `UPDATE workspace SET issue_counter=GREATEST(issue_counter,(SELECT COALESCE(MAX(number),0) FROM issue WHERE workspace_id=$1)) WHERE id=$1`,testWorkspaceID)
+	dbfx.Exec(t, `UPDATE workspace SET issue_counter=GREATEST(issue_counter,(SELECT COALESCE(MAX(number),0) FROM issue WHERE workspace_id=$1)) WHERE id=$1`, testWorkspaceID)
 	create := f.req
 	create.MessageID = uuid.NewString()
 	create.Operation = "create"
@@ -171,6 +171,7 @@ func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
 	if retry.Binding.IssueID != issue {
 		t.Fatal("create duplicated")
 	}
+	infoFlowActivate(t, f, create, out.Binding.Generation)
 	infoFlowAgentReply(t, f, issue, "", task, "new issue assignment answer")
 	deliveries := infoFlowPoll(t, f, 20)
 	if len(deliveries) != 1 {
@@ -220,9 +221,10 @@ func TestInfoFlowPollFairnessAcrossFailingDestinations(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	for i := 0; i < 3; i++ {
 		req := f.req
-		req.Conversation.ID = fmt.Sprintf("destination-%d", i)
+		req.Conversation.ID = fmt.Sprintf("%s%d", f.req.Conversation.ID[:17], i)
 		req.MessageID = uuid.NewString()
-		infoFlowCall(t, f.h, req, 200)
+		bound := infoFlowCall(t, f.h, req, 200)
+		infoFlowActivate(t, f, req, bound.Binding.Generation)
 		_, out, task := infoFlowInput(t, f, req.Conversation)
 		infoFlowAgentReply(t, f, f.issue, out.CommentID, task, "one answer")
 	}

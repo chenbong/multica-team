@@ -14,12 +14,96 @@ Private chats and group mentions then accept:
 - `/issue description`: create a new issue assigned to the robot's agent and
   bind the conversation. Explicit natural-language issue creation still works.
 
-A private binding belongs to the robot, workspace, agent and sender. A group
-binding belongs to the robot, workspace, agent and group, not one sender. Binding
-changes require the agent owner, a workspace owner/admin, or the current binder,
-who must still be a workspace member. Creating an assigned issue also requires
-permission to invoke the agent. Switching a binding does not cancel existing
-work, but stops routing old-generation answers to the conversation.
+A private binding still belongs to the robot, workspace, agent and sender.
+A group binds directly to an issue, independently of which robot received the
+command. A group cannot have two active issue associations through different
+robots or workspaces. Unbind before moving that group to another workspace.
+For an existing issue assigned to a squad, the configured squad leader is the
+coordinator. For an issue assigned to one agent, that agent is the coordinator.
+An unassigned or human-assigned issue must first be assigned to an agent/squad.
+Binding administration requires the relevant owner, a workspace owner/admin, or
+the current binder, who must still be a workspace member. Creating an assigned
+issue also requires permission to invoke the agent. Switching a binding does
+not cancel existing work, but stops routing old-generation answers.
+
+## Required leader presence and sending identity
+
+Association and activation are separate. A new group association is pending
+until Bridge has verified that the coordinator's configured InfoFlow robot is
+actually a group member. For a squad this means the leader robot; for a single
+agent it means that agent's own robot. The robot that received `/bind` is not
+implicitly made the leader. Missing or ambiguous robot mappings fail closed.
+
+Bridge may invite a missing coordinator with `POST /robot/group/addMembers`.
+It reads `POST /robot/group/memberList` with `recallType: 0` and matches the
+returned `agentInfoList[].agentId` against the robot application ID, not the
+platform agent UUID or the different InfoFlow `imId`. Both APIs require the
+corresponding permissions to be enabled on the calling robot. Invitation code
+`201` means waiting for administrator approval; even code `0` is not proof of
+membership. Partial failures are inspected and membership is read again.
+Invitation attempts are persisted and bounded; pending approval never counts
+as an active binding. No real invitations are made by default tests.
+
+The leader's presence is rechecked before group input/output and represented
+server-side as a short-lived verification lease. Loss of membership, unreadable
+membership, or changed issue assignee/squad topology pauses group synchronization
+until the required robot is verified again. Existing agent runs are not stopped.
+
+The leader relay coordinates outbound deliveries for the entire assigned team:
+
+| Reply author | Verified membership | Sender |
+| --- | --- | --- |
+| Leader / sole assigned agent | Required to be present | Its own robot |
+| Squad member | Its robot is in the group | The member's own robot |
+| Squad member | Its robot is absent, or no robot is configured | Leader robot, with `【member name · 队长代发】` |
+| Any author | Membership unknown, robot mapping ambiguous, or selected robot unavailable | Pause; do not guess another identity |
+
+The sending identity is pinned before transmission and retained with multipart
+checkpoints. A retry does not switch between member and leader. Each delivery
+has one coordinator, not a separate poller per author. Robot-origin input is
+filtered to prevent forwarded agent replies from starting robot conversations.
+Mode/author labels are transport-only; canonical issue comments are unchanged.
+
+Example: an issue is assigned to a squad led by A with member B. A's robot must
+be in the group. If B's robot is present, B sends:
+
+```text
+[任务模式]
+
+性能测试已完成。
+
+完整任务对话：https://team.example.test/workspace/issues/TASK-42
+```
+
+If B's robot is absent, A sends the same reply with explicit attribution:
+
+```text
+[任务模式]
+
+【B · 队长代发】
+性能测试已完成。
+
+完整任务对话：https://team.example.test/workspace/issues/TASK-42
+```
+
+If the issue is assigned directly to A (not a squad), only A's robot is required
+and A sends its own replies. No fictitious squad or additional leader is created.
+
+## Open the associated group from an issue
+
+The issue header shows **Open InfoFlow group / 打开如流群聊** for active,
+verified group bindings. One group opens directly; multiple groups use a menu.
+Pending bindings, private chats, and inaccessible issues do not expose links.
+The normal member-authenticated `GET /api/issues/{id}/infoflow-groups` route
+returns only group destinations; service credentials are never sent to the UI.
+
+Links use the official `infoflow://APICenter?data=` protocol with URL-encoded
+Base64 JSON: `APIName: BdHiJs.service.hi.open`, `version: 65`, and
+`data: {id: <decimal group ID string>, type: "2"}`. No draft, automatic send,
+invitation, or membership grant is encoded. The frontend constructs this one
+allowed action from a validated ID instead of trusting arbitrary response URLs.
+Launching requires the user's InfoFlow client and browser permission. Actual
+desktop/mobile protocol launch is a separate manual acceptance check.
 
 With no binding, ordinary messages keep using Chat. With a binding, messages
 addressed to the robot become comments under the actual sender's platform
@@ -92,15 +176,19 @@ comment creation and agent invocation.
 
 Outbound messages route by stored comment/task origin, not by text such as
 `@username`. Private-origin replies are not broadcast into a group merely because
-it is bound to the same issue. The first version returns this agent's attributable
-replies, not every unrelated human comment or historical/background issue event.
+it is bound to the same issue. Group deliveries include attributable replies from
+the currently assigned leader and squad members, including delegated task
+lineage; private deliveries retain the original single-agent scope. This is not
+a broadcast of every unrelated human comment or historical/background event.
 Binding changes/deletion/moves invalidate old routing. Private deliveries also
 recheck the recipient's membership.
 
 ## Reliability and storage
 
-Team migrations **477–487** create separate binding, source-receipt and delivery
-tables plus indexes. They do not apply personal-runtime migrations 467–476.
+Team migrations **477–490** create separate binding, source-receipt and delivery
+tables plus indexes. The new 488–490 migrations add group coordination and
+uniqueness guards; they refuse ambiguous older group bindings instead of
+silently deleting data. They do not apply personal-runtime migrations 467–476.
 Run each migration file independently; concurrent indexes must not run inside
 an enclosing transaction. Apply them to a disposable database before rollout.
 
@@ -111,8 +199,11 @@ deliveries repeat until acknowledged. Bridge checkpoints completed long-message
 parts and persists failed input for retries. One failed conversation does not
 prevent other conversations from being delivered.
 
-The server database and Bridge `*.issue-deliveries-*.json*` files are durable
-state. Inboxes can contain message bodies and media; keep permissions restricted
+The server database and Bridge `*.issue-deliveries-*.json*`,
+`*.issue-group-deliveries.json`, and `*.issue-group-invites.json` files are durable
+state. Group checkpoints are shared across robot coordinators, so changing the
+leader does not reset sent-part progress or sender identity. Inboxes can contain
+message bodies and media; keep permissions restricted
 and include them in private operational backups, never Git. Permanent malformed-input
 or idempotency conflicts are retained in a separate private quarantine directory
 for operator inspection rather than occupying active inbox capacity. Monitor its
@@ -128,12 +219,16 @@ Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
 
-Local verification on 2026-10-13: 91 Bridge tests; 130 selected handler,
+Local verification on 2026-10-13: 131 Bridge tests; 158 selected handler,
 permission, comment and transfer cases with the race detector; 12 real-router
-HTTP cases with the race detector; syntax checks, Go vet and a Linux/amd64 API
-build passed. No test was skipped in those runs. Team migrations 477–487 passed
-up/down/up on a separate empty database with no invalid indexes afterwards.
-The SQL overlay guard test and upstream cleanliness checks also passed.
+HTTP cases with the race detector; 153 frontend API/query/component regressions
+(including 26 new group-entry cases); 10 existing legacy-browser compatibility
+tests; core/views type checks; production Web build; syntax checks, Go vet and a
+Linux/amd64 API build passed. No test was skipped in those runs. New migrations
+488–490 passed conflict refusal, down/up/down/up/repeat-up on a second isolated
+database with no invalid indexes afterwards. The earlier 477–487 migration
+round trip remains part of the previous PR verification. SQL overlay checks and
+upstream cleanliness checks also passed.
 These are synthetic/local checks, not live InfoFlow account or browser testing.
 No production process or client daemon was restarted.
 

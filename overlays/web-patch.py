@@ -869,6 +869,7 @@ CHANGES.setdefault("packages/views/common/cli-install-command.test.tsx", []).app
 
 
 runpy.run_path(str(HERE / "issue-transfer-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "infoflow-groups-patch.py"))["extend"](CHANGES)
 
 
 def apply_patches():

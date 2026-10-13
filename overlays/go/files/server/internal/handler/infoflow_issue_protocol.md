@@ -1,6 +1,6 @@
 # InfoFlow issue relay contract
 
-All routes are POST, outside ordinary Auth, authenticated exclusively with
+All integration routes below are POST, outside ordinary Auth, authenticated with
 `Authorization: Bearer ${INFOFLOW_ISSUE_RELAY_TOKEN}` (minimum 32 characters).
 Missing/short token or missing/invalid `INFOFLOW_ISSUE_IDENTITY_DOMAIN` disables
 the relay. Bridge must never fall back to Chat on HTTP errors or `handled:true`.
@@ -64,8 +64,12 @@ on rollback. Empty content with attachments uses a short file placeholder.
 `/api/integrations/infoflow/issue-deliveries` accepts
 `{robot_id,agent_id,workspace_id,limit?:number}` (default 20, maximum 50) and returns
 `{deliveries:[{id,conversation:{kind,id},content,issue_id,comment_id,reply_to_message_id}]}`.
-Only comments authored by this agent with explicit source ancestry/run origin are
-eligible. No background broadcast, no requirement that all group participants
+Private replies are limited to the configured agent. Group replies include the
+current issue assignee or assigned squad's leader/members, with explicit source
+ancestry/run origin. Group delivery metadata includes `author_agent_id` and
+`author_name`, plus the current group binding view. Only the verified leader
+coordinator polls and acknowledges group deliveries. No background broadcast,
+no requirement that all group participants
 have access. Private destinations recheck their recipient membership. Ambiguous
 cross-conversation runs fail closed. No forced mentions are added to output.
 
@@ -75,6 +79,53 @@ quoting and echo suppression), returns `{handled:true,silent:true}`. Ack is idem
 scope, binding generation, and current issue workspace. Poll repeats until ack;
 Bridge must use delivery id for send idempotency where the transport supports it.
 A crash between external send and ack can repeat delivery (at-least-once).
+
+## Group coordination
+
+Group bindings are issue-scoped, not agent/robot-scoped. The external group ID
+has at most one non-null issue association across workspaces. Private scopes
+remain unchanged. Group message handling checks the addressed agent against the
+current assigned team and retains per-agent invocation permissions.
+
+Group binding views add `binding_id` and a `group` object containing `state`
+(`pending` or `active`), `leader_agent_id`, `agent_ids`, optional
+`leader_robot_id`, and an optional human-readable `reason`. The server derives
+the leader from the issue's single-agent assignee or the assigned squad's
+`leader_id`; the Bridge cannot designate an arbitrary leader. A binding mutation
+does not assert IM membership. Pending state must not be presented as success.
+`can_reconcile_group` distinguishes authorized membership reconciliation from
+permission to submit a new comment; a pending binding cannot admit comments.
+
+`POST /api/integrations/infoflow/issue-groups` accepts the ordinary relay scope
+and returns `{groups:[{conversation:{kind:"group",id},binding}]}` for the
+workspace. This is trusted service discovery, not a browser API.
+
+`POST /api/integrations/infoflow/issue-group-status` accepts that scope plus
+`conversation`, `generation`, `leader_agent_id`, `leader_robot_id`, and
+`leader_present`. Presence is reported only after a fresh, validated IM member
+list; an invitation response is not sufficient. An affirmative report must be
+scoped to the actual leader robot/agent. The server validates the generation and
+current topology and grants only a short verification lease. It returns a relay
+response with the refreshed binding. Stale topology, reassignment, membership
+loss, and expired verification cannot authorize new group input/output.
+
+Bridge chooses the author's own robot when it is verified in the group;
+otherwise the leader sends with an attribution label. Unknown membership or an
+unavailable in-group member transport does not permit guessing a fallback.
+The selected robot, agent and attribution are pinned with multipart progress
+before sending. Canonical comment and outbox content remain undecorated.
+
+## User-facing group destinations
+
+`GET /api/issues/{id}/infoflow-groups` is a separate ordinary-authenticated
+endpoint. It uses issue access checks and returns
+`{groups:[{group_id:string,url:string}]}` for currently active group bindings.
+Private conversation identifiers and service/robot credentials are never
+returned. An absent/disabled integration returns an empty group list.
+Group IDs remain exact decimal strings. The URL is a URL-encoded Base64
+`infoflow://APICenter?data=` action for `BdHiJs.service.hi.open`, version `65`,
+with `data.id` set to the group ID and `data.type` set to `"2"`. It grants no
+membership and contains no automatic send or draft action.
 
 Both notices and deliveries carry fresh `binding.workspace_slug`, `identifier`,
 and `issue_id` so Bridge adds the requested complete-task footer using its public

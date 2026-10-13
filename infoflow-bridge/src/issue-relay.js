@@ -9,7 +9,7 @@ import { withReplyMode, noticeReplyMode } from "./reply-format.js";
 // The service credential only authorizes the trusted inbound bridge. Never put
 // it in agent prompts, CLI profiles, robot admin responses, or daemon requests.
 export class IssueRelay {
-  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null } = {}) {
+  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null } = {}) {
     this.config = config;
     this.multica = multica;
     this.send = send;
@@ -17,6 +17,7 @@ export class IssueRelay {
     this.fetch = fetchImpl;
     this.token = token;
     this.stageImages = stageImages;
+    this.groups = groups;
     this.enabled = config.issueRelay?.enabled === true;
     this.queues = new Map();
     this.stopped = false;
@@ -183,6 +184,21 @@ export class IssueRelay {
       let staged;
       let result;
       try {
+        if (this.groups && conversation.kind === "group" && ["message", "binding"].includes(parsed.operation)) {
+          const preflight = await this.request("issue-relay", { ...body, operation: "binding", content: "" });
+          this.validateDecision(preflight);
+          if (preflight.binding && !preflight.binding.group) throw new Error("group binding is missing its coordination plan");
+          if (preflight.binding?.group) {
+            const checked = await this.reconcileGroup(scope, conversation, preflight.binding, { invite: preflight.can_reconcile_group === true, bootstrap: true });
+            if (checked.binding?.group?.state !== "active") {
+              await this.sendNotice(conversation, !preflight.can_comment && preflight.notice ? preflight : checked);
+              return true;
+            }
+          } else if (preflight.handled && !preflight.can_comment) {
+            await this.sendNotice(conversation, preflight);
+            return true;
+          }
+        }
         if (!record.preparedBody && images.length && ["message", "create"].includes(parsed.operation)) {
           const preflight = await this.request("issue-relay", { ...body, operation: "binding", content: "", ...(parsed.operation === "create" ? { command: "create" } : {}) });
           this.validateDecision(preflight);
@@ -216,6 +232,12 @@ export class IssueRelay {
         result = await this.request("issue-relay", body);
       } finally { await staged?.cleanup(); }
       this.validateDecision(result);
+      if (this.groups && conversation.kind === "group" && result.binding?.group && ["bind", "create"].includes(parsed.operation) && result.can_reconcile_group === true) {
+        // Pending bind/create notices must not claim success until the leader
+        // (or the single assigned agent) is observed in the real group.
+        const checked = await this.reconcileGroup(scope, conversation, result.binding, { invite: true, bootstrap: true });
+        result = checked;
+      }
       if (!result.handled) {
         if (parsed.explicitBinding) {
           await this.sendNotice(conversation, { notice: "当前会话未绑定任务。使用 /bind <任务编号> 绑定，或 /issue <内容> 新建并绑定。" });
@@ -235,6 +257,55 @@ export class IssueRelay {
     if (typeof result?.handled !== "boolean" || typeof result?.silent !== "boolean") throw new Error("invalid issue relay decision");
   }
 
+  async reconcileGroup(scope, conversation, binding, { invite = false, bootstrap = false } = {}) {
+    if (!binding?.group || !this.groups) throw new Error("group binding coordination is unavailable");
+    if (!binding.group.leader_agent_id) return { handled: true, silent: false, binding,
+      notice: binding.group.reason || "请先为任务配置负责人或小队队长", observation: { leader_present: false } };
+    let observation;
+    try { observation = await this.groups.inspect(scope, conversation, binding, { invite, bootstrap }); }
+    catch { observation = { leader_present: false, leader_robot_id: binding.group.leader_robot_id || "", reason: "membership_check_failed" }; }
+    const response = await this.request("issue-group-status", {
+      ...scope,
+      ...(observation.leader_robot_id ? { robot_id: observation.leader_robot_id, agent_id: binding.group.leader_agent_id } : {}),
+      conversation: { kind: "group", id: String(conversation.id) }, generation: binding.generation,
+      leader_agent_id: binding.group.leader_agent_id || "", leader_robot_id: observation.leader_robot_id || "",
+      leader_present: observation.leader_present,
+    });
+    this.validateDecision(response);
+    if (!response.binding?.group || response.binding.generation !== binding.generation ||
+        response.binding.group.leader_agent_id !== binding.group.leader_agent_id) {
+      throw new Error("group binding changed during membership verification");
+    }
+    if (!observation.leader_present && response.binding.group.state === "active") throw new Error("group activated without confirmed leader");
+    if (!observation.leader_present) {
+      const reasons = {
+        leader_robot_missing_or_ambiguous: "负责人机器人未配置或有多个匹配，请先确认唯一机器人。",
+        leader_robot_unavailable: "负责人机器人不可用，请先启用或恢复连接。",
+        membership_check_failed: "无法确认群成员，请检查获取群成员列表的 API 权限或网络。",
+        approval_pending: "入群申请等待群管理员审批。",
+        invitation_failed: "邀请负责人机器人失败，请检查添加群成员的 API 权限，或手动邀请入群。",
+        invitation_pending: "入群请求结果待确认，请检查群成员或管理员审批。",
+        membership_unconfirmed: "已提交入群请求，尚未确认负责人机器人已入群。",
+        leader_not_in_group: "负责人机器人不在群中，请先邀请入群。",
+      };
+      if (reasons[observation.reason]) response.notice = `${response.notice || "群聊任务绑定尚未启用"}\n${reasons[observation.reason]}`;
+    }
+    return { ...response, observation };
+  }
+
+  async reconcileGroups(scope) {
+    const result = await this.request("issue-groups", scope);
+    if (!Array.isArray(result.groups)) throw new Error("invalid issue group list");
+    const checked = new Map();
+    for (const group of result.groups) {
+      if (group.conversation?.kind !== "group" || !group.conversation.id || !group.binding?.group) throw new Error("invalid issue group plan");
+      if (!(await this.groups.owns(scope, group.binding))) continue;
+      const state = await this.reconcileGroup(scope, group.conversation, group.binding, { invite: true });
+      checked.set(String(group.conversation.id), state);
+    }
+    return checked;
+  }
+
   async sendNotice(conversation, result) {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
     for (const part of this.replyParts(result.notice, result.binding)) {
@@ -243,7 +314,7 @@ export class IssueRelay {
     }
   }
 
-  replyParts(content, binding) {
+  replyParts(content, binding, maxBytes = 1800) {
     if (!binding) return splitMessage(content);
     const ref = binding.identifier || binding.issue_id;
     const slug = binding.workspace_slug || this.config.multica.workspaceSlug;
@@ -253,7 +324,7 @@ export class IssueRelay {
     base.pathname = base.pathname.replace(/\/$/, "") + `/${encodeURIComponent(slug)}/issues/${encodeURIComponent(ref)}`;
     base.search = ""; base.hash = "";
     const footer = "\n\n完整任务对话：" + base.href;
-    const parts = splitMessage(content, Math.max(200, 1800 - Buffer.byteLength(footer)));
+    const parts = splitMessage(content, Math.max(200, maxBytes - Buffer.byteLength(footer)));
     return parts.length ? parts.map(part => part + footer) : [footer.trimStart()];
   }
 
@@ -266,42 +337,87 @@ export class IssueRelay {
     if (!this.enabled || this.stopped || this.polling) return;
     this.polling = true;
     try {
+      const scope = await this.scope();
+      let groupPlans = null;
+      if (this.groups) {
+        try { groupPlans = await this.reconcileGroups(scope); }
+        catch { this.logger.warn("issue group reconciliation pending; group output paused"); }
+      }
       for (const key of new Set(Object.values(this.inbox).map(record => record.key))) {
         if (this.stopped) return;
         await this.serial(key, () => this.drain(key));
       }
-      const scope = await this.scope();
       const result = await this.request("issue-deliveries", { ...scope, limit: 20 });
       if (!Array.isArray(result.deliveries)) throw new Error("invalid issue delivery list");
       for (const item of result.deliveries) {
         if (this.stopped) break;
         try {
+        const deliver = async () => {
         if (typeof item.id !== "string" || typeof item.content !== "string" ||
             !["private", "group"].includes(item.conversation?.kind) || !item.conversation?.id) {
           throw new Error("invalid issue delivery");
         }
-        const parts = this.replyParts(item.content, item.binding || item);
+        // New group checkpoints reserve attribution bytes (including 120
+        // Unicode author characters); private/legacy digests remain unchanged.
+        const parts = this.replyParts(item.content, item.binding || item,
+          this.groups && item.conversation.kind === "group" ? 1200 : 1800);
         const digest = createHash("sha256").update(parts.join("")).digest("hex");
-        const prior = this.sentParts[item.id];
+        const shared = this.groups && item.conversation.kind === "group";
+        const checkpoints = shared ? this.groups.deliveries : this.sentParts;
+        const save = () => shared ? this.groups.saveDeliveries() : this.save();
+        const prior = checkpoints[item.id];
+        if (prior?.acked) return;
+        if (shared && !prior && this.sentParts[item.id]) throw new Error("legacy per-robot group checkpoint requires operator review");
         if (prior && prior.digest !== digest) throw new Error("issue delivery content changed during retry");
+        let route = null;
+        if (shared) {
+          const plan = groupPlans?.get(String(item.conversation.id));
+          if (!plan || plan.binding.group.state !== "active" ||
+              plan.binding.generation !== item.binding?.generation || plan.binding.issue_id !== item.binding?.issue_id ||
+              plan.binding.group.leader_robot_id !== scope.robot_id) throw new Error("group delivery is not owned by this active leader");
+          if (prior && !prior.route) throw new Error("legacy group checkpoint requires operator review");
+          const checked = await this.reconcileGroup(scope, item.conversation, plan.binding);
+          if (checked.binding.group.state !== "active") throw new Error("group delivery paused until leader rejoins");
+          // A poll snapshot can outlive squad membership. Author admission must
+          // use the freshly checked topology, not the original delivery view.
+          if (!prior || prior.next < parts.length) route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, prior?.route);
+          if (!prior) {
+            checkpoints[item.id] = { next: 0, digest, messageIds: [], route: route.pin };
+            // Pin before the first external send; a retry must never switch bots.
+            save();
+          }
+        }
         for (let index = prior?.next || 0; index < parts.length; index += 1) {
           if (this.stopped) return;
           // Decorate only at send time: existing checkpoints/digests remain
           // based on the unmodified parts, so adding a label cannot replay them.
-          const receipt = await this.send(item.conversation, withReplyMode(parts[index], "issue"), {});
+          if (route) {
+            const checked = await this.reconcileGroup(scope, item.conversation, item.binding);
+            if (checked.binding.group.state !== "active") throw new Error("group delivery paused");
+            route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, route.pin);
+          }
+          const receipt = await (route?.send || this.send)(item.conversation,
+            withReplyMode((route?.pin.label || "") + parts[index], "issue"), {});
           const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId);
-          const messageIds = [...(this.sentParts[item.id]?.messageIds || [])];
+          const messageIds = [...(checkpoints[item.id]?.messageIds || [])];
           if (messageId) messageIds.push(messageId);
-          this.sentParts[item.id] = { next: index + 1, digest, messageIds };
-          this.save();
+          checkpoints[item.id] = { next: index + 1, digest, messageIds, ...(route ? { route: route.pin } : {}) };
+          save();
         }
         if (this.stopped) return;
-        const ids = this.sentParts[item.id]?.messageIds || [];
+        const ids = checkpoints[item.id]?.messageIds || [];
         await this.request(`issue-deliveries/${encodeURIComponent(item.id)}/ack`, {
           ...scope, ...(ids.length ? { message_id: ids.at(-1), message_ids: ids } : {}),
         });
-        delete this.sentParts[item.id];
-        this.save();
+        // Group receipts are process-wide and survive coordinator reassignment.
+        // Keep a tombstone so a second timer with an older delivery snapshot
+        // cannot send it again after the first coordinator already acknowledged.
+        if (shared) checkpoints[item.id].acked = true;
+        else delete checkpoints[item.id];
+        save();
+        };
+        if (this.groups && item.conversation?.kind === "group") await this.groups.deliveryLock(item.id, deliver);
+        else await deliver();
         } catch (error) { this.logger.warn("issue relay delivery pending: " + error.message); }
       }
     } catch (error) { this.logger.warn("issue relay delivery pending: " + error.message); }
