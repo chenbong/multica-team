@@ -9,6 +9,9 @@ deploy/secrets.env
 infoflow-bridge/config.local.json
 infoflow-bridge/config.local.json.before-*
 infoflow-bridge/state.json
+# Issue relay inboxes contain message text/media; checkpoints are host state.
+**/*.issue-deliveries-*.json*
+infoflow-bridge/.infoflow-images-*/
 infoflow-bridge/bridge.pid
 infoflow-bridge/bridge-watchdog.pid
 infoflow-bridge/logs/

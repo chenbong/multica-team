@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
 import { ChatRelay, issueRequest } from "./chat.js";
+import { IssueRelay, splitMessage } from "./issue-relay.js";
 
 const HELP = [
   "**Multica 机器人**",
@@ -12,6 +13,8 @@ const HELP = [
   "- `/agents` 列出可用 agent",
   "- `/agent <名字>` 切换你自己的默认 agent（私聊和群里共用）",
   "- `/issue <内容>` 创建任务，也可说「帮我创建一个任务：内容」",
+  "- `/bind <任务编号>` 绑定当前私聊或群（需启用任务绑定功能）",
+  "- `/binding` 查看绑定；`/unbind` 解除绑定，不删除任务",
   "- `/new` 开启新的聊天上下文",
   "- `/status` 查询当前聊天状态（没有聊天时查询最近任务）",
   "- `/status <任务编号>` 查询指定 issue；也可问「CBH-15 进展怎么样？」",
@@ -38,14 +41,16 @@ export class Bridge {
     this.state = this.#loadState();
     this.chat = new ChatRelay(config, this.multica,
       async (conversation, user, content) => {
-        for (let i = 0; i < content.length; i += 3000) {
-          await this.sender(conversation, content.slice(i, i + 3000), { atUser: user });
-        }
+        for (const part of splitMessage(content)) await this.sender(conversation, part, {});
       },
       (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger);
+    this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
+      stageImages: (images) => stageInboundImages(images, this.logger, this.getImageAccessToken),
+    });
+    this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message, skipIssueRelay: true, handoff });
   }
 
-  stop() { this.chat.stop(); }
+  stop() { this.chat.stop(); this.issueRelay.stop(); }
 
   // Inbound events normally carry the username already; a payload that only has
   // the numeric uid is mapped here so state, allow list, and replies agree.
@@ -56,16 +61,19 @@ export class Bridge {
 
   // conversation: { kind: "private" | "group", id }. For a private chat the id is
   // the username to reply to; for a group it is the numeric group id.
-  async handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null }) {
+  async handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
-    if (messageId && this.#alreadyHandled(messageId)) {
+    const user = this.resolveUser(rawUser);
+    // The relay has persistent, server-side deduplication and authenticates the
+    // real sender before any receipt, owner-profile command, or chat fallback.
+    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context })) return;
+    if (messageId && (handoff ? this.#loadState().seenMessageIds.includes(String(messageId)) : this.#alreadyHandled(messageId))) {
       this.logger.warn(`ignoring redelivered InfoFlow message ${messageId} from ${rawUser}`);
       return;
     }
 
-    const user = this.resolveUser(rawUser);
     if (!this.#allowed(user, conversation)) {
       this.logger.warn(`rejected ${conversation.kind} message from ${user}: not in allowUsers`);
       if (conversation.kind === "private") {
@@ -97,8 +105,14 @@ export class Bridge {
         await this.#issueStatus(conversation, user, "");
         return;
       }
-      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge);
+      const chatHandoff = handoff && {
+        beforeSubmit: handoff.beforeSubmit,
+        afterSubmit: () => { handoff.afterSubmit(); if (messageId) this.#alreadyHandled(messageId); },
+      };
+      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff);
+      if (handoff && messageId) this.#alreadyHandled(messageId);
     } catch (error) {
+      if (handoff) throw error;
       this.logger.error(`handling message from ${user} failed: ${error.message}`);
       await this.reply(conversation, user, `出错了：${error.message}`);
     }
@@ -106,7 +120,7 @@ export class Bridge {
 
   async reply(conversation, user, content) {
     try {
-      await this.sender(conversation, content, { atUser: user });
+      for (const part of splitMessage(content)) await this.sender(conversation, part, {});
     } catch (error) {
       this.logger.error(`sending to ${conversation.kind}:${conversation.id} failed: ${error.message}`);
     }

@@ -56,6 +56,9 @@ export function loadConfig() {
       infoflowConsoleUrl: String(file.admin?.infoflowConsoleUrl ?? "").trim().replace(/\/+$/, ""),
     },
     multica,
+    // Opt in only after the server relay endpoints and migration are deployed.
+    // The credential is environment-only, never stored in admin-editable JSON.
+    issueRelay: { enabled: process.env.INFOFLOW_ISSUE_RELAY_ENABLED === "true" },
     robots: migrateRobots(file).map(normalizeRobot).map(robot =>
       process.env.INFOFLOW_STANDBY === "true" && robot.purpose !== "verification"
         ? { ...robot, enabled: false }

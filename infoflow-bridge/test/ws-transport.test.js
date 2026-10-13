@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createWSClient } from "../src/ws-transport.js";
-import { patchSdkTransport } from "../scripts/patch-sdk-transport.js";
+import { patchSdkTransport, patchSdkMessageIds } from "../scripts/patch-sdk-transport.js";
 
 const logger = Object.fromEntries(["info", "debug", "trace", "warn", "error"].map(k => [k, () => {}]));
 const options = { appKey: "test-key", appSecret: "test-secret", logger, autoRegister: false, endpointTimeout: 1000 };
@@ -23,6 +23,23 @@ test("no proxy preserves SDK defaults and rejects unsafe proxy schemes", () => {
   assert.equal(client.wsProxyAgent, undefined);
   assert.throws(() => createWSClient(options, "socks5://localhost:1000"), /HTTP/);
   client.disconnect();
+});
+
+test("SDK preserves private and group IDs through nested Encrypt without network", async () => {
+  const source = readFileSync(createRequire(import.meta.url).resolve("@baidu/infoflow-sdk-nodejs"), "utf8");
+  assert.equal(patchSdkMessageIds(source, "2026.8.28"), source);
+  assert.throws(() => patchSdkMessageIds("changed", "2026.8.28"), /anchor/);
+  assert.throws(() => patchSdkMessageIds(source, "next"), /Unsupported/);
+  const client = createWSClient({ ...options, autoAck: false }, "");
+  let received;
+  client.frameCodec.decode = () => ({ method: 1, headers: [], seqId: 1 });
+  client.frameCodec.parsePayload = () => ({ Encrypt: '{"MsgId":1836339350307196087,"message":{"header":{"messageid":1836339350307196088},"body":[{"type":"replyData","sBasemsgId":1836339350307196089}]}}' });
+  client.eventDispatcher.dispatchFrame = async payload => { received = payload; };
+  await client.handleMessage(Buffer.from("fixture"));
+  client.disconnect();
+  assert.equal(received.MsgId, "1836339350307196087");
+  assert.equal(received.message.header.messageid, "1836339350307196088");
+  assert.equal(received.message.body[0].sBasemsgId, "1836339350307196089");
 });
 
 test("both endpoint and WebSocket use only the client proxy; internal HTTP stays direct", async () => {

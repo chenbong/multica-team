@@ -48,7 +48,7 @@ export class ChatRelay {
     });
   }
 
-  async send(conversation, user, text, images, agentName, acknowledge = null) {
+  async send(conversation, user, text, images, agentName, acknowledge = null, context = "", handoff = null) {
     const key = this.key(conversation, user);
     return this.serial(key, async () => {
       const agents = await this.multica.listAgents();
@@ -72,7 +72,7 @@ export class ChatRelay {
       }
       const staged = await this.stageImages(images);
       const attachmentIds = [];
-      let content = text;
+      let content = context ? context + "\n\n" + text : text;
       try {
         for (const path of staged.paths) {
           const attachment = await this.multica.uploadChatImage(thread.id, path);
@@ -83,10 +83,12 @@ export class ChatRelay {
           content += "\n\n图片附件处理失败：\n" + staged.failed.join("\n");
           await this.reply(conversation, user, "部分图片未能读取：\n" + staged.failed.join("\n"));
         }
+        handoff?.beforeSubmit();
         const sent = await this.multica.sendChatMessage(thread.id, content, attachmentIds);
         if (!sent.task_id) throw new Error("聊天已提交但缺少执行 ID，请到网页版确认，不要重复发送");
         this.state.pending[sent.task_id] = { sessionId: thread.id, conversation, user, at: Date.now() };
         this.save();
+        handoff?.afterSubmit();
         if (attachmentIds.some((id) => !(sent.attachment_ids || []).includes(id))) {
           await this.reply(conversation, user, "消息已发送，但部分图片未绑定成功，请到网页版检查附件。");
         }

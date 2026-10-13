@@ -1,0 +1,64 @@
+name: Test InfoFlow issue binding
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: infoflow_binding_test
+        ports:
+          - 55439:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d infoflow_binding_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgres://test:test@127.0.0.1:55439/infoflow_binding_test?sslmode=disable
+      MULTICA_RUN_REAL_AGENT_SMOKE: "0"
+      MULTICA_INFOFLOW_HTTP_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: multica/server/go.mod
+          cache-dependency-path: multica/server/go.sum
+      - name: Test transport-independent Bridge behavior with fakes
+        working-directory: infoflow-bridge
+        run: >-
+          node --test chat.test.js conversation-context.test.js
+          issue-relay.test.js issue-relay-reliability.test.js
+          reactions.test.js review-notifications.test.js
+      - name: Prepare isolated database and Go overlay
+        run: |
+          set -euo pipefail
+          (cd multica/server && go run ./cmd/migrate up)
+          for migration in migrations/001*.up.sql migrations/45*.up.sql migrations/46*.up.sql migrations/47*.up.sql migrations/48*.up.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
+          python3 overlays/prepare.py
+          python3 overlays/prepare.py --check
+      - name: Verify permission, transaction and real HTTP contracts
+        working-directory: multica/server
+        run: |
+          set -euo pipefail
+          export GOFLAGS="-overlay=$GITHUB_WORKSPACE/overlays/go-overlay.json -mod=readonly"
+          go test ./internal/handler -run '^TestInfoFlow' -count=1 -v
+          go test ./cmd/server -run '^TestInfoFlow' -count=1 -v
+          go vet ./internal/handler ./cmd/server
+          git -C .. diff --exit-code

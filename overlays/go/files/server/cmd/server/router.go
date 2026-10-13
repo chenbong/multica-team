@@ -1578,6 +1578,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// the browsers above; the other four composio endpoints stay session-gated.
 	r.Get("/api/integrations/composio/callback", h.ComposioCallback)
 
+	// Trusted relay only; never accept a browser session, PAT or actor headers.
+	r.Post("/api/integrations/infoflow/issue-relay", h.InfoFlowIssueRelay)
+	r.Post("/api/integrations/infoflow/issue-deliveries", h.InfoFlowIssueDeliveries)
+	r.Post("/api/integrations/infoflow/issue-deliveries/{id}/ack", h.InfoFlowIssueDeliveryAck)
+
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(queries, patCache, daemonTokenCache, cloudPATVerifier))

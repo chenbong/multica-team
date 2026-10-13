@@ -7,9 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -377,5 +379,273 @@ func TestIssueTransferLateEnqueueDenied(t *testing.T) {
 	count, err := testHandler.Queries.AddIssueSubscriber(context.Background(), db.AddIssueSubscriberParams{IssueID: f.issue, UserType: "agent", UserID: parseUUID(agent), Reason: "manual"})
 	if err != nil || count != 0 {
 		t.Fatalf("late source subscription accepted: %d %v", count, err)
+	}
+}
+
+func requireInfoFlowTransferSchema(t *testing.T) {
+	t.Helper()
+	var present bool
+	dbfx.QueryRow(t, `SELECT to_regclass('infoflow_issue_binding') IS NOT NULL`).Scan(&present)
+	if !present {
+		t.Skip("InfoFlow overlay migrations are not installed")
+	}
+}
+
+func infoFlowTransferBinding(t *testing.T, f transferFixture, kind string) (string, string, string) {
+	t.Helper()
+	agent := dbfx.Agent(t, "Transfer-bound agent", testRuntimeID)
+	generation := uuid.NewString()
+	binding := dbfx.Insert(t, "infoflow_issue_binding", testutil.Cols{
+		"id": uuid.NewString(), "robot_id": "transfer-" + uuid.NewString(),
+		"workspace_id": uuidToString(f.source), "agent_id": agent,
+		"conversation_kind": kind, "conversation_id": "transfer-conversation-" + uuid.NewString(),
+		"issue_id": uuidToString(f.issue), "binder_id": uuidToString(f.actor), "generation": generation,
+	})
+	dbfx.Cleanup(t, `DELETE FROM infoflow_issue_source WHERE binding_id=$1`, binding)
+	dbfx.Cleanup(t, `DELETE FROM infoflow_issue_delivery WHERE binding_id=$1`, binding)
+	return binding, generation, agent
+}
+
+func TestIssueTransferBlocksActiveInfoFlowBinding(t *testing.T) {
+	requireInfoFlowTransferSchema(t)
+	for _, kind := range []string{"private", "group"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newTransferFixture(t)
+			before, err := f.run(issueTransferRequest{}, false)
+			if err != nil || len(before.Blockers) != 0 {
+				t.Fatalf("initial preview: %+v %v", before, err)
+			}
+			binding, _, _ := infoFlowTransferBinding(t, f, kind)
+			preview, err := f.run(issueTransferRequest{}, false)
+			if err != nil || !containsTransferBlocker(preview, "infoflow_binding") {
+				t.Fatalf("active %s binding absent from blockers: %+v %v", kind, preview, err)
+			}
+			// Apply must recheck even when the binding appeared after confirmation.
+			_, err = f.run(issueTransferRequest{Fingerprint: before.Fingerprint}, true)
+			expectTransferCode(t, err, "transfer_blocked")
+			var issueWorkspace, bindingWorkspace, boundIssue string
+			dbfx.QueryRow(t, `SELECT i.workspace_id::text,b.workspace_id::text,b.issue_id::text FROM issue i JOIN infoflow_issue_binding b ON b.id=$2 WHERE i.id=$1`, f.issue, binding).Scan(&issueWorkspace, &bindingWorkspace, &boundIssue)
+			if issueWorkspace != uuidToString(f.source) || bindingWorkspace != issueWorkspace || boundIssue != uuidToString(f.issue) {
+				t.Fatal("blocked transfer changed the issue or its binding")
+			}
+		})
+	}
+}
+
+func TestIssueTransferPreservesInactiveInfoFlowHistory(t *testing.T) {
+	requireInfoFlowTransferSchema(t)
+	f := newTransferFixture(t)
+	binding, generation, agent := infoFlowTransferBinding(t, f, "group")
+	comment := dbfx.Comment(t, uuidToString(f.issue), "Old routed answer", testutil.Cols{"author_type": "agent", "author_id": agent})
+	source := dbfx.Insert(t, "infoflow_issue_source", testutil.Cols{
+		"id": uuid.NewString(), "binding_id": binding, "generation": generation,
+		"message_id": "historical-message", "sender": "historical-sender", "user_id": uuidToString(f.actor),
+		"request_hash": "fixture", "issue_id": uuidToString(f.issue), "response": testutil.Raw("'{}'::jsonb"),
+	})
+	dbfx.Insert(t, "infoflow_issue_delivery", testutil.Cols{
+		"id": uuid.NewString(), "binding_id": binding, "generation": generation,
+		"source_id": source, "comment_id": comment, "content": "Old routed answer",
+	})
+	dbfx.Exec(t, `UPDATE infoflow_issue_binding SET issue_id=NULL,binder_id=NULL,generation=$2 WHERE id=$1`, binding, uuid.NewString())
+	const historySQL = `SELECT md5(jsonb_build_array(
+		(SELECT to_jsonb(b) FROM infoflow_issue_binding b WHERE id=$1),
+		(SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM infoflow_issue_source s WHERE binding_id=$1),
+		(SELECT jsonb_agg(to_jsonb(d) ORDER BY id) FROM infoflow_issue_delivery d WHERE binding_id=$1))::text)`
+	var before, after string
+	dbfx.QueryRow(t, historySQL, binding).Scan(&before)
+	p, err := f.run(issueTransferRequest{}, false)
+	if err != nil || len(p.Blockers) != 0 {
+		t.Fatalf("inactive history should not block transfer: %+v %v", p, err)
+	}
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err != nil {
+		t.Fatal(err)
+	}
+	dbfx.QueryRow(t, historySQL, binding).Scan(&after)
+	if before != after {
+		t.Fatal("transfer rewrote immutable InfoFlow binding/source/delivery history")
+	}
+}
+
+func TestIssueTransferFencesConcurrentInfoFlowBindingWriter(t *testing.T) {
+	requireInfoFlowTransferSchema(t)
+	f := newTransferFixture(t)
+	p, err := f.run(issueTransferRequest{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := testPool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback(context.Background())
+	if _, err = writer.Exec(context.Background(), `LOCK TABLE infoflow_issue_binding IN ROW EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err == nil {
+		t.Fatal("transfer ignored the in-flight InfoFlow binding writer")
+	}
+	i, err := testHandler.Queries.GetIssue(context.Background(), f.issue)
+	if err != nil || i.WorkspaceID != f.source {
+		t.Fatalf("issue moved despite binding contention: %+v %v", i, err)
+	}
+}
+
+func TestIssueTransferInfoFlowRejectsStaleSourceWrites(t *testing.T) {
+	requireInfoFlowTransferSchema(t)
+	f := newTransferFixture(t)
+	p, err := f.run(issueTransferRequest{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a stale mapping left by an older deployment. Admission must
+	// recheck the issue's current workspace, even if this fixture is reachable.
+	binding, _, agent := infoFlowTransferBinding(t, f, "group")
+	var robot, conversation string
+	dbfx.QueryRow(t, `SELECT robot_id,conversation_id FROM infoflow_issue_binding WHERE id=$1`, binding).Scan(&robot, &conversation)
+	sender := "transfer-sender-" + uuid.NewString()
+	user := dbfx.User(t, "Stale source sender", sender+"@example.test")
+	dbfx.Member(t, uuidToString(f.source), user, "admin")
+	token := "transfer-fixture-" + uuid.NewString()
+	t.Setenv("INFOFLOW_ISSUE_RELAY_TOKEN", token)
+	t.Setenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN", "example.test")
+	for _, operation := range []string{"bind", "message"} {
+		r := newRequest("POST", "/api/integrations/infoflow/issue-relay", map[string]any{
+			"robot_id": robot, "workspace_id": uuidToString(f.source), "agent_id": agent,
+			"conversation": map[string]string{"kind": "group", "id": conversation},
+			"sender":       sender, "message_id": "stale-" + operation, "operation": operation,
+			"issue_ref": uuidToString(f.issue), "content": "Must not reach the moved issue",
+		})
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		testHandler.InfoFlowIssueRelay(w, r)
+		var result infoFlowRelayResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 200 || !result.Handled || result.Silent || result.Notice == "" || result.CommentID != "" || result.Binding != nil {
+			t.Fatalf("stale %s exposed a binding or comment: status=%d body=%s error=%v", operation, w.Code, w.Body.String(), err)
+		}
+		if got := dbfx.Count(t, `SELECT count(*) FROM infoflow_issue_source WHERE binding_id=$1`, binding); got != 0 {
+			t.Fatalf("stale %s wrote %d source receipts", operation, got)
+		}
+	}
+	if got := dbfx.Count(t, `SELECT count(*) FROM comment WHERE issue_id=$1`, f.issue); got != 0 {
+		t.Fatalf("stale source wrote %d comments in the moved issue", got)
+	}
+	if got := dbfx.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1`, f.issue); got != 0 {
+		t.Fatalf("stale source queued %d tasks", got)
+	}
+}
+
+type transferPauseIssueLoadStarter struct {
+	pool            *pgxpool.Pool
+	loaded, release chan struct{}
+}
+
+func (s transferPauseIssueLoadStarter) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &transferPauseIssueLoadTx{Tx: tx, loaded: s.loaded, release: s.release}, nil
+}
+
+type transferPauseIssueLoadTx struct {
+	pgx.Tx
+	loaded, release chan struct{}
+	paused          bool
+}
+
+func (tx *transferPauseIssueLoadTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	row := tx.Tx.QueryRow(ctx, sql, args...)
+	if !tx.paused && strings.HasPrefix(sql, "-- name: GetIssueInWorkspace :one") {
+		tx.paused = true
+		return transferPauseIssueLoadRow{Row: row, ctx: ctx, loaded: tx.loaded, release: tx.release}
+	}
+	return row
+}
+
+type transferPauseIssueLoadRow struct {
+	pgx.Row
+	ctx             context.Context
+	loaded, release chan struct{}
+}
+
+func (row transferPauseIssueLoadRow) Scan(out ...any) error {
+	if err := row.Row.Scan(out...); err != nil {
+		return err
+	}
+	close(row.loaded)
+	select {
+	case <-row.release:
+		return nil
+	case <-row.ctx.Done():
+		return row.ctx.Err()
+	}
+}
+
+func TestIssueTransferInfoFlowRebindRace(t *testing.T) {
+	requireInfoFlowTransferSchema(t)
+	f := newTransferFixture(t)
+	binding, _, agent := infoFlowTransferBinding(t, f, "group")
+	dbfx.Exec(t, `UPDATE infoflow_issue_binding SET issue_id=NULL,binder_id=NULL WHERE id=$1`, binding)
+	var robot, conversation string
+	dbfx.QueryRow(t, `SELECT robot_id,conversation_id FROM infoflow_issue_binding WHERE id=$1`, binding).Scan(&robot, &conversation)
+	sender := "rebind-sender-" + uuid.NewString()
+	user := dbfx.User(t, "Rebind sender", sender+"@example.test")
+	dbfx.Member(t, uuidToString(f.source), user, "admin")
+	token := "rebind-fixture-" + uuid.NewString()
+	t.Setenv("INFOFLOW_ISSUE_RELAY_TOKEN", token)
+	t.Setenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN", "example.test")
+	p, err := f.run(issueTransferRequest{}, false)
+	if err != nil || len(p.Blockers) != 0 {
+		t.Fatalf("unbound preview: %+v %v", p, err)
+	}
+	loaded, release := make(chan struct{}), make(chan struct{})
+	h := *testHandler
+	h.TxStarter = transferPauseIssueLoadStarter{testPool, loaded, release}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r := newRequest("POST", "/api/integrations/infoflow/issue-relay", map[string]any{
+		"robot_id": robot, "workspace_id": uuidToString(f.source), "agent_id": agent,
+		"conversation": map[string]string{"kind": "group", "id": conversation},
+		"sender":       sender, "message_id": "racing-bind", "operation": "bind", "issue_ref": uuidToString(f.issue),
+	}).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { defer close(done); h.InfoFlowIssueRelay(w, r) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	select {
+	case <-loaded:
+	case <-done:
+		t.Fatalf("bind returned before the issue-read barrier: %d %s", w.Code, w.Body.String())
+	case <-ctx.Done():
+		t.Fatal("bind did not reach the issue-read barrier")
+	}
+	_, moveErr := f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+	close(release)
+	<-done
+	if moveErr != nil {
+		// Pinning the source issue before reading it is also safe: transfer's
+		// NOWAIT fence refuses the move and the bind stays in its workspace.
+		var lockErr *pgconn.PgError
+		if !errors.As(moveErr, &lockErr) || lockErr.Code != "55P03" {
+			t.Fatalf("unexpected transfer failure: %v", moveErr)
+		}
+		return
+	}
+	var result infoFlowRelayResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 200 || !result.Handled || result.Binding != nil {
+		t.Fatalf("stale rebind response: %d %s %v", w.Code, w.Body.String(), err)
+	}
+	if got := dbfx.Count(t, `SELECT count(*) FROM infoflow_issue_binding WHERE id=$1 AND issue_id IS NOT NULL`, binding); got != 0 {
+		t.Fatal("bind reactivated the old-workspace route after transfer committed")
+	}
+	if got := dbfx.Count(t, `SELECT count(*) FROM infoflow_issue_source WHERE binding_id=$1`, binding); got != 0 {
+		t.Fatalf("bind wrote %d stale source receipts after transfer committed", got)
 	}
 }

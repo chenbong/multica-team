@@ -4,6 +4,7 @@ import { Bridge } from "./bridge.js";
 import { ReviewNotifications } from "./review-notifications.js";
 import { acknowledge } from "./reactions.js";
 import { VerificationCodeRelay } from "./codes.js";
+import { parseConversationBlocks, messageIdString, conversationContext } from "./conversation-context.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5000;
@@ -352,6 +353,7 @@ function robotConfig(base, robot) {
   return {
     robotId: robot.id,
     reviewNotifications: true,
+    issueRelay: base.issueRelay,
     multica: {
       ...base.multica,
       // Each robot dispatches as its own Multica account, and links point at
@@ -372,37 +374,10 @@ function robotConfig(base, robot) {
 }
 
 export function parseGroupBlocks(blocks) {
-  const images = [];
-  const parts = [];
-
-  for (const block of Array.isArray(blocks) ? blocks : []) {
-    const type = String(block?.type ?? "").toUpperCase();
-
-    if (type === "IMAGE") {
-      images.push(block);
-      continue;
-    }
-
-    if (type === "REPLYDATA" || type === "REPLY" || type === "QUOTE") {
-      if (Array.isArray(block.replyImages)) images.push(...block.replyImages.filter(Boolean));
-    }
-
-    if (type === "AT") continue;
-
-    if (type === "LINK") {
-      parts.push(block.label ?? block.url ?? block.href ?? "");
-      continue;
-    }
-
-    parts.push(block.content ?? block.text ?? "");
-  }
-
-  return {
-    text: parts.filter(Boolean).join(" ").trim(),
-    images,
-  };
+  const { text, images } = parseConversationBlocks(blocks);
+  return { text, images };
 }
-function registerHandlers({ wsClient, client, bridge, robot, logger }) {
+export function registerHandlers({ wsClient, client, bridge, robot, logger }) {
   for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
@@ -427,7 +402,8 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
         user,
         text: body,
         images,
-        messageId: raw.MsgId ?? raw.msgId,
+        messageId: messageIdString(raw.MsgId ?? raw.msgId),
+        context: conversationContext({ conversation: { kind: "private", id: user }, sender: user }),
         acknowledge: () => acknowledge(client, raw, "private", robot.appId, logger),
       });
     });
@@ -440,12 +416,12 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
       // copies every message in the group and would turn small talk into runs.
       if (raw.eventtype && raw.eventtype !== "MESSAGE_RECEIVE") return;
 
-      const groupId = raw.groupid ?? raw.groupId;
+      const groupId = messageIdString(raw.groupid ?? raw.groupId);
       const header = raw.message?.header ?? {};
       const user = header.fromuserid ?? raw.fromuserid;
       const blocks = Array.isArray(raw.message?.body) ? raw.message.body : [];
       const mentionsRobot = blocks.some((block) => String(block?.type ?? "").toUpperCase() === "AT" && (block.robotid !== undefined || block.name));
-      const parsed = parseGroupBlocks(blocks);
+      const parsed = parseConversationBlocks(blocks);
       const text = parsed.text || (parsed.images.length > 0 ? "（图片消息，详见附件）" : "");
 
       if (!groupId || !user || text === "" || !mentionsRobot) return;
@@ -455,7 +431,9 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
         user,
         text,
         images: parsed.images,
-        messageId: header.messageid ?? raw.messageid,
+        messageId: messageIdString(header.messageid ?? raw.messageid),
+        replyToMessageId: parsed.replyToMessageId,
+        context: conversationContext({ conversation: { kind: "group", id: groupId }, sender: user, mentions: parsed.mentions }),
         acknowledge: () => acknowledge(client, raw, "group", robot.appId, logger),
       });
     });

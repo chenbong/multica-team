@@ -1,0 +1,675 @@
+package handler
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/dbid"
+)
+
+type infoFlowConversation struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+type infoFlowScope struct {
+	RobotID     string `json:"robot_id"`
+	AgentID     string `json:"agent_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+type infoFlowRelayRequest struct {
+	infoFlowScope
+	Conversation     infoFlowConversation `json:"conversation"`
+	Sender           string               `json:"sender"`
+	MessageID        string               `json:"message_id"`
+	Operation        string               `json:"operation"`
+	Command          string               `json:"command,omitempty"`
+	IssueRef         string               `json:"issue_ref,omitempty"`
+	Content          string               `json:"content,omitempty"`
+	ReplyToMessageID string               `json:"reply_to_message_id,omitempty"`
+	HasAttachments   bool                 `json:"has_attachments,omitempty"`
+	Attachments      []infoFlowAttachment `json:"attachments,omitempty"`
+}
+
+type infoFlowBindingView struct {
+	IssueID       string `json:"issue_id"`
+	Identifier    string `json:"identifier"`
+	WorkspaceSlug string `json:"workspace_slug"`
+	Title         string `json:"title,omitempty"`
+	Generation    string `json:"generation"`
+}
+
+type infoFlowRelayResponse struct {
+	Handled    bool                 `json:"handled"`
+	Silent     bool                 `json:"silent"`
+	CanComment bool                 `json:"can_comment"`
+	Notice     string               `json:"notice,omitempty"`
+	Binding    *infoFlowBindingView `json:"binding,omitempty"`
+	CommentID  string               `json:"comment_id,omitempty"`
+}
+
+type infoFlowBinding struct {
+	ID         pgtype.UUID
+	IssueID    pgtype.UUID
+	BinderID   pgtype.UUID
+	Generation pgtype.UUID
+	BoundAt    time.Time
+}
+
+var infoFlowUsername = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var infoFlowDomain = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$`)
+
+// This is deliberately independent of ordinary Auth and its identity headers.
+func infoFlowAuthenticate(w http.ResponseWriter, r *http.Request) bool {
+	for _, key := range []string{"X-User-ID", "X-User-Email", "X-Agent-ID", "X-Task-ID", "X-Actor-Source", "X-Workspace-ID"} {
+		r.Header.Del(key)
+	}
+	token := os.Getenv("INFOFLOW_ISSUE_RELAY_TOKEN")
+	domain := os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")
+	if len(token) < 32 || len(domain) > 253 || !infoFlowDomain.MatchString(domain) {
+		infoFlowError(w, http.StatusServiceUnavailable, "issue relay unavailable")
+		return false
+	}
+	value := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	expected, actual := sha256.Sum256([]byte(token)), sha256.Sum256([]byte(value))
+	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare(expected[:], actual[:]) != 1 {
+		infoFlowError(w, http.StatusUnauthorized, "unauthorized")
+		return false
+	}
+	return true
+}
+
+func infoFlowError(w http.ResponseWriter, status int, _ string) {
+	// Credentials, invalid input and storage errors never become Chat input or
+	// expose an upstream handler body, SQL error, or partially created object.
+	writeJSON(w, status, infoFlowRelayResponse{Handled: true, Silent: true})
+}
+
+func infoFlowDecode(w http.ResponseWriter, r *http.Request, out any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 29<<20)
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(out); err != nil {
+		infoFlowError(w, http.StatusBadRequest, "invalid request")
+		return false
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		infoFlowError(w, http.StatusBadRequest, "invalid request")
+		return false
+	}
+	return true
+}
+
+func (s infoFlowScope) valid() bool {
+	_, ae := util.ParseUUID(s.AgentID)
+	_, we := util.ParseUUID(s.WorkspaceID)
+	return ae == nil && we == nil && s.RobotID != "" && len(s.RobotID) <= 256 && !strings.ContainsRune(s.RobotID, 0)
+}
+
+func (s infoFlowScope) lockKey(c infoFlowConversation) string {
+	b, _ := json.Marshal([]string{s.RobotID, strings.ToLower(s.WorkspaceID), strings.ToLower(s.AgentID), c.Kind, c.ID})
+	return "infoflow-issue:" + string(b)
+}
+
+func infoFlowLock(ctx context.Context, tx pgx.Tx, s infoFlowScope, c infoFlowConversation) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, s.lockKey(c))
+	return err
+}
+
+func infoFlowLoadBinding(ctx context.Context, tx pgx.Tx, s infoFlowScope, c infoFlowConversation) (infoFlowBinding, error) {
+	var b infoFlowBinding
+	err := tx.QueryRow(ctx, `SELECT id,issue_id,binder_id,generation,bound_at FROM infoflow_issue_binding
+		WHERE robot_id=$1 AND workspace_id=$2 AND agent_id=$3 AND conversation_kind=$4 AND conversation_id=$5`,
+		s.RobotID, s.WorkspaceID, s.AgentID, c.Kind, c.ID).Scan(&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt)
+	return b, err
+}
+
+// Use a new request, not a cloned header map. No externally supplied actor,
+// originator, task, workspace, capability or authentication header can survive.
+func infoFlowMemberRequest(ctx context.Context, userID, workspaceID, issueID string, body []byte) *http.Request {
+	r, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/api/issues", bytes.NewReader(body))
+	r.Header.Set("X-User-ID", userID)
+	r.Header.Set("X-Workspace-ID", workspaceID)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Client-Capabilities", ClientCapabilityStableAttachmentURLs)
+	rc := chi.NewRouteContext()
+	rc.URLParams.Add("id", issueID)
+	ctx = context.WithValue(ctx, chi.RouteCtxKey, rc)
+	ctx = context.WithValue(ctx, wakeupActorKey{}, wakeupActor{kind: "member", id: userID})
+	return r.WithContext(ctx)
+}
+
+type infoFlowCapture struct {
+	header http.Header
+	bytes.Buffer
+	status int
+}
+
+func (c *infoFlowCapture) Header() http.Header {
+	if c.header == nil {
+		c.header = make(http.Header)
+	}
+	return c.header
+}
+func (c *infoFlowCapture) WriteHeader(s int) {
+	if c.status == 0 {
+		c.status = s
+	}
+}
+func (c *infoFlowCapture) Write(p []byte) (int, error) {
+	if c.status == 0 {
+		c.status = 200
+	}
+	if c.Len()+len(p) > 1<<20 {
+		return 0, errors.New("relay handler response too large")
+	}
+	return c.Buffer.Write(p)
+}
+
+// Nested Begin calls create real savepoints. The outer transaction owns the
+// comment/issue, tasks, receipts and source mapping. No event listener or daemon
+// can see a write until that outer transaction commits.
+func (h *Handler) infoFlowScoped(tx pgx.Tx) (*Handler, func()) {
+	tx = &infoFlowSavepointTx{Tx: tx}
+	clone := *h
+	clone.Queries, clone.DB, clone.TxStarter = h.Queries.WithTx(tx), tx, tx
+	clone.ReadSelector, clone.MembershipCache = nil, nil
+	clone.IssueStatusCatalog = clone.Queries
+	bus := events.New()
+	var pending []events.Event
+	bus.SubscribeAll(func(e events.Event) { pending = append(pending, e) })
+	clone.Bus = bus
+	wakeup := &infoFlowWakeups{}
+	ts := service.NewTaskService(clone.Queries, tx, h.Hub, bus, wakeup)
+	if h.TaskService != nil {
+		ts.Entitlements = h.TaskService.Entitlements
+		ts.FeatureFlags = h.TaskService.FeatureFlags
+		ts.Composio = h.TaskService.Composio
+	}
+	clone.TaskService = ts
+	clone.IssueService = service.NewIssueService(clone.Queries, tx, bus, nil, ts)
+	clone.IssueService.Entitlements = h.Entitlements
+	return &clone, func() {
+		if h.Bus != nil {
+			for _, e := range pending {
+				h.Bus.Publish(e)
+			}
+		}
+		if h.TaskService != nil {
+			for _, v := range wakeup.pending {
+				h.TaskService.EmptyClaim.Bump(context.Background(), v[0])
+				if h.TaskService.Wakeup != nil {
+					h.TaskService.Wakeup.NotifyTaskAvailable(v[0], v[1])
+				}
+			}
+		}
+	}
+}
+
+type infoFlowWakeups struct{ pending [][2]string }
+
+func (w *infoFlowWakeups) NotifyTaskAvailable(runtimeID, taskID string) {
+	w.pending = append(w.pending, [2]string{runtimeID, taskID})
+}
+
+func (h *Handler) infoFlowIdentity(ctx context.Context, sender, workspaceID string) (db.User, string, error) {
+	// Platform users are established by the platform's verified-email login.
+	// The relay never provisions accounts or accepts a caller-provided user id.
+	user, err := h.Queries.GetUserByEmail(ctx, strings.ToLower(sender+"@"+os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")))
+	if err != nil {
+		return db.User{}, "", err
+	}
+	if auth.IsTemporarilyDisabledUser(uuidToString(user.ID), user.Email) {
+		return db.User{}, "", pgx.ErrNoRows
+	}
+	var role string
+	err = h.DB.QueryRow(ctx, `SELECT role FROM member WHERE user_id=$1 AND workspace_id=$2 FOR SHARE`, user.ID, workspaceID).Scan(&role)
+	return user, role, err
+}
+
+func (h *Handler) infoFlowBindingView(ctx context.Context, b infoFlowBinding, wsID string, full bool) *infoFlowBindingView {
+	if !b.IssueID.Valid {
+		return nil
+	}
+	var out infoFlowBindingView
+	var title string
+	err := h.DB.QueryRow(ctx, `SELECT i.id::text,w.issue_prefix || '-' || i.number::text,w.slug,i.title
+		FROM issue i JOIN workspace w ON w.id=i.workspace_id WHERE i.id=$1 AND i.workspace_id=$2`, b.IssueID, wsID).Scan(&out.IssueID, &out.Identifier, &out.WorkspaceSlug, &title)
+	if err != nil {
+		return nil
+	}
+	out.Generation = uuidToString(b.Generation)
+	if full {
+		out.Title = title
+	}
+	return &out
+}
+
+func (h *Handler) infoFlowOwner(ctx context.Context, wsID string, agent *db.Agent) string {
+	var name string
+	var err error
+	if agent != nil {
+		err = h.DB.QueryRow(ctx, `SELECT COALESCE(NULLIF(name,''),email) FROM "user" WHERE id=$1`, agent.OwnerID).Scan(&name)
+	} else {
+		err = h.DB.QueryRow(ctx, `SELECT COALESCE(NULLIF(u.name,''),u.email) FROM member m JOIN "user" u ON u.id=m.user_id WHERE m.workspace_id=$1 AND m.role='owner' ORDER BY m.id LIMIT 1`, wsID).Scan(&name)
+	}
+	if err != nil || name == "" {
+		if agent != nil {
+			return "智能体 owner"
+		}
+		return "工作区 owner"
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '[' || r == ']' {
+			return ' '
+		}
+		return r
+	}, name)
+}
+
+// InfoFlowIssueRelay is the server-authoritative bridge admission boundary.
+func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
+	if !infoFlowAuthenticate(w, r) {
+		return
+	}
+	var req infoFlowRelayRequest
+	if !infoFlowDecode(w, r, &req) {
+		return
+	}
+	if !req.infoFlowScope.valid() || !infoFlowUsername.MatchString(req.Sender) || req.Conversation.ID == "" || len(req.Conversation.ID) > 256 || strings.ContainsRune(req.Conversation.ID, 0) ||
+		(req.Conversation.Kind != "private" && req.Conversation.Kind != "group") || (req.Conversation.Kind == "private" && req.Conversation.ID != req.Sender) || len(req.MessageID) > 256 || strings.ContainsRune(req.MessageID, 0) || len(req.Content) > 65536 || len(req.ReplyToMessageID) > 256 {
+		infoFlowError(w, 400, "invalid request")
+		return
+	}
+	switch req.Operation {
+	case "message", "bind", "unbind", "create":
+		if req.MessageID == "" {
+			infoFlowError(w, 400, "missing message id")
+			return
+		}
+	case "binding":
+	default:
+		infoFlowError(w, 400, "invalid operation")
+		return
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		infoFlowError(w, 500, "begin")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err = infoFlowLock(r.Context(), tx, req.infoFlowScope, req.Conversation); err != nil {
+		infoFlowError(w, 500, "lock")
+		return
+	}
+	sh, flush := h.infoFlowScoped(tx)
+	b, err := infoFlowLoadBinding(r.Context(), tx, req.infoFlowScope, req.Conversation)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		infoFlowError(w, 500, "binding")
+		return
+	}
+	// Lock the agent before its grants, matching owner updates. Revocation of
+	// either permission_mode or an existing target waits for the accepted write.
+	var lockedAgent pgtype.UUID
+	err = tx.QueryRow(r.Context(), `SELECT id FROM agent WHERE id=$1 AND workspace_id=$2 FOR SHARE`, req.AgentID, req.WorkspaceID).Scan(&lockedAgent)
+	if err != nil {
+		infoFlowError(w, 409, "agent unavailable")
+		return
+	}
+	grantRows, err := tx.Query(r.Context(), `SELECT target_type,target_id FROM agent_invocation_target WHERE agent_id=$1 ORDER BY target_type,target_id FOR SHARE`, req.AgentID)
+	if err != nil {
+		infoFlowError(w, 500, "agent permission")
+		return
+	}
+	for grantRows.Next() {
+	}
+	err = grantRows.Err()
+	grantRows.Close()
+	if err != nil {
+		infoFlowError(w, 500, "agent permission")
+		return
+	}
+	agent, err := sh.Queries.GetAgent(r.Context(), parseUUID(req.AgentID))
+	if err != nil || uuidToString(agent.WorkspaceID) != strings.ToLower(req.WorkspaceID) || agent.ArchivedAt.Valid {
+		infoFlowError(w, 409, "agent unavailable")
+		return
+	}
+	// Workspace permissions govern bound issue traffic, not the legacy Chat
+	// path. Inspect receipt existence before this bypass: an accepted message
+	// retried after unbind must remain relay-owned even after membership loss.
+	createPreflight := req.Operation == "binding" && req.Command == "create"
+	var acceptedBeforeUnbind bool
+	if !b.IssueID.Valid && !createPreflight && (req.Operation == "message" || req.Operation == "binding") {
+		if b.ID.Valid && req.MessageID != "" {
+			err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_source WHERE binding_id=$1 AND message_id=$2)`, b.ID, req.MessageID).Scan(&acceptedBeforeUnbind)
+			if err != nil {
+				infoFlowError(w, 500, "receipt")
+				return
+			}
+			var echo bool
+			err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_delivery WHERE binding_id=$1 AND (external_message_id=$2 OR $2=ANY(external_message_ids)))`, b.ID, req.MessageID).Scan(&echo)
+			if err != nil {
+				infoFlowError(w, 500, "echo")
+				return
+			}
+			if echo {
+				writeJSON(w, 200, infoFlowRelayResponse{Handled: true, Silent: true})
+				return
+			}
+		}
+		if !acceptedBeforeUnbind {
+			out := infoFlowRelayResponse{}
+			if req.Operation == "binding" && req.Command != "" {
+				out.Handled = true
+				out.Notice = "当前会话没有绑定任务"
+			}
+			writeJSON(w, 200, out)
+			return
+		}
+	}
+	user, role, identityErr := sh.infoFlowIdentity(r.Context(), req.Sender, req.WorkspaceID)
+	resp := infoFlowRelayResponse{Handled: true, CanComment: identityErr == nil}
+	resp.Binding = sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, identityErr == nil)
+	if identityErr != nil {
+		if !errors.Is(identityErr, pgx.ErrNoRows) {
+			infoFlowError(w, 500, "identity")
+			return
+		}
+		resp.Notice = "没有工作区权限，无法评论，请向[" + sh.infoFlowOwner(r.Context(), req.WorkspaceID, nil) + "]申请工作区权限"
+		writeJSON(w, 200, resp)
+		return
+	}
+	r.Header.Set("X-User-ID", uuidToString(user.ID))
+	r.Header.Set("X-User-Email", user.Email)
+	canManage := uuidToString(agent.OwnerID) == uuidToString(user.ID) || role == "owner" || role == "admin" || (b.BinderID.Valid && b.BinderID == user.ID)
+	if createPreflight {
+		// Read-only media admission for /create, including unbound sessions.
+		// CanComment here means media may be downloaded for the create request;
+		// the actual mutation repeats all gates under its own transaction.
+		if !canManage {
+			resp.CanComment = false
+			resp.Notice = "只有智能体所有者、工作区管理员或当前绑定人可以修改任务绑定"
+		} else if !sh.canInvokeAgent(r.Context(), agent, "member", uuidToString(user.ID), "", req.WorkspaceID) {
+			resp.CanComment = false
+			resp.Notice = "没有智能体权限，无法创建并调用任务，请向[" + sh.infoFlowOwner(r.Context(), req.WorkspaceID, &agent) + "]申请智能体权限"
+		}
+		writeJSON(w, 200, resp)
+		return
+	}
+	if b.IssueID.Valid && resp.Binding == nil && req.Operation != "unbind" && req.Operation != "bind" && req.Operation != "create" {
+		resp.Notice = "任务绑定已失效，请重新绑定任务"
+		resp.CanComment = false
+		writeJSON(w, 200, resp)
+		return
+	}
+	if req.Operation == "binding" {
+		if !b.IssueID.Valid {
+			// This is a preflight for an already accepted input, not a new
+			// unbound Chat message. Do not redownload media or fall through.
+			resp.Handled, resp.Silent, resp.CanComment = true, true, false
+		}
+		writeJSON(w, 200, resp)
+		return
+	}
+	// Cached mutation responses are read only AFTER the current identity gate.
+	raw, _ := json.Marshal(req)
+	hash := sha256.Sum256(raw)
+	fingerprint := hex.EncodeToString(hash[:])
+	if b.ID.Valid {
+		var savedHash, savedSender string
+		var saved []byte
+		err = tx.QueryRow(r.Context(), `SELECT request_hash,sender,response FROM infoflow_issue_source WHERE binding_id=$1 AND message_id=$2`, b.ID, req.MessageID).Scan(&savedHash, &savedSender, &saved)
+		if err == nil {
+			if savedHash != fingerprint || savedSender != req.Sender {
+				infoFlowError(w, 409, "message conflict")
+				return
+			}
+			var cached infoFlowRelayResponse
+			if json.Unmarshal(saved, &cached) != nil {
+				infoFlowError(w, 500, "receipt")
+				return
+			}
+			// Do not replay old binding metadata after a switch or removal.
+			if resp.Binding != nil {
+				cached.Binding = resp.Binding
+			}
+			cached.CanComment = true
+			writeJSON(w, 200, cached)
+			return
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			infoFlowError(w, 500, "receipt")
+			return
+		}
+	}
+	if req.Operation != "message" && !canManage {
+		resp.Notice = "只有智能体所有者、工作区管理员或当前绑定人可以修改任务绑定"
+		writeJSON(w, 200, resp)
+		return
+	}
+	canInvoke := sh.canInvokeAgent(r.Context(), agent, "member", uuidToString(user.ID), "", req.WorkspaceID)
+	if req.Operation == "create" && !canInvoke {
+		resp.Notice = "没有智能体权限，无法创建并调用任务，请向[" + sh.infoFlowOwner(r.Context(), req.WorkspaceID, &agent) + "]申请智能体权限"
+		writeJSON(w, 200, resp)
+		return
+	}
+	if req.HasAttachments && len(req.Attachments) == 0 {
+		infoFlowError(w, 400, "attachment bytes required")
+		return
+	}
+	if len(req.Attachments) > 0 && req.Operation != "message" && req.Operation != "create" {
+		infoFlowError(w, 400, "attachments require message/create")
+		return
+	}
+	if !b.ID.Valid {
+		b.ID, b.Generation = dbid.NewV7(), dbid.NewV7()
+		_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_binding(id,robot_id,workspace_id,agent_id,conversation_kind,conversation_id,generation) VALUES($1,$2,$3,$4,$5,$6,$7)`, b.ID, req.RobotID, req.WorkspaceID, req.AgentID, req.Conversation.Kind, req.Conversation.ID, b.Generation)
+		if err != nil {
+			infoFlowError(w, 500, "binding")
+			return
+		}
+	}
+	// Acked output echoes must never create another human comment or task.
+	var echo bool
+	err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_delivery WHERE binding_id=$1 AND (external_message_id=$2 OR $2=ANY(external_message_ids)))`, b.ID, req.MessageID).Scan(&echo)
+	if err != nil {
+		infoFlowError(w, 500, "echo")
+		return
+	}
+	if echo {
+		writeJSON(w, 200, infoFlowRelayResponse{Handled: true, Silent: true})
+		return
+	}
+	var commentID, taskID pgtype.UUID
+	previousBindingView := resp.Binding
+	var uploads []string
+	committed := false
+	defer func() {
+		if !committed && len(uploads) > 0 {
+			sh.deleteS3Objects(context.WithoutCancel(r.Context()), uploads)
+		}
+	}()
+	memberReq := infoFlowMemberRequest(r.Context(), uuidToString(user.ID), req.WorkspaceID, "", nil)
+	switch req.Operation {
+	case "bind":
+		capture := &infoFlowCapture{}
+		issue, ok := sh.loadIssueForUser(capture, memberReq, req.IssueRef)
+		if !ok {
+			resp.Notice = "未找到该工作区中的任务，请检查任务编号后重新绑定"
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		// Fence issue transfer/deletion through the binding commit. The loader
+		// alone is a snapshot and can succeed just before a transfer commits.
+		var live pgtype.UUID
+		if err = tx.QueryRow(r.Context(), `SELECT id FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, issue.ID, req.WorkspaceID).Scan(&live); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				resp.Notice = "任务已移出该工作区，请重新选择任务"
+				writeJSON(w, 200, resp)
+			} else {
+				infoFlowError(w, 500, "issue lock")
+			}
+			return
+		}
+		if b.IssueID != issue.ID {
+			b.Generation = dbid.NewV7()
+		}
+		b.IssueID = issue.ID
+		b.BinderID = user.ID
+		resp.Notice = "已绑定任务"
+	case "unbind":
+		b.IssueID = pgtype.UUID{}
+		b.Generation = dbid.NewV7()
+		b.BinderID = pgtype.UUID{}
+		resp.Notice = "已解除任务绑定"
+	case "message", "create":
+		content := strings.TrimSpace(sanitizeNullBytes(req.Content))
+		// Strip external structured actor references. Only the configured agent
+		// gets a server-authored mention; arbitrary member/squad/all mentions are
+		// inert text and cannot cause notifications or agent dispatch.
+		content = util.MentionRe.ReplaceAllString(content, "$1")
+		if content == "" && len(req.Attachments) > 0 {
+			content = "[附件]"
+		}
+		if content == "" {
+			resp.Notice = "请输入任务内容"
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		attachmentIDs, urls, uploadErr := sh.infoFlowUploadAttachments(memberReq, req.Attachments, b.IssueID, req.Operation == "create")
+		uploads = append(uploads, urls...)
+		if uploadErr != nil {
+			infoFlowError(w, 400, "upload failed")
+			return
+		}
+		capture := &infoFlowCapture{}
+		if req.Operation == "create" {
+			title := strings.SplitN(content, "\n", 2)[0]
+			if len([]rune(title)) > 200 {
+				title = string([]rune(title)[:200])
+			}
+			body, _ := json.Marshal(map[string]any{"title": title, "description": content, "assignee_type": "agent", "assignee_id": req.AgentID, "attachment_ids": attachmentIDs})
+			sh.CreateIssue(capture, infoFlowMemberRequest(r.Context(), uuidToString(user.ID), req.WorkspaceID, "", body))
+			if capture.status != 201 {
+				if capture.status >= 400 && capture.status < 500 {
+					resp.Notice = "无法创建任务，请检查任务内容、重复任务和智能体配置"
+					writeJSON(w, http.StatusOK, resp)
+				} else {
+					infoFlowError(w, http.StatusInternalServerError, "create failed")
+				}
+				return
+			}
+			var out IssueResponse
+			if json.Unmarshal(capture.Bytes(), &out) != nil {
+				infoFlowError(w, 500, "create response")
+				return
+			}
+			b.IssueID = parseUUID(out.ID)
+			b.Generation = dbid.NewV7()
+			b.BinderID = user.ID
+			err = tx.QueryRow(r.Context(), `SELECT id FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2 ORDER BY created_at DESC,id DESC LIMIT 1`, b.IssueID, agent.ID).Scan(&taskID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				infoFlowError(w, 500, "task origin")
+				return
+			}
+			resp.Notice = "已创建并绑定任务"
+		} else {
+			parent, err := sh.infoFlowQuote(r.Context(), b, req.ReplyToMessageID)
+			if err != nil {
+				infoFlowError(w, 409, "unknown or stale reply")
+				return
+			}
+			body := map[string]any{"content": fmt.Sprintf("[@Agent](mention://agent/%s)\n\n%s", req.AgentID, content), "attachment_ids": attachmentIDs}
+			// A concurrent NEW grant must not change the already-returned
+			// no-invoke decision into a run during the handler's second check.
+			if !canInvoke {
+				body["suppress_agent_ids"] = []string{req.AgentID}
+			}
+			if parent.Valid {
+				body["parent_id"] = uuidToString(parent)
+			}
+			encoded, _ := json.Marshal(body)
+			sh.CreateComment(capture, infoFlowMemberRequest(r.Context(), uuidToString(user.ID), req.WorkspaceID, uuidToString(b.IssueID), encoded))
+			if capture.status != 201 {
+				if capture.status >= 400 && capture.status < 500 {
+					resp.Notice = "无法新增评论，请检查任务绑定后重试"
+					writeJSON(w, http.StatusOK, resp)
+				} else {
+					infoFlowError(w, http.StatusInternalServerError, "comment failed")
+				}
+				return
+			}
+			var out CommentResponse
+			if json.Unmarshal(capture.Bytes(), &out) != nil {
+				infoFlowError(w, 500, "comment response")
+				return
+			}
+			commentID = parseUUID(out.ID)
+			resp.CommentID = out.ID
+			if !canInvoke {
+				resp.Notice = "没有智能体权限，当前仅新增评论，但无法调用智能体，请向[" + sh.infoFlowOwner(r.Context(), req.WorkspaceID, &agent) + "]申请智能体权限"
+			}
+		}
+	}
+	if req.Operation != "message" {
+		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation)
+		if err != nil {
+			infoFlowError(w, 500, "binding update")
+			return
+		}
+	}
+	resp.Binding = sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, true)
+	if req.Operation == "unbind" {
+		resp.Binding = previousBindingView
+	}
+	encoded, _ := json.Marshal(resp)
+	_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_source(id,binding_id,generation,message_id,sender,user_id,request_hash,issue_id,comment_id,task_id,response) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, dbid.NewV7(), b.ID, b.Generation, req.MessageID, req.Sender, user.ID, fingerprint, b.IssueID, commentID, taskID, encoded)
+	if err != nil {
+		infoFlowError(w, 500, "source mapping")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		infoFlowError(w, 500, "commit")
+		return
+	}
+	committed = true
+	flush()
+	writeJSON(w, 200, resp)
+}
+
+func (h *Handler) infoFlowQuote(ctx context.Context, b infoFlowBinding, messageID string) (pgtype.UUID, error) {
+	if messageID == "" {
+		return pgtype.UUID{}, nil
+	}
+	var id pgtype.UUID
+	err := h.DB.QueryRow(ctx, `SELECT comment_id FROM infoflow_issue_source WHERE binding_id=$1 AND generation=$2 AND message_id=$3 AND issue_id=$4 AND comment_id IS NOT NULL
+		UNION ALL SELECT d.comment_id FROM infoflow_issue_delivery d JOIN comment c ON c.id=d.comment_id WHERE d.binding_id=$1 AND d.generation=$2 AND (d.external_message_id=$3 OR $3=ANY(d.external_message_ids)) AND c.issue_id=$4 LIMIT 1`, b.ID, b.Generation, messageID, b.IssueID).Scan(&id)
+	// A quote of a pre-binding/external message remains a top-level comment;
+	// no caller-supplied identifier is ever treated as a platform comment id.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return pgtype.UUID{}, nil
+	}
+	return id, err
+}
