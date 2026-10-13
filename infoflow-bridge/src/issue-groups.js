@@ -17,30 +17,64 @@ export function exactGroupId(value) {
   return id;
 }
 
+function groupAPIRejected(code, message) {
+  const error = new Error("group API rejected request");
+  // Classify only the documented/observed structured denial. Do not infer
+  // membership from arbitrary SDK exception text or expose raw error payloads.
+  if (code === 40000 && message === "机器人未在群成员列表中") error.groupReason = "inviter_not_in_group";
+  return error;
+}
+
 function apiEnvelope(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid group API response");
   if (value.code !== undefined && value.code !== "ok" && value.code !== 0) throw new Error("group API rejected request");
   const outerCode = value.errcode;
-  if (outerCode !== undefined && ![0, 201].includes(outerCode)) throw new Error("group API rejected request");
+  if (outerCode !== undefined && ![0, 201].includes(outerCode)) throw groupAPIRejected(outerCode, value.errmsg);
   const nested = value.data;
-  if (nested?.errcode !== undefined && ![0, 201].includes(nested.errcode)) throw new Error("group API rejected request");
+  if (nested?.errcode !== undefined && ![0, 201].includes(nested.errcode)) throw groupAPIRejected(nested.errcode, nested.errmsg);
   const code = outerCode === 201 || nested?.errcode === 201 ? 201 :
     nested?.errcode ?? outerCode ?? (value.code === "ok" || value.code === 0 ? 0 : undefined);
   if (code === undefined) throw new Error("invalid group API result code");
   return { code, data: nested?.data ?? nested };
 }
 
-export async function groupMembers(client, groupId) {
+export function groupUsername(value) {
+  // Official memberList uses userInfoList[].userId (corporate account), not
+  // display names or arbitrary browser-provided e-mail/identity aliases.
+  if (typeof value !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value)) {
+    throw new Error("invalid group member account");
+  }
+  return value.toLowerCase();
+}
+
+export function validatedRoster(roster) {
+  if (!Array.isArray(roster?.bots) || !Array.isArray(roster?.members) ||
+      roster.bots.length > 5000 || roster.members.length > 5000) throw new Error("invalid group roster");
+  const bots = roster.bots.map(bot => ({ appId: exactGroupId(bot?.appId),
+    imId: bot?.imId == null ? null : exactGroupId(bot.imId) }));
+  const members = roster.members.map(groupUsername);
+  if (new Set(bots.map(bot => bot.appId)).size !== bots.length || new Set(members).size !== members.length) {
+    throw new Error("duplicate group member identity");
+  }
+  return { bots, members };
+}
+
+export async function groupRoster(client, groupId) {
   const id = exactGroupId(groupId);
   const result = apiEnvelope(await client.httpClient.post("/robot/group/memberList", `{"groupId":${id},"recallType":0}`, { disableRetry: true }));
   if (result.code !== 0 || !Array.isArray(result.data?.agentInfoList) || !Array.isArray(result.data?.userInfoList)) {
     throw new Error("group membership could not be verified");
   }
-  return result.data.agentInfoList.map(agent => ({
+  return validatedRoster({ bots: result.data.agentInfoList.map(agent => ({
     // agentId is the InfoFlow application ID. imId is a DIFFERENT identifier.
     appId: exactGroupId(agent?.agentId),
     imId: agent?.imId == null ? null : exactGroupId(agent.imId),
-  }));
+  })), members: result.data.userInfoList.map(user => user?.userId) });
+}
+
+export async function groupMembers(client, groupId) {
+  // Preserve the existing bot-array contract for outgoing task routing.
+  return (await groupRoster(client, groupId)).bots;
 }
 
 export async function inviteGroupLeader(client, groupId, appId) {
@@ -74,10 +108,13 @@ export function botOrigin(raw) {
 // A single process-wide coordinator is shared by every robot. Configuration
 // mappings include offline robots: transport failure is NOT evidence of absence.
 export class IssueGroups {
-  constructor({ entries, statePath, now = Date.now, members = groupMembers, invite = inviteGroupLeader }) {
+  constructor({ entries, statePath, now = Date.now, members = groupMembers, roster = groupRoster, invite = inviteGroupLeader,
+    candidateRobotIds = () => [] }) {
     this.entries = entries;
+    this.candidateRobotIds = candidateRobotIds;
     this.now = now;
     this.members = members;
+    this.roster = roster;
     this.invite = invite;
     this.path = statePath + ".issue-group-invites.json";
     this.deliveryPath = statePath + ".issue-group-deliveries.json";
@@ -86,6 +123,8 @@ export class IssueGroups {
     this.locks = new Map();
     this.deliveryLocks = new Map();
     this.robotSenders = new Set();
+    this.discoveryAttempts = new Map();
+    this.webJobLocks = new Map();
     try { this.attempts = JSON.parse(readFileSync(this.path, "utf8")); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
     try { this.deliveries = JSON.parse(readFileSync(this.deliveryPath, "utf8")); }
@@ -93,6 +132,31 @@ export class IssueGroups {
   }
 
   isBot(raw, user) { return botOrigin(raw) || this.robotSenders.has(String(user)); }
+
+  async observeGroup(scope, robot, groupId, publish) {
+    if (!robot?.client || robot.robotId !== scope.robot_id) throw new Error("invalid discovery caller");
+    const id = exactGroupId(groupId), appId = exactGroupId(robot.appId);
+    const key = JSON.stringify([scope.workspace_id, scope.robot_id, id]);
+    if ((this.discoveryAttempts.get(key) ?? -Infinity) + 60000 > this.now()) return;
+    // Set before I/O to coalesce simultaneous genuine events. No member data or
+    // message-supplied names are retained in this bounded discovery cache.
+    this.discoveryAttempts.delete(key);
+    this.discoveryAttempts.set(key, this.now());
+    if (this.discoveryAttempts.size > 1000) this.discoveryAttempts.delete(this.discoveryAttempts.keys().next().value);
+    const roster = validatedRoster(await this.roster(robot.client, id));
+    if (!roster.bots.some(bot => bot.appId === appId)) throw new Error("discovery robot is not in group");
+    this.rememberBots(roster.bots);
+    await publish({ ...scope, group_id: id, name: "", members: roster.members });
+  }
+
+  async webJobLock(workspaceId, action) {
+    // Other robot timers in this workspace skip rather than queue stale polls.
+    if (this.webJobLocks.has(workspaceId)) return;
+    const pending = Promise.resolve().then(action);
+    this.webJobLocks.set(workspaceId, pending);
+    try { return await pending; }
+    finally { if (this.webJobLocks.get(workspaceId) === pending) this.webJobLocks.delete(workspaceId); }
+  }
 
   async owns(scope, binding) {
     const leaderId = binding?.group?.leader_agent_id;
@@ -142,6 +206,10 @@ export class IssueGroups {
       }
       this.rememberBots(members);
       if (!members.some(member => member.appId === String(leader.appId)) && invite) {
+        // A queryable member list alone does not prove the chosen inviter is
+        // itself in the group. Recheck its own transport before any mutation.
+        members = await this.members(caller.client, conversation.id);
+        if (!members.some(member => member.appId === String(caller.appId))) return { ...result, reason: "inviter_not_in_group" };
         const reason = await this.maybeInvite(caller, leader, conversation, binding);
         // An accepted invitation can mean admin approval, partial failure, or
         // delayed membership. Only a fresh member list may activate the binding.

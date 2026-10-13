@@ -5,6 +5,7 @@ import { basename, extname } from "node:path";
 import { issueRequest } from "./chat.js";
 import { messageIdString } from "./conversation-context.js";
 import { withReplyMode, noticeReplyMode } from "./reply-format.js";
+import { pollWebGroupJobs } from "./web-group-bindings.js";
 
 const DEFERRED_BINDING = Symbol("deferred-binding");
 
@@ -37,10 +38,44 @@ export class IssueRelay {
       catch (error) { if (error.code !== "ENOENT") throw error; }
       this.timer = setInterval(() => void this.poll(), config.pollIntervalMs || 5000);
       this.timer.unref?.();
+      if (this.groups) {
+        // Web admission has its own timer: slow membership/invitation calls
+        // must not delay established group leases, input retries or deliveries.
+        this.webJobTimer = setInterval(() => void this.pollWebBindings(), config.pollIntervalMs || 5000);
+        this.webJobTimer.unref?.();
+      }
     }
   }
 
-  stop() { this.stopped = true; clearInterval(this.timer); }
+  stop() {
+    this.stopped = true;
+    clearInterval(this.timer); clearInterval(this.webJobTimer);
+    this.timer = null; this.webJobTimer = null;
+  }
+
+  async pollWebBindings() {
+    if (!this.enabled || this.stopped || !this.groups || this.webPolling) return;
+    this.webPolling = true;
+    try {
+      const scope = await this.scope();
+      if (!this.stopped) await pollWebGroupJobs(this, scope);
+    } catch { if (!this.stopped) this.logger.warn("web group binding pending"); }
+    finally { this.webPolling = false; }
+  }
+
+  async observeGroupEvent({ groupId, appId, client }) {
+    if (!this.enabled || this.stopped || !this.groups) return;
+    try {
+      const scope = await this.scope();
+      if (this.stopped) return;
+      await this.groups.observeGroup(scope, { robotId: this.config.robotId, appId, client }, groupId,
+        async body => {
+          if (this.stopped) return;
+          const response = await this.request("infoflow-group-observation", body);
+          if (response.ok !== true) throw new Error("invalid group observation result");
+        });
+    } catch { this.logger.warn("group discovery pending; existing messages are unaffected"); }
+  }
 
   async scope() {
     const agentRef = String(this.config.multica.defaultAgent || "");
@@ -382,10 +417,11 @@ export class IssueRelay {
         leader_robot_unavailable: "负责人机器人不可用，请先启用或恢复连接。",
         membership_check_failed: "无法确认群成员，请检查获取群成员列表的 API 权限或网络。",
         approval_pending: "入群申请等待群管理员审批。",
-        invitation_failed: "邀请负责人机器人失败，请检查添加群成员的 API 权限，或手动邀请入群。",
+        invitation_failed: "邀请负责人机器人失败，请检查目标机器人的群可见范围与群聊开关，以及邀请机器人的添加群成员 API 权限，或手动邀请入群。",
         invitation_pending: "入群请求结果待确认，请检查群成员或管理员审批。",
         membership_unconfirmed: "已提交入群请求，尚未确认负责人机器人已入群。",
         leader_not_in_group: "负责人机器人不在群中，请先邀请入群。",
+        inviter_not_in_group: "当前群内没有可用的平台机器人，请先手动邀请机器人入群。",
       };
       if (reasons[observation.reason]) response.notice = `${response.notice || "群聊任务绑定尚未启用"}\n${reasons[observation.reason]}`;
     }

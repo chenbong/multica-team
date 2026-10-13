@@ -22,6 +22,11 @@ export class RobotRuntime {
     this.issueGroups = config.issueRelay?.enabled ? new IssueGroups({
       statePath: config.statePath,
       entries: (workspaceId, agentIds, options) => this.groupRobotEntries(workspaceId, agentIds, options),
+      // IDs only: each candidate is resolved separately under its own account.
+      // An unrelated legacy name must not break discovery for all other robots.
+      candidateRobotIds: workspaceId => this.config.robots.filter(robot => robot.enabled &&
+        robot.purpose !== "verification" && (robot.workspaceId || this.config.multica.workspaceId) === workspaceId)
+        .map(robot => robot.id),
     }) : null;
     this.relay = null;
     this.reviewNotifications = new ReviewNotifications(this);
@@ -426,6 +431,12 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
   for (const event of ["group.text", "group.markdown", "group.mixed", "group.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
+      const observedGroupId = raw.groupid ?? raw.groupId;
+      // Discovery originates ONLY in an SDK group event. Run independently so
+      // failed permissions/network cannot block Chat or existing task messages.
+      if (observedGroupId != null) void bridge.issueRelay?.observeGroupEvent?.({
+        groupId: observedGroupId, appId: robot.appId, client,
+      });
       // MESSAGE_RECEIVE is the @robot / slash-command delivery. ALL_MESSAGE_FORWARD
       // copies every message in the group and would turn small talk into runs.
       if (raw.eventtype && raw.eventtype !== "MESSAGE_RECEIVE") return;

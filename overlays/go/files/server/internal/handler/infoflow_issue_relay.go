@@ -738,6 +738,15 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var elsewhere bool
+			if pending, e := infoFlowWebReserved(r.Context(), tx, issue.ID); e != nil {
+				infoFlowError(w, 500, "web binding reservation")
+				return
+			} else if pending {
+				resp.CanComment, resp.Binding = false, nil
+				resp.Notice = "网页群聊绑定正在确认，请等待完成后再使用群内绑定指令"
+				writeJSON(w, 200, resp)
+				return
+			}
 			if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind='group' AND issue_id=$1 AND id<>$2)`, issue.ID, b.ID).Scan(&elsewhere); err != nil {
 				infoFlowError(w, 500, "issue claim")
 				return

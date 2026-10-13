@@ -143,6 +143,29 @@ class FrontendPatches(unittest.TestCase):
             self.assertTrue(copy["transfer"]["warning"])
             self.assertTrue(copy["transfer"]["block_unknown"])
 
+    def test_issue_group_binding_wiring_and_translations(self):
+        self.apply()
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        self.assertIn("async getIssueInfoFlowGroupBinding", client)
+        self.assertIn("async bindIssueInfoFlowGroup", client)
+        self.assertIn("InfoFlowGroupBindingSchema, null", client)
+        self.assertIn("InfoFlowGroupTargetSchema.safeParse(target)", client)
+        self.assertIn("async getIssueInfoFlowGroups", client)
+        detail = (self.target / "packages/views/issues/components/issue-detail.tsx").read_text()
+        self.assertIn("<IssueInfoFlowGroupBinding", detail)
+        self.assertNotIn("<IssueInfoFlowGroups ", detail)
+        fixture = (self.target / "packages/views/issues/components/issue-detail.test.tsx").read_text()
+        self.assertIn("getIssueInfoFlowGroupBinding: vi.fn()", fixture)
+        exports = json.loads((self.target / "packages/core/package.json").read_text())["exports"]
+        self.assertEqual(exports["./issues/infoflow-group-binding"], "./issues/infoflow-group-binding.ts")
+        self.assertEqual(exports["./issues/infoflow-groups"], "./issues/infoflow-groups.ts")
+        copies = [json.loads((self.target / f"packages/views/locales/{locale}/issues.json").read_text())["infoflow_groups"]
+                  for locale in ("en", "zh-Hans")]
+        self.assertEqual(set(copies[0]), set(copies[1]))
+        for copy in copies:
+            for key in ("bind", "warning", "waiting", "approval", "failed", "retry", "invalid", "read_failed", "open"):
+                self.assertTrue(copy[key])
+
     def test_brand_is_checked_idempotent_and_keeps_bot_identity(self):
         self.apply()
         command = ["node", str(ROOT / "deploy/apply-brand.cjs"), str(self.target)]

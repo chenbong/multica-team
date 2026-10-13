@@ -142,6 +142,10 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 	if err = tx.QueryRow(ctx, `SELECT to_regclass('infoflow_issue_binding') IS NOT NULL`).Scan(&hasInfoFlowBindings); err != nil {
 		return nil, err
 	}
+	var hasInfoFlowWebRequests bool
+	if err = tx.QueryRow(ctx, `SELECT to_regclass('infoflow_web_group_request') IS NOT NULL`).Scan(&hasInfoFlowWebRequests); err != nil {
+		return nil, err
+	}
 	if apply {
 		if _, err = tx.Exec(ctx, `SELECT id FROM workspace WHERE id IN ($1,$2) ORDER BY id FOR UPDATE NOWAIT`, source, target); err != nil {
 			return nil, err
@@ -163,6 +167,11 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 			// Include relay association writes in the existing transfer fence.
 			// Source/delivery receipts remain immutable historical records.
 			if _, err = tx.Exec(ctx, `LOCK TABLE infoflow_issue_binding IN SHARE ROW EXCLUSIVE MODE NOWAIT`); err != nil {
+				return nil, err
+			}
+		}
+		if hasInfoFlowWebRequests {
+			if _, err = tx.Exec(ctx, `LOCK TABLE infoflow_web_group_request IN SHARE ROW EXCLUSIVE MODE NOWAIT`); err != nil {
 				return nil, err
 			}
 		}
@@ -263,6 +272,9 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 		// Check the resolved issue ID across all bindings, including an already
 		// stale workspace scope. Unbound source/delivery history is not a route.
 		checks = append(checks, struct{ code, sql string }{"infoflow_binding", `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE issue_id=$1)`})
+	}
+	if hasInfoFlowWebRequests {
+		checks = append(checks, struct{ code, sql string }{"infoflow_pending_binding", `SELECT EXISTS(SELECT 1 FROM infoflow_web_group_request WHERE issue_id=$1 AND state IN ('queued','pending') AND expires_at>clock_timestamp())`})
 	}
 	for _, c := range checks {
 		var blocked bool

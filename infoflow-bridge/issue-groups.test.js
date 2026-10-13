@@ -224,15 +224,35 @@ test("denied bind cannot invite and retains the original permission notice", asy
   assert.equal(f.state.requests.filter(r => r.path === "issue-group-status").length, 0);
 });
 
+test("partial invitation failure explains target visibility, group switch and caller API permission", async t => {
+  const f = fixture(t); f.state.members = ["202"]; f.state.inviteResult = "invitation_failed";
+  await f.input(f.make("b"));
+  assert.equal(f.state.binding.group.state, "pending");
+  assert.match(f.state.sent[0].content, /目标机器人的群可见范围与群聊开关/);
+  assert.match(f.state.sent[0].content, /邀请机器人的添加群成员 API 权限/);
+  assert.doesNotMatch(f.state.sent[0].content, /绑定已启用|supportAuth/);
+});
+
 test("invitation backoff and three-attempt budget survive coordinator restoration", async t => {
-  const f = fixture(t); f.state.members = [];
-  const scope = { robot_id: "a", agent_id: A, workspace_id: "workspace" };
-  for (let i = 0; i < 5; i++) await f.groups.inspect(scope, conversation, f.state.binding, { invite: true });
+  const f = fixture(t); f.state.members = ["202"];
+  const scope = { robot_id: "b", agent_id: B, workspace_id: "workspace" };
+  const options = { invite: true, bootstrap: true };
+  for (let i = 0; i < 5; i++) await f.groups.inspect(scope, conversation, f.state.binding, options);
   assert.equal(f.state.invitations.length, 1);
-  f.restoreGroups(); await f.groups.inspect(scope, conversation, f.state.binding, { invite: true });
+  f.restoreGroups(); await f.groups.inspect(scope, conversation, f.state.binding, options);
   assert.equal(f.state.invitations.length, 1);
-  for (let i = 0; i < 5; i++) { f.state.now += 5000000; await f.groups.inspect(scope, conversation, f.state.binding, { invite: true }); }
+  for (let i = 0; i < 5; i++) { f.state.now += 5000000; await f.groups.inspect(scope, conversation, f.state.binding, options); }
   assert.equal(f.state.invitations.length, 3);
+});
+
+test("an outside bootstrap or background robot cannot invite despite a queryable member list", async t => {
+  const f = fixture(t); f.state.members = [];
+  for (const [robot_id, agent_id, bootstrap] of [["a", A, false], ["b", B, true]]) {
+    const observed = await f.groups.inspect({ robot_id, agent_id, workspace_id: "workspace" }, conversation, f.state.binding, { invite: true, bootstrap });
+    assert.equal(observed.leader_present, false);
+    assert.equal(observed.reason, "inviter_not_in_group");
+  }
+  assert.deepEqual(f.state.invitations, []);
 });
 
 test("missing, duplicate, unavailable leaders and malformed membership fail closed", async t => {

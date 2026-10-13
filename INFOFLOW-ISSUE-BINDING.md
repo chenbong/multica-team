@@ -158,6 +158,60 @@ allowed action from a validated ID instead of trusting arbitrary response URLs.
 Launching requires the user's InfoFlow client and browser permission. Actual
 desktop/mobile protocol launch is a separate manual acceptance check.
 
+## Bind an existing group from the issue page
+
+Authorized human users see **Bind InfoFlow group / 绑定如流群聊** in the issue
+header. Choose an observed group or enter its exact decimal group number.
+Invitation links and arbitrary URLs are not accepted. The picker chooses the
+initial destination; an issue still has at most one group and no multi-group
+switcher. Unbind the current group before selecting another.
+
+The candidate list is limited to the current workspace and to groups whose
+freshly observed member list includes the caller's verified corporate account.
+Observations originate from real SDK group events, not message text or browser
+claims. They are only discovery hints: every binding attempt rechecks both the
+requesting human and the inviting robot against the official member list.
+Manual group numbers also work before any discovery event, by probing available
+configured workspace robots individually. A robot outside the group never
+invites itself through this flow. If no platform robot is present, add one
+manually first.
+
+The requester must remain a workspace member and a leader/assigned-agent owner,
+workspace owner/admin, or current binder. Machine task/cloud credentials cannot
+use the browser endpoints. The browser receives neither a robot secret nor a
+service credential. Normal human-authenticated routes are:
+
+- `GET /api/issues/{id}/infoflow-group-binding`: current binding, authorized
+  candidate groups, and pending request status.
+- `POST /api/issues/{id}/infoflow-group-binding` with `{group_id: "123456"}`:
+  accept a verification request, not a completed binding.
+
+The API stores a twenty-minute pending request and reserves the issue from a
+competing IM bind. The Bridge claims one ninety-second lease, verifies the real
+group, and automatically invites missing configured leader/member robots.
+Waiting for administrator approval, invitation failure, or an uncertain member
+list never means success. It rereads the members after invitations; only the
+required leader or directly assigned agent must be present to activate the
+binding. Optional squad-member invitation failures do not block a verified
+leader, and existing leader-delegation rules still apply.
+
+Open the group to everyone only when that is the desired robot visibility
+policy; otherwise include the selected group in the robot's visible range.
+The inviting robot needs the **Add group members** API permission; member
+verification needs **Get group members**. A successful API envelope with a
+nonempty `failAgentIds` is a failed invitation, not successful membership.
+Check the target robot's group visibility and group-chat switch on failure.
+Whether an inviter needs administrator approval follows the group's IM policy;
+the final member read remains authoritative in every case.
+
+The page polls pending status every five seconds and exposes an open-group link
+only for an active, recently verified binding. Repeated same-group submissions
+do not reset persisted invitation budgets. Stale leases, revoked workspace or
+binding permissions, reassigned issues, and old results after unbind fail closed.
+Agent display-name changes do not change an ID-based pending generation. This
+workflow creates no comment or agent run. Group replies remain visible to every
+member of the group, as in command-based binding.
+
 With no binding, ordinary messages keep using Chat. With a binding, messages
 addressed to the robot become comments under the actual sender's platform
 identity. Unrelated group messages are not ingested. Other slash commands show
@@ -261,7 +315,7 @@ deduplication records.
 
 ## Reliability and storage
 
-Team migrations **477–497** create separate binding, source-receipt and delivery
+Team migrations **477–503** create separate binding, source-receipt and delivery
 tables plus indexes. Migrations 491–497 change uniqueness from group-scoped to
 issue-scoped and retain private-scope uniqueness. Conflicting older data is
 rejected instead of silently deleted. Rollback refuses multi-task group data
@@ -274,6 +328,12 @@ Use `bash deploy/migrate-team.sh` (also used by `deploy/start.sh`) for normal
 upgrades/replays. Once the new issue-unique index is valid, it skips the retired
 479/488/489/490 guards instead of recreating the old one-task-per-group indexes.
 An invalid transition index stops the runner and requires explicit repair.
+Migrations 498–503 add observed-group metadata and leased browser requests with
+independent concurrent indexes. The highest-numbered downward guard refuses
+rollback with live requests before any admission index is removed. Finish or
+explicitly cancel requests after stopping intake before attempting rollback.
+Issue transfer also refuses a live pending browser request; failed or expired
+requests do not block it.
 
 Incoming changes and source receipts are atomic, serialized per conversation,
 and idempotent by external message ID. WebSocket retries cannot duplicate an
@@ -307,21 +367,27 @@ Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
 
-Local verification on 2026-10-13: 191 Bridge tests; 203 selected handler,
-permission, comment and transfer cases with the race detector; 13 real-router
+Local verification on 2026-10-13: 262 Bridge tests; 203 selected handler,
+permission, comment and transfer cases with the race detector; 14 real-router
 HTTP cases with the race detector; 17 isolated lifecycle/secret/gitignore and
-migration-runner tests; 156 frontend API/query/component regressions
-(including 29 group-entry cases); 10 existing legacy-browser compatibility
+migration-runner tests; 69 core API/query and 134 view/component regressions;
+10 existing legacy-browser compatibility
 tests; core/views type checks; production Web build; syntax checks, Go vet and a
 Linux/amd64 API build passed. No test was skipped in those runs. New migrations
-488–497 passed conflict refusal, down/up/down/up/repeat-up on a second isolated
+488–503 passed conflict refusal, guarded rollback, down/up/repeat-up on a second isolated
 database with no invalid indexes afterwards. The multi-task migration tests also
 run the actual deployment helper against a populated multi-task group and check
 that associations and private uniqueness survive replay. The earlier 477–487 migration
 round trip remains part of the previous PR verification. SQL overlay checks and
 upstream cleanliness checks also passed.
-These are synthetic/local checks, not live InfoFlow account or browser testing.
-No production process or client daemon was restarted.
+The independent issue-transfer HTTP regression also passed on its dedicated
+fixture database. Synthetic/default tests never send real IM messages. A separate
+user-authorized group test verified invitation by an in-group non-admin robot
+after the target's group visibility was corrected, followed by a fresh member
+read confirming it joined. The new web coordinator also verified real actor and
+required-robot membership in that group without binding any production issue or
+sending a chat message. Administrator-approval and AppLink launch still require
+separate manual acceptance. No production process or client daemon was restarted.
 
 Use synthetic users/messages, a disposable loopback PostgreSQL database and fake
 send functions. Never run an installed agent CLI or send to real IM recipients

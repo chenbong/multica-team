@@ -98,6 +98,81 @@ func TestInfoFlowGroupMigrationsRoundTrip(t *testing.T) {
 
 var infoFlowMultiMigrations = []string{"491_infoflow_one_group_preflight", "492_infoflow_issue_group_unique", "493_infoflow_private_scope", "494_infoflow_remove_robot_group_scope", "495_infoflow_remove_workspace_group_scope", "496_infoflow_remove_global_group_scope", "497_infoflow_multitask_rollback_guard"}
 
+func TestInfoFlowWebGroupMigrationsRoundTrip(t *testing.T) {
+	if os.Getenv("MULTICA_INFOFLOW_MIGRATION_TEST") != "1" {
+		t.Skip("opt-in isolated migration database")
+	}
+	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+	if err != nil || cfg.ConnConfig.Host != "127.0.0.1" || cfg.ConnConfig.Port != 55439 || cfg.ConnConfig.Database != "infoflow_binding_test" {
+		t.Fatal("requires isolated55439/infoflow_binding_test")
+	}
+	for _, fallback := range cfg.ConnConfig.Fallbacks {
+		if fallback.Host != "127.0.0.1" || fallback.Port != 55439 {
+			t.Fatal("unsafe fallback")
+		}
+	}
+	cfg.ConnConfig.Database = "infoflow_binding_migrations_test"
+	ctx := context.Background()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	names := []string{"498_infoflow_web_group_binding", "499_infoflow_web_group_issue", "500_infoflow_group_observation", "501_infoflow_web_group_poll", "502_infoflow_web_group_id", "503_infoflow_web_group_rollback_guard"}
+	run := func(name, direction string) error {
+		data, e := os.ReadFile(filepath.Join("..", "..", "..", "..", "migrations", name+"."+direction+".sql"))
+		if e != nil {
+			return e
+		}
+		_, e = pool.Exec(ctx, string(data))
+		return e
+	}
+	for _, name := range names {
+		if err = run(name, "up"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, issue, ws, actor := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	defer pool.Exec(ctx, `DELETE FROM infoflow_web_group_request WHERE id=$1`, id)
+	_, err = pool.Exec(ctx, `INSERT INTO infoflow_web_group_request(id,issue_id,workspace_id,group_id,requester_id,generation,topology,state,expires_at) VALUES($1,$2,$3,'543210',$4,$5,'{}','queued',clock_timestamp()+interval '10 minutes')`, id, issue, ws, actor, uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = run(names[len(names)-1], "down"); err == nil {
+		t.Fatal("rollback dropped pending request")
+	}
+	var kept int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_index WHERE indisvalid AND indrelid IN ('infoflow_web_group_request'::regclass,'infoflow_group_observation'::regclass)`).Scan(&kept); err != nil || kept != 4 {
+		t.Fatal("refused rollback removed admission indexes", kept, err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO infoflow_web_group_request(id,issue_id,workspace_id,group_id,requester_id,generation,topology,state,expires_at) VALUES($1,$2,$3,'543211',$4,$5,'{}','queued',clock_timestamp()+interval '10 minutes')`, uuid.NewString(), issue, ws, actor, uuid.NewString()); err == nil {
+		t.Fatal("duplicate issue request admitted")
+	}
+	_, err = pool.Exec(ctx, `DELETE FROM infoflow_web_group_request WHERE id=$1`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(names) - 1; i >= 0; i-- {
+		if err = run(names[i], "down"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		for _, name := range names {
+			if err = run(name, "up"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var invalid, fks int
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_index WHERE NOT indisvalid AND indrelid IN('infoflow_web_group_request'::regclass,'infoflow_group_observation'::regclass)`).Scan(&invalid); err != nil || invalid != 0 {
+		t.Fatal("invalid web group index", invalid, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM pg_constraint WHERE contype='f' AND conrelid IN('infoflow_web_group_request'::regclass,'infoflow_group_observation'::regclass)`).Scan(&fks); err != nil || fks != 0 {
+		t.Fatal("unexpected web binding FK", fks, err)
+	}
+}
+
 func TestInfoFlowMultiGroupMigrationsAndDeploymentReplay(t *testing.T) {
 	if os.Getenv("MULTICA_INFOFLOW_MIGRATION_TEST") != "1" {
 		t.Skip("opt-in isolated migration database")
