@@ -5753,14 +5753,14 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 	// so a since-reassigned issue can't be used to re-fire a private agent the
 	// operator may only view. A block fails closed: no prior task is cancelled,
 	// no new task is created.
-	if canInvoke != nil {
-		targetAgent, err := s.Queries.GetAgent(ctx, agentID)
-		if err != nil {
-			return nil, fmt.Errorf("load target agent: %w", err)
-		}
-		if !canInvoke(targetAgent) {
-			return nil, ErrRerunInvokeNotAllowed
-		}
+	targetAgent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("load target agent: %w", err)
+	}
+	// Historical runs survive workspace transfer, but are not invocation
+	// grants on their old host. Refuse before clearing any pending slot.
+	if targetAgent.WorkspaceID != issue.WorkspaceID || (canInvoke != nil && !canInvoke(targetAgent)) {
+		return nil, ErrRerunInvokeNotAllowed
 	}
 
 	// Clear only the tasks that have not begun executing. Those are the rows the

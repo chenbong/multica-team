@@ -81,6 +81,18 @@ class FrontendPatches(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.assertFalse((self.target / ".overlay-backup").exists())
 
+    def test_runtime_ownership_overlay_keeps_existing_page_features(self):
+        rel = "packages/views/runtimes/components/runtimes-page.tsx"
+        (self.target / rel).write_text((ROOT / "overlays/web-direct" / rel).read_text())
+        self.apply()
+        page = (self.target / rel).read_text()
+        self.assertIn("<DeleteMachineButton machine={machine}", page)
+        self.assertIn('role === "owner" || role === "admin"', page)
+        self.assertIn("checked={!showAllRuntimes}", page)
+        for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
+            labels = json.loads((self.target / f"packages/views/locales/{locale}/runtimes.json").read_text())
+            self.assertTrue(labels["page"]["only_mine"])
+
     def test_reapplication_does_not_clobber_changed_staging_files(self):
         self.apply()
         target = self.target / "apps/web/proxy.ts"
@@ -90,6 +102,22 @@ class FrontendPatches(unittest.TestCase):
             self.apply()
         self.assertEqual(before, self.snapshot())
 
+    def test_deployed_ui_simplifications_survive_rebuild(self):
+        self.apply()
+        sidebar = (self.target / "packages/views/layout/app-sidebar.tsx").read_text()
+        self.assertNotIn("JoinDiscordCard", sidebar)
+        footer = sidebar[sidebar.index("<SidebarFooter"):]
+        self.assertIn("<MobileControlLink />", footer)
+        self.assertIn("<HelpLauncher />", footer)
+        self.assertEqual(sidebar.count("<MobileControlLink />"), 1)
+        dashboard = (self.target / "packages/views/layout/dashboard-layout.tsx").read_text()
+        self.assertNotIn("SourceBackfillModal", dashboard)
+        self.assertIn("<ModalRegistry />", dashboard)
+        dialog = (self.target / "packages/views/runtimes/components/connect-remote-dialog.tsx").read_text()
+        self.assertIn('platforms={["macosLinux"]}', dialog)
+        installer = (self.target / "packages/views/common/cli-install-command.tsx").read_text()
+        self.assertIn("platforms = PLATFORMS", installer)
+
     def test_upstream_checkout_is_rejected(self):
         result = subprocess.run(
             ["python3", str(ROOT / "overlays/web-patch.py"), "apply"],
@@ -98,6 +126,22 @@ class FrontendPatches(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to patch a repository checkout", result.stderr)
+
+    def test_issue_transfer_wiring_is_complete(self):
+        self.apply()
+        menu = (self.target / "packages/views/issues/actions/issue-actions-dropdown.tsx").read_text()
+        self.assertIn('role === "owner" || role === "admin"', menu)
+        self.assertIn("<IssueTransferDialog", menu)
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        self.assertIn("/transfer-preview", client)
+        self.assertIn("IssueTransferPlanSchema", client)
+        events = (self.target / "packages/core/realtime/use-realtime-sync.ts").read_text()
+        self.assertIn('ws.on("issue:workspace_changed"', events)
+        self.assertIn("unsubIssueTransferred();", events)
+        for locale in ("en", "zh-Hans"):
+            copy = json.loads((self.target / f"packages/views/locales/{locale}/issues.json").read_text())
+            self.assertTrue(copy["transfer"]["warning"])
+            self.assertTrue(copy["transfer"]["block_unknown"])
 
     def test_brand_is_checked_idempotent_and_keeps_bot_identity(self):
         self.apply()
