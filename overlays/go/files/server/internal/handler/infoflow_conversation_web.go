@@ -1,11 +1,9 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"slices"
@@ -29,9 +27,11 @@ type infoFlowOwnPrivate struct {
 	Reason      string `json:"reason"`
 }
 type infoFlowPrivateWebRequestView struct {
-	RequestID string `json:"request_id"`
-	State     string `json:"state"`
-	Reason    string `json:"reason"`
+	RequestID  string `json:"request_id"`
+	State      string `json:"state"`
+	Reason     string `json:"reason"`
+	Generation string `json:"generation,omitempty"`
+	CanCancel  bool   `json:"can_cancel,omitempty"`
 }
 type infoFlowPrivateWebView struct {
 	Eligible  bool                           `json:"eligible"`
@@ -113,6 +113,24 @@ func (h *Handler) infoFlowConversationView(ctx context.Context, tx pgx.Tx, ws st
 	}
 	out.Group.CanManage, out.Group.Binding, out.Group.Request, out.Group.Groups = group.CanManage, group.Binding, group.Request, group.Groups
 	sh, _ := h.infoFlowScoped(tx)
+	var id, state, reason string
+	var expires time.Time
+	var generation pgtype.UUID
+	err = tx.QueryRow(ctx, `SELECT id::text,state,reason,expires_at,generation FROM infoflow_web_private_request WHERE issue_id=$1 AND workspace_id=$2 AND requester_id=$3`, issue, ws, user).Scan(&id, &state, &reason, &expires, &generation)
+	if err == nil && state != "active" {
+		canCancel := false
+		if infoFlowWebRequestPending(state, expires) {
+			canCancel, err = h.infoFlowCanCancelWebRequest(ctx, tx, infoFlowWebActor{ws, issue, user}, "private", user)
+			if err != nil {
+				return out, err
+			}
+		} else if state == "queued" || state == "pending" {
+			state, reason = "failed", "request_expired"
+		}
+		out.Private.Request = &infoFlowPrivateWebRequestView{RequestID: id, State: state, Reason: infoFlowPrivateWebReason(reason), Generation: uuidToString(generation), CanCancel: canCancel}
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return out, err
+	}
 	sender, err := sh.infoFlowWebSender(ctx, ws, user)
 	if err != nil {
 		return out, err
@@ -141,17 +159,6 @@ func (h *Handler) infoFlowConversationView(ctx context.Context, tx pgx.Tx, ws st
 	for _, row := range rows {
 		v := sh.infoFlowPrivateView(ctx, row.Binding, ws, row.Agent)
 		out.Private.Bindings = append(out.Private.Bindings, infoFlowOwnPrivate{BindingID: uuidToString(row.Binding.ID), RobotID: row.Robot, RobotName: row.Binding.RobotName, RobotChatID: row.Binding.RobotChatID, State: v.State, Reason: v.Reason})
-	}
-	var id, state, reason string
-	var expires time.Time
-	err = tx.QueryRow(ctx, `SELECT id::text,state,reason,expires_at FROM infoflow_web_private_request WHERE issue_id=$1 AND workspace_id=$2 AND requester_id=$3`, issue, ws, user).Scan(&id, &state, &reason, &expires)
-	if err == nil && state != "active" {
-		if (state == "queued" || state == "pending") && !expires.After(time.Now()) {
-			state, reason = "failed", "request_expired"
-		}
-		out.Private.Request = &infoFlowPrivateWebRequestView{RequestID: id, State: state, Reason: infoFlowPrivateWebReason(reason)}
-	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return out, err
 	}
 	return out, nil
 }
@@ -204,27 +211,45 @@ func (h *Handler) BindIssueInfoFlowConversation(w http.ResponseWriter, r *http.R
 		writeError(w, 400, "Invalid conversation target")
 		return
 	}
-	if req.Kind == "group" {
-		body, _ := json.Marshal(map[string]string{"group_id": groupID})
-		capture := &infoFlowCapture{}
-		request := r.Clone(r.Context())
-		request.Body = http.NoBody
-		request.Body = io.NopCloser(bytes.NewReader(body))
-		h.BindIssueInfoFlowGroup(capture, request)
-		if capture.status != 200 && capture.status != 202 {
-			w.WriteHeader(capture.status)
-			_, _ = w.Write(capture.Bytes())
-			return
-		}
-		view := &infoFlowCapture{}
-		h.GetIssueInfoFlowConversations(view, r)
-		w.Header().Set("Content-Type", "application/json")
-		if view.status != 200 {
-			w.WriteHeader(view.status)
-		} else {
-			w.WriteHeader(capture.status)
-		}
-		_, _ = w.Write(view.Bytes())
+	i, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	ws := uuidToString(i.WorkspaceID)
+	m, ok := h.requireWorkspaceMember(w, r, ws, "issue not found")
+	if !ok {
+		return
+	}
+	result, err := h.infoFlowSubmitWebBinding(r.Context(), infoFlowWebActor{ws, i.ID, m.UserID}, req.Kind, groupID, true)
+	if err != nil {
+		infoFlowWriteActionError(w, err)
+		return
+	}
+	writeJSON(w, result.Status, result.Conversations)
+}
+
+func (h *Handler) CancelIssueInfoFlowRequest(w http.ResponseWriter, r *http.Request) {
+	if isMachineCredentialActor(r) {
+		writeError(w, 403, "Only human actors can manage conversations")
+		return
+	}
+	var req struct {
+		Kind               string `json:"kind"`
+		ExpectedGeneration string `json:"expected_generation"`
+	}
+	if !infoFlowDecode(w, r, &req) {
+		return
+	}
+	if _, err := infoFlowWebRequestTable(req.Kind); err != nil {
+		infoFlowWriteActionError(w, err)
+		return
+	}
+	id, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "requestId"), "request_id")
+	if !ok {
+		return
+	}
+	generation, ok := parseUUIDOrBadRequest(w, req.ExpectedGeneration, "expected_generation")
+	if !ok {
 		return
 	}
 	i, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
@@ -240,92 +265,12 @@ func (h *Handler) BindIssueInfoFlowConversation(w http.ResponseWriter, r *http.R
 		writeError(w, 503, "InfoFlow conversations are not enabled")
 		return
 	}
-	tx, err := h.TxStarter.Begin(r.Context())
+	out, err := h.infoFlowCancelWebRequest(r.Context(), infoFlowWebActor{ws, i.ID, m.UserID}, req.Kind, id, generation)
 	if err != nil {
-		writeError(w, 500, "Failed to request private binding")
+		infoFlowWriteActionError(w, err)
 		return
 	}
-	defer tx.Rollback(r.Context())
-	if err = infoFlowPrivateWebLock(r.Context(), tx, i.ID, m.UserID); err != nil {
-		writeError(w, 500, "Failed to request private binding")
-		return
-	}
-	var live pgtype.UUID
-	if err = tx.QueryRow(r.Context(), `SELECT id FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, i.ID, ws).Scan(&live); err != nil {
-		writeError(w, 404, "issue not found")
-		return
-	}
-	sh, _ := h.infoFlowScoped(tx)
-	sender, err := sh.infoFlowWebSender(r.Context(), ws, m.UserID)
-	if err != nil || sender == "" {
-		writeError(w, 403, "Cannot verify private conversation identity")
-		return
-	}
-	rows, err := infoFlowOwnPrivateBindings(r.Context(), tx, ws, i.ID, m.UserID, sender)
-	if err != nil {
-		writeError(w, 500, "Failed to read private binding")
-		return
-	}
-	manager := infoFlowBinding{}
-	if len(rows) > 0 {
-		manager = rows[0].Binding
-	}
-	t, _, manage, err := sh.infoFlowWebAuthority(r.Context(), ws, i.ID, m.UserID, manager)
-	if err != nil {
-		writeError(w, 500, "Failed to verify assignment")
-		return
-	}
-	if t.AssigneeType != "agent" || t.LeaderAgentID == "" || !slices.Contains(t.AgentIDs, t.LeaderAgentID) {
-		writeError(w, 409, "Private conversations require a single assigned agent")
-		return
-	}
-	if !manage {
-		writeError(w, 403, "Insufficient binding management permissions")
-		return
-	}
-	status := 202
-	alreadyActive := false
-	for _, row := range rows {
-		if row.Agent == t.LeaderAgentID && row.Binding.RobotChatID != "" && sh.infoFlowPrivateView(r.Context(), row.Binding, ws, row.Agent).State == "active" {
-			alreadyActive = true
-		}
-	}
-	if alreadyActive {
-		status = 200
-	} else {
-		var state string
-		var expires time.Time
-		var originalVersion int64
-		err = tx.QueryRow(r.Context(), `SELECT state,expires_at,assignment_version FROM infoflow_web_private_request WHERE issue_id=$1 AND requester_id=$2 FOR UPDATE`, i.ID, m.UserID).Scan(&state, &expires, &originalVersion)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, 500, "Failed to read request")
-			return
-		}
-		if (state != "queued" && state != "pending") || !expires.After(time.Now()) || originalVersion != t.AssignmentVersion {
-			_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_web_private_request(id,issue_id,workspace_id,requester_id,sender,agent_id,assignment_version,generation,binding_snapshot,state,expires_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',clock_timestamp()+interval '20 minutes')
-			ON CONFLICT(issue_id,requester_id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id,sender=EXCLUDED.sender,agent_id=EXCLUDED.agent_id,assignment_version=EXCLUDED.assignment_version,generation=EXCLUDED.generation,binding_snapshot=EXCLUDED.binding_snapshot,state='queued',reason='',lease_token=NULL,lease_robot_id=NULL,lease_agent_id=NULL,lease_until=NULL,next_at=clock_timestamp(),expires_at=EXCLUDED.expires_at,updated_at=clock_timestamp()`, dbid.NewV7(), i.ID, ws, m.UserID, sender, t.LeaderAgentID, t.AssignmentVersion, dbid.NewV7(), infoFlowPrivateSnapshot(rows))
-			if err != nil {
-				writeError(w, 500, "Failed to request private binding")
-				return
-			}
-		}
-	}
-	out, err := h.infoFlowConversationView(r.Context(), tx, ws, i.ID, m.UserID)
-	if err != nil {
-		writeError(w, 500, "Failed to read conversations")
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, 500, "Failed to commit binding request")
-		return
-	}
-	writeJSON(w, status, out)
-}
-
-func infoFlowPrivateWebLock(ctx context.Context, tx pgx.Tx, issue, user pgtype.UUID) error {
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "infoflow-web-private:"+uuidToString(issue)+":"+uuidToString(user))
-	return err
+	writeJSON(w, 200, out)
 }
 
 func (h *Handler) DeleteIssueInfoFlowConversation(w http.ResponseWriter, r *http.Request) {
@@ -398,24 +343,25 @@ func (h *Handler) DeleteIssueInfoFlowConversation(w http.ResponseWriter, r *http
 		writeError(w, 500, "Failed to remove conversation")
 		return
 	}
-	if kind == "private" {
-		_, err = tx.Exec(r.Context(), `UPDATE infoflow_web_private_request SET state='failed',reason='binding_changed',generation=$3,lease_token=NULL,lease_until=NULL WHERE issue_id=$1 AND requester_id=$2 AND state IN('queued','pending')`, i.ID, m.UserID, dbid.NewV7())
-	} else {
-		_, err = tx.Exec(r.Context(), `UPDATE infoflow_web_group_request SET state='failed',reason='binding_changed',generation=$2,lease_token=NULL,lease_until=NULL WHERE issue_id=$1 AND state IN('queued','pending')`, i.ID, dbid.NewV7())
-	}
+	err = infoFlowInvalidateWebRequest(r.Context(), tx, kind, infoFlowWebActor{ws, i.ID, m.UserID}, "binding_changed")
 	if err != nil {
 		writeError(w, 500, "Failed to remove conversation request")
+		return
+	}
+	out, err := h.infoFlowConversationView(r.Context(), tx, ws, i.ID, m.UserID)
+	if err != nil {
+		infoFlowWriteActionError(w, err)
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "Failed to remove conversation")
 		return
 	}
-	h.GetIssueInfoFlowConversations(w, r)
+	writeJSON(w, 200, out)
 }
 
 func infoFlowPrivateWebReason(reason string) string {
-	return map[string]string{"": "等待确认负责智能体的私聊机器人", "active": "私聊绑定成功", "request_expired": "确认已超时，请重新提交", "permission_changed": "任务负责人或权限已变化，请重新绑定", "binding_changed": "私聊绑定已变化，请重新检查", "private_robot_missing_or_ambiguous": "负责人机器人未配置或有多个匹配，请确认唯一机器人", "private_robot_unavailable": "负责人的机器人暂不可用", "private_chat_disabled": "负责人机器人未开启私聊", "private_metadata_failed": "无法获取机器人对话信息，请稍后重试"}[reason]
+	return map[string]string{"": "等待确认负责智能体的私聊机器人", "active": "私聊绑定成功", "request_expired": "确认已超时，请重新提交", "permission_changed": "任务负责人或权限已变化，请重新绑定", "binding_changed": "私聊绑定已变化，请重新检查", "private_robot_missing_or_ambiguous": "负责人机器人未配置或有多个匹配，请确认唯一机器人", "private_robot_unavailable": "负责人的机器人暂不可用", "private_chat_disabled": "负责人机器人未开启私聊", "private_metadata_failed": "无法获取机器人对话信息，请稍后重试", infoFlowRequestCancelled: "申请已取消，可重新提交"}[reason]
 }
 
 func infoFlowAssignmentText(version int64) string { return strconv.FormatInt(version, 10) }

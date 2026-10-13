@@ -9,7 +9,7 @@ def extend(changes):
     add("packages/core/package.json", '    "./issues": "./issues/index.ts",',
         '    "./issues": "./issues/index.ts",\n    "./issues/infoflow-groups": "./issues/infoflow-groups.ts",\n    "./issues/infoflow-group-binding": "./issues/infoflow-group-binding.ts",\n    "./issues/infoflow-conversations": "./issues/infoflow-conversations.ts",')
     add("packages/core/api/client.ts", 'import { configStore } from "../config";',
-        'import { configStore } from "../config";\nimport { InfoFlowGroupsSchema, InfoFlowGroupBindingSchema, InfoFlowGroupTargetSchema, infoFlowGroupURL, infoFlowGroupBindingStatus, type InfoFlowGroup, type InfoFlowGroupBindingWire, type InfoFlowGroupBindingStatus, type InfoFlowGroupTarget } from "./infoflow-groups-schema";\nimport { InfoFlowConversationsSchema, InfoFlowConversationTargetSchema, InfoFlowConversationBindingIdSchema, infoFlowConversationsStatus, type InfoFlowConversationsWire, type InfoFlowConversationsStatus, type InfoFlowConversationTarget } from "./infoflow-conversations-schema";')
+        'import { configStore } from "../config";\nimport { InfoFlowGroupsSchema, InfoFlowGroupBindingSchema, InfoFlowGroupTargetSchema, infoFlowGroupURL, infoFlowGroupBindingStatus, type InfoFlowGroup, type InfoFlowGroupBindingWire, type InfoFlowGroupBindingStatus, type InfoFlowGroupTarget } from "./infoflow-groups-schema";\nimport { InfoFlowConversationsSchema, InfoFlowConversationTargetSchema, InfoFlowConversationBindingIdSchema, InfoFlowConversationRequestTargetSchema, infoFlowConversationsStatus, type InfoFlowConversationsWire, type InfoFlowConversationsStatus, type InfoFlowConversationTarget, type InfoFlowConversationRequestTarget } from "./infoflow-conversations-schema";')
     anchor = '  async moveIssue(id: string, data: MoveIssueRequest): Promise<Issue> {'
     add("packages/core/api/client.ts", anchor, '''  async getIssueInfoFlowGroups(id: string): Promise<InfoFlowGroup[]> {
     const result = parseWithFallback<{ groups: { group_id: string; name?: string; url: string }[] } | null>(
@@ -79,6 +79,19 @@ def extend(changes):
     return infoFlowConversationsStatus(result);
   }
 
+  async cancelIssueInfoFlowRequest(id: string, target: InfoFlowConversationRequestTarget): Promise<InfoFlowConversationsStatus> {
+    const input = InfoFlowConversationRequestTargetSchema.safeParse(target);
+    if (!input.success) throw new Error("Invalid InfoFlow conversation request target");
+    const { request_id, ...body } = input.data;
+    const result = parseWithFallback<InfoFlowConversationsWire | null>(
+      await this.fetch(`/api/issues/${encodeURIComponent(id)}/infoflow-conversation-requests/${encodeURIComponent(request_id)}`, {
+        method: "DELETE", body: JSON.stringify(body),
+      }), InfoFlowConversationsSchema, null, { endpoint: "DELETE /api/issues/:id/infoflow-conversation-requests/:requestId" },
+    );
+    if (!result) throw new Error("Invalid InfoFlow conversation status");
+    return infoFlowConversationsStatus(result);
+  }
+
 ''' + anchor)
     path = "packages/views/issues/components/issue-detail.tsx"
     add(path, 'import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";',
@@ -139,7 +152,9 @@ def extend(changes):
             "needs_rebind": "Rebinding required", "reassignment": "The task's assignee changed. Bind explicitly to the current assigned agent's robot.",
             "group_pending": "Rechecking the current task leader's group membership", "reserved": "This task reserves this group. Remove the binding before choosing a different group.",
             "rebind": "Rebind", "unbind": "Remove binding", "unbind_group": "Remove group binding", "unbind_private": "Remove private binding",
-            "no_manage": "You cannot manage this conversation's binding.", "failed": "Unable to update the conversation binding"},
+            "no_manage": "You cannot create or rebind this conversation.", "failed": "Unable to update the conversation binding",
+            "cancel_request": "Cancel request", "cancel_group": "Cancel group request", "cancel_private": "Cancel private request",
+            "cancel_group_note": "Cancellation stops binding confirmation, but does not withdraw group invitations already sent."},
         "zh-Hans": {"bind": "绑定如流对话", "description": "任务可同时关联群聊和你自己的私聊。",
             "kind": "对话类型", "group": "群聊", "private": "我的私聊", "my_private": "我与任务负责智能体的机器人",
             "private_routing": "同一私聊可关联多个任务。出现多个候选时，请引用任务消息或注明任务编号。",
@@ -152,7 +167,9 @@ def extend(changes):
             "needs_rebind": "需要重新绑定", "reassignment": "任务负责人已变化，请重新绑定当前负责智能体的机器人。",
             "group_pending": "正在重新确认当前队长或负责智能体的入群状态", "reserved": "此任务已预留这个群。如需更换，请先解除绑定。",
             "rebind": "重新绑定", "unbind": "解除绑定", "unbind_group": "解除群聊绑定", "unbind_private": "解除私聊绑定",
-            "no_manage": "你没有管理此对话绑定的权限。", "failed": "无法更新对话绑定"},
+            "no_manage": "你没有新增或重新绑定此对话的权限。", "failed": "无法更新对话绑定",
+            "cancel_request": "取消申请", "cancel_group": "取消群聊申请", "cancel_private": "取消私聊申请",
+            "cancel_group_note": "取消后不会启用绑定，但已发出的入群邀请不会撤回。"},
     }
     for locale, copy in conversation_labels.items():
         add(f"packages/views/locales/{locale}/issues.json", '  "inline_run":',

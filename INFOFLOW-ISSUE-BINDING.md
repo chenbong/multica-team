@@ -178,6 +178,30 @@ delete another user's private conversation through these endpoints.
   robot credential, browser-selected user or agent identity.
 - `DELETE /api/issues/{id}/infoflow-conversations/{bindingId}`: remove one exact
   association, preserving other tasks and immutable source/delivery history.
+- `DELETE /api/issues/{id}/infoflow-conversation-requests/{requestId}` with
+  `{kind: "group"|"private", expected_generation: "<UUID>"}`: cancel a pending
+  request, without removing any existing binding. The API returns the public
+  request generation and explicit cancellation permission; no lease token is
+  exposed. Closing the dialog is not cancellation.
+
+Both pending tabs offer **Cancel request / 取消申请**, including before a binding
+exists. The requester can cancel their own request after losing assignment or
+binding eligibility while still a workspace member. Group managers may cancel
+permitted group requests; even admins cannot cancel another user's private
+request. Cancellation releases the reserved group and permits another target.
+It does not withdraw invitations already submitted to InfoFlow, and it does not
+terminate running agent work. A confirmation that commits first must instead
+be removed using the existing binding action.
+
+All explicit IM/web binding changes and cancellation use the same transactional
+invalidation: rotate the admission generation, clear all lease fields and mark
+pending requests terminal. This also fences an empty -> IM bound -> IM unbound
+sequence; merely comparing the final active-binding snapshot was insufficient.
+An old tab cannot cancel a newer submission, and a replayed old IM receipt does
+not override a newer explicit web request. A repeated cancellation of an already
+cancelled request is a no-op. Source-write failure rolls back invalidation too.
+Legacy group and unified HTTP routes share the same binding business functions
+and transaction; handlers do not record/call one another's HTTP responses.
 
 For a private request the server derives the caller's corporate sender, current
 single-agent assignee and assignment version. A separate ninety-second Bridge
@@ -428,6 +452,15 @@ inspection, not blindly resubmitted as a second agent task. Already persisted
 Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
+
+Cancellation hardening on 2026-10-14 adds regression coverage for private
+bind/unbind ABA, cancellation before a binding exists, changing a wrong group
+target, stale tabs and late callbacks, lost binding eligibility, private/admin
+isolation, unchanged existing bindings, rollback and old receipt replay. The
+real authenticated HTTP router covers both request kinds. Concurrent cancel
+and confirmation are exercised behind a shared admission lock and repeated
+with race detection. No new database migrations or daemon changes are required
+for this hardening; it remains part of the undeployed PR.
 
 Unified conversation verification on 2026-10-14: 311 local Bridge tests (293 in
 the public fake-only suite), 129 core and 145 view/component tests, 155 selected

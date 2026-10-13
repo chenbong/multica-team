@@ -164,7 +164,7 @@ func (h *Handler) InfoFlowWebPrivateResult(w http.ResponseWriter, r *http.Reques
 	if !infoFlowDecode(w, r, &req) {
 		return
 	}
-	if !req.infoFlowScope.valid() || !h.infoFlowWebScope(r.Context(), req.infoFlowScope) || len(req.TargetRobotID) > 256 || strings.ContainsRune(req.TargetRobotID, 0) || len(req.RobotName) > 256 || strings.ContainsAny(req.RobotName, "\x00\r\n") || infoFlowPrivateWebReason(req.Reason) == "" || req.Reason == "active" || req.Reason == "binding_changed" || req.Reason == "permission_changed" || req.Reason == "request_expired" {
+	if !req.infoFlowScope.valid() || !h.infoFlowWebScope(r.Context(), req.infoFlowScope) || len(req.TargetRobotID) > 256 || strings.ContainsRune(req.TargetRobotID, 0) || len(req.RobotName) > 256 || strings.ContainsAny(req.RobotName, "\x00\r\n") || infoFlowPrivateWebReason(req.Reason) == "" || req.Reason == "active" || req.Reason == "binding_changed" || req.Reason == "permission_changed" || req.Reason == "request_expired" || req.Reason == infoFlowRequestCancelled {
 		infoFlowError(w, 400, "result")
 		return
 	}
@@ -216,7 +216,7 @@ func (h *Handler) InfoFlowWebPrivateResult(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	j, err = infoFlowScanPrivateJob(tx.QueryRow(r.Context(), `SELECT `+infoFlowPrivateJobColumns+` FROM infoflow_web_private_request WHERE id=$1 FOR UPDATE`, id))
-	if err != nil || j.Generation != gen || j.LeaseToken != lease || j.LeaseRobot != req.RobotID || uuidToString(j.LeaseAgent) != strings.ToLower(req.AgentID) || j.AgentID != targetAgent || j.State != "pending" || !j.LeaseUntil.Valid || !j.LeaseUntil.Time.After(time.Now()) || !j.Expires.After(time.Now()) {
+	if err != nil || !infoFlowWebLeaseCurrent(j.State, j.Generation, j.LeaseToken, j.LeaseUntil, j.Expires, gen, lease) || j.LeaseRobot != req.RobotID || uuidToString(j.LeaseAgent) != strings.ToLower(req.AgentID) || j.AgentID != targetAgent {
 		infoFlowError(w, 409, "stale result")
 		return
 	}

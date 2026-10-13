@@ -248,6 +248,79 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 			t.Fatal("unified bind/unbind created work")
 		}
 	})
+	t.Run("web_cancellation_auth_version_and_late_result", func(t *testing.T) {
+		for _, kind := range []string{"group", "private"} {
+			t.Run(kind, func(t *testing.T) {
+				webIssue := f.Issue(t, "Cancellable HTTP fixture", testutil.Cols{"assignee_type": "agent", "assignee_id": agent})
+				f.Cleanup(t, `DELETE FROM infoflow_issue_binding WHERE issue_id=$1`, webIssue)
+				f.Cleanup(t, `DELETE FROM infoflow_web_private_request WHERE issue_id=$1`, webIssue)
+				f.Cleanup(t, `DELETE FROM infoflow_web_group_request WHERE issue_id=$1`, webIssue)
+				memberHeaders := map[string]string{"Authorization": "Bearer " + pat, "X-Workspace-ID": workspace}
+				path := "/api/issues/" + webIssue
+				body := map[string]string{"kind": kind}
+				if kind == "group" {
+					body["group_id"] = "654321"
+				}
+				var pending struct {
+					Group struct {
+						Request struct {
+							ID         string `json:"request_id"`
+							Generation string `json:"generation"`
+						} `json:"request"`
+					} `json:"group"`
+					Private struct {
+						Request struct {
+							ID         string `json:"request_id"`
+							Generation string `json:"generation"`
+						} `json:"request"`
+					} `json:"private"`
+				}
+				data := call(t, http.MethodPost, path+"/infoflow-conversations", body, memberHeaders, 202)
+				if json.Unmarshal(data, &pending) != nil {
+					t.Fatal("invalid submission")
+				}
+				id, gen := pending.Group.Request.ID, pending.Group.Request.Generation
+				if kind == "private" {
+					id, gen = pending.Private.Request.ID, pending.Private.Request.Generation
+				}
+				var jobs struct {
+					Jobs []map[string]any `json:"jobs"`
+				}
+				data = call(t, http.MethodPost, "/api/integrations/infoflow/web-"+kind+"-jobs", scope, trustedHeaders, 200)
+				if json.Unmarshal(data, &jobs) != nil || len(jobs.Jobs) != 1 {
+					t.Fatalf("claim: %s", data)
+				}
+				cancelPath := path + "/infoflow-conversation-requests/" + id
+				cancelBody := map[string]string{"kind": kind, "expected_generation": gen}
+				for _, headers := range []map[string]string{nil, trustedHeaders, {"X-User-ID": owner, "X-Workspace-ID": workspace}} {
+					call(t, http.MethodDelete, cancelPath, cancelBody, headers, 401)
+				}
+				call(t, http.MethodDelete, cancelPath, map[string]string{"kind": kind, "expected_generation": uuid.NewString()}, memberHeaders, 409)
+				data = call(t, http.MethodDelete, cancelPath, cancelBody, memberHeaders, 200)
+				if !strings.Contains(string(data), "申请已取消") || strings.Contains(string(data), "lease_token") || strings.Contains(string(data), serviceToken) {
+					t.Fatalf("invalid cancellation view: %s", data)
+				}
+				job := jobs.Jobs[0]
+				result := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace, "request_id": job["request_id"], "generation": job["generation"], "lease_token": job["lease_token"], "reason": ""}
+				if kind == "group" {
+					result["group_id"] = "654321"
+					result["actor_present"] = true
+					result["leader_present"] = true
+					result["leader_agent_id"] = agent
+					result["leader_robot_id"] = robot
+				} else {
+					result["target_agent_id"] = agent
+					result["target_robot_id"] = robot
+					result["robot_chat_id"] = "9007199254740993"
+					result["robot_name"] = "Fixture robot"
+				}
+				call(t, http.MethodPost, "/api/integrations/infoflow/web-"+kind+"-result", result, trustedHeaders, 409)
+				if f.Count(t, `SELECT count(*) FROM infoflow_issue_binding WHERE issue_id=$1`, webIssue) != 0 {
+					t.Fatal("cancelled HTTP admission revived binding")
+				}
+			})
+		}
+	})
 	t.Run("web_binding_requires_member_auth_and_verified_group_result", func(t *testing.T) {
 		webIssue := f.Issue(t, "Web group binding HTTP fixture", testutil.Cols{"assignee_type": "agent", "assignee_id": agent})
 		f.Cleanup(t, `DELETE FROM infoflow_web_group_request WHERE issue_id=$1`, webIssue)

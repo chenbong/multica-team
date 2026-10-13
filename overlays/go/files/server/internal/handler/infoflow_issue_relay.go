@@ -775,6 +775,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	var commentID, taskID pgtype.UUID
 	previousBindingView := resp.Binding
+	previousIssueID := b.IssueID
 	var uploads []string
 	committed := false
 	defer func() {
@@ -1010,6 +1011,18 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Operation != "message" && !groupRepeat {
+		if req.Operation == "bind" || req.Operation == "unbind" {
+			changedIssue := b.IssueID
+			if req.Operation == "unbind" {
+				changedIssue = previousIssueID
+			}
+			if changedIssue.Valid {
+				if err = infoFlowInvalidateWebRequest(r.Context(), tx, req.Conversation.Kind, infoFlowWebActor{req.WorkspaceID, changedIssue, user.ID}, "binding_changed"); err != nil {
+					infoFlowError(w, 500, "request invalidation")
+					return
+				}
+			}
+		}
 		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END,assignment_version=$5 WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation, b.AssignmentVersion)
 		if err != nil {
 			infoFlowError(w, 500, "binding update")

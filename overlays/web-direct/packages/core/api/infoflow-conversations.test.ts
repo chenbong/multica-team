@@ -112,4 +112,32 @@ describe("unified InfoFlow conversation API", () => {
     expect(isInfoFlowConversationWaiting(await client().getIssueInfoFlowConversations("TEST-1"))).toBe(true);
     respond(status()); expect(isInfoFlowConversationWaiting(await client().getIssueInfoFlowConversations("TEST-1"))).toBe(false);
   });
+  it.each(["group", "private"] as const)("preserves own %s cancellation without granting binding permission", async (kind) => {
+    const wire = status(); wire.group.can_manage = false; wire.private.can_manage = false; wire.private.eligible = false;
+    const request = { request_id: requestId, generation: bindingId, can_cancel: true, state: "queued", reason: "Waiting" };
+    respond({ ...wire, group: { ...wire.group, binding: null, request: kind === "group" ? { ...request, group_id: "123" } : null }, private: { ...wire.private, request: kind === "private" ? request : null } });
+    const result = await client().getIssueInfoFlowConversations("TEST-1");
+    expect(result[kind].canManage).toBe(false);
+    expect(result[kind].request).toMatchObject({ requestId, generation: bindingId, canCancel: true });
+    expect(result.private.bindings).toEqual([]); expect(result.group.groups).toEqual([]);
+  });
+  it.each(["group", "private"] as const)("sends exact %s request generation and excludes URL identity from the body", async (kind) => {
+    const fetch = respond({ enabled: true });
+    await client().cancelIssueInfoFlowRequest("TEST/1", { kind, request_id: requestId, expected_generation: bindingId });
+    expect(String(fetch.mock.calls[0]?.[0])).toContain(`/api/issues/TEST%2F1/infoflow-conversation-requests/${requestId}`);
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: "DELETE", body: JSON.stringify({ kind, expected_generation: bindingId }), credentials: "include" });
+  });
+  it.each([
+    { kind: "private", request_id: requestId }, { kind: "private", request_id: requestId, expected_generation: "bad" },
+    { kind: "group", request_id: "bad", expected_generation: bindingId },
+    { kind: "group", request_id: requestId, expected_generation: bindingId, sender: "forged" },
+  ])("rejects unversioned or forged cancellation %j before network access", async (target) => {
+    const fetch = respond({ enabled: true }); await expect(client().cancelIssueInfoFlowRequest("TEST-1", target as never)).rejects.toThrow("Invalid InfoFlow conversation request target");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each(["group", "private"] as const)("rejects cancellable %s metadata without a version", async (kind) => {
+    const request = { request_id: requestId, state: "pending", can_cancel: true };
+    respond(kind === "group" ? { group: { request: { ...request, group_id: "123" } } } : { private: { request } });
+    await expect(client().getIssueInfoFlowConversations("TEST-1")).rejects.toThrow("Invalid InfoFlow conversation status");
+  });
 });

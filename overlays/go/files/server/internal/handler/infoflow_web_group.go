@@ -14,15 +14,16 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
-	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
 type infoFlowWebState struct {
-	BindingID string `json:"binding_id,omitempty"`
-	GroupID   string `json:"group_id"`
-	State     string `json:"state"`
-	Reason    string `json:"reason"`
-	RequestID string `json:"request_id,omitempty"`
+	BindingID  string `json:"binding_id,omitempty"`
+	GroupID    string `json:"group_id"`
+	State      string `json:"state"`
+	Reason     string `json:"reason"`
+	RequestID  string `json:"request_id,omitempty"`
+	Generation string `json:"generation,omitempty"`
+	CanCancel  bool   `json:"can_cancel,omitempty"`
 }
 type infoFlowGroupOption struct {
 	GroupID string `json:"group_id"`
@@ -129,26 +130,33 @@ func (h *Handler) infoFlowWebView(ctx context.Context, tx pgx.Tx, ws string, iss
 		v := sh.infoFlowGroupView(ctx, b, ws)
 		out.Binding = &infoFlowWebState{BindingID: uuidToString(b.ID), GroupID: group, State: v.State, Reason: v.Reason}
 	}
-	// Members without management authority may open the verified destination, but
-	// do not receive candidate group metadata or another user's queued request.
+	var id, gid, state, reason string
+	var expires time.Time
+	var originalID, originalGeneration, requester, generation pgtype.UUID
+	err = tx.QueryRow(ctx, `SELECT id::text,group_id,state,reason,expires_at,original_binding_id,original_generation,requester_id,generation FROM infoflow_web_group_request WHERE issue_id=$1 AND workspace_id=$2`, issue, ws).Scan(&id, &gid, &state, &reason, &expires, &originalID, &originalGeneration, &requester, &generation)
+	current := !b.ID.Valid || group == gid && originalID == b.ID && originalGeneration == b.Generation
+	canCancel := false
+	if err == nil && infoFlowWebRequestPending(state, expires) {
+		canCancel, err = h.infoFlowCanCancelWebRequest(ctx, tx, infoFlowWebActor{ws, issue, user}, "group", requester)
+		if err != nil {
+			return out, err
+		}
+	}
+	if err == nil && state != "active" && (manage && current && (out.Binding == nil || out.Binding.State != "active") || canCancel) {
+		if (state == "queued" || state == "pending") && time.Now().After(expires) {
+			state, reason = "failed", "request_expired"
+		}
+		out.Request = &infoFlowWebState{RequestID: id, GroupID: gid, State: state, Reason: infoFlowWebReason(reason), Generation: uuidToString(generation), CanCancel: canCancel}
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return out, err
+	}
+	// An original requester may cancel after reassignment, but does not regain
+	// candidate discovery or binding permission from that cancellation right.
 	if !manage {
 		if out.Binding != nil && out.Binding.State != "active" {
 			out.Binding = nil
 		}
 		return out, nil
-	}
-	var id, gid, state, reason string
-	var expires time.Time
-	var originalID, originalGeneration pgtype.UUID
-	err = tx.QueryRow(ctx, `SELECT id::text,group_id,state,reason,expires_at,original_binding_id,original_generation FROM infoflow_web_group_request WHERE issue_id=$1 AND workspace_id=$2`, issue, ws).Scan(&id, &gid, &state, &reason, &expires, &originalID, &originalGeneration)
-	current := !b.ID.Valid || group == gid && originalID == b.ID && originalGeneration == b.Generation
-	if err == nil && state != "active" && current && (out.Binding == nil || out.Binding.State != "active") {
-		if (state == "queued" || state == "pending") && time.Now().After(expires) {
-			state, reason = "failed", "request_expired"
-		}
-		out.Request = &infoFlowWebState{RequestID: id, GroupID: gid, State: state, Reason: infoFlowWebReason(reason)}
-	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return out, err
 	}
 	encoded, _ := json.Marshal([]string{sender})
 	rows, err := tx.Query(ctx, `SELECT group_id,MAX(name) FROM infoflow_group_observation WHERE workspace_id=$1 AND members @> $2::jsonb AND observed_at>clock_timestamp()-interval '24 hours' GROUP BY group_id ORDER BY group_id LIMIT 100`, ws, encoded)
@@ -224,80 +232,12 @@ func (h *Handler) BindIssueInfoFlowGroup(w http.ResponseWriter, r *http.Request)
 	if !infoFlowDecode(w, r, &req) {
 		return
 	}
-	if !infoFlowValidGroupID(req.GroupID) {
-		writeError(w, 400, "Invalid group ID")
-		return
-	}
-	tx, err := h.TxStarter.Begin(r.Context())
+	result, err := h.infoFlowSubmitWebBinding(r.Context(), infoFlowWebActor{ws, i.ID, m.UserID}, "group", req.GroupID, false)
 	if err != nil {
-		writeError(w, 500, "Failed to request group binding")
+		infoFlowWriteActionError(w, err)
 		return
 	}
-	defer tx.Rollback(r.Context())
-	if err = infoFlowWebLock(r.Context(), tx, ws, req.GroupID, i.ID); err != nil {
-		writeError(w, 500, "Failed to request group binding")
-		return
-	}
-	b, group, err := infoFlowWebBinding(r.Context(), tx, ws, i.ID)
-	if err != nil {
-		writeError(w, 500, "Failed to load group binding")
-		return
-	}
-	sh, _ := h.infoFlowScoped(tx)
-	t, _, manage, err := sh.infoFlowWebAuthority(r.Context(), ws, i.ID, m.UserID, b)
-	if err != nil {
-		writeError(w, 500, "Failed to check group binding permission")
-		return
-	}
-	if !manage {
-		writeError(w, 403, "Only the leader owner, workspace admin or current binder can manage group binding")
-		return
-	}
-	if t.LeaderAgentID == "" || !slices.Contains(t.AgentIDs, t.LeaderAgentID) {
-		writeError(w, 409, "Group binding requires an available assigned agent or squad leader")
-		return
-	}
-	if group != "" && group != req.GroupID {
-		writeError(w, 409, "Issue is already bound to another group; unbind it first")
-		return
-	}
-	status := 202
-	if b.ID.Valid && sh.infoFlowGroupView(r.Context(), b, ws).State == "active" {
-		status = 200
-	} else {
-		var priorGroup, state string
-		var expires time.Time
-		err = tx.QueryRow(r.Context(), `SELECT group_id,state,expires_at FROM infoflow_web_group_request WHERE issue_id=$1 FOR UPDATE`, i.ID).Scan(&priorGroup, &state, &expires)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, 500, "Failed to load binding request")
-			return
-		}
-		pending := (state == "queued" || state == "pending") && expires.After(time.Now())
-		if pending && priorGroup != req.GroupID {
-			writeError(w, 409, "Another group binding is awaiting confirmation")
-			return
-		}
-		if !pending {
-			topology, _ := json.Marshal(t)
-			_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_web_group_request(id,issue_id,workspace_id,group_id,requester_id,generation,topology,original_binding_id,original_generation,state,expires_at)
-			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',clock_timestamp()+interval '20 minutes')
-			 ON CONFLICT(issue_id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id,group_id=EXCLUDED.group_id,requester_id=EXCLUDED.requester_id,generation=EXCLUDED.generation,topology=EXCLUDED.topology,original_binding_id=EXCLUDED.original_binding_id,original_generation=EXCLUDED.original_generation,state='queued',reason='',lease_token=NULL,lease_robot_id=NULL,lease_agent_id=NULL,lease_until=NULL,next_at=clock_timestamp(),expires_at=EXCLUDED.expires_at,updated_at=clock_timestamp()`, dbid.NewV7(), i.ID, ws, req.GroupID, m.UserID, dbid.NewV7(), topology, b.ID, b.Generation)
-			if err != nil {
-				writeError(w, 500, "Failed to request group binding")
-				return
-			}
-		}
-	}
-	out, err := h.infoFlowWebView(r.Context(), tx, ws, i.ID, m.UserID)
-	if err != nil {
-		writeError(w, 500, "Failed to load group binding")
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, 500, "Failed to request group binding")
-		return
-	}
-	writeJSON(w, status, out)
+	writeJSON(w, result.Status, result.Group)
 }
 
 type infoFlowGroupObservation struct {
@@ -356,6 +296,6 @@ func infoFlowWebReason(reason string) string {
 		"leader_robot_unavailable":          "负责人机器人不可用，请先恢复连接", "actor_not_in_group": "你不在该如流群中，无法绑定",
 		"inviter_not_in_group": "群内没有可用的平台机器人，请先手动拉入一个机器人",
 		"request_expired":      "确认已超时，请重新提交绑定", "permission_changed": "任务或绑定权限已变化，请重新提交绑定",
-		"binding_changed": "任务群聊绑定已变化，请重新检查", "active": "群聊绑定成功",
+		"binding_changed": "任务群聊绑定已变化，请重新检查", "active": "群聊绑定成功", infoFlowRequestCancelled: "申请已取消，可重新提交",
 	}[reason]
 }

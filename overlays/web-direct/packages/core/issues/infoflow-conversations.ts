@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../api";
 import { useAuthStore } from "../auth";
-import { isInfoFlowConversationWaiting, type InfoFlowConversationsStatus, type InfoFlowConversationTarget } from "../api/infoflow-conversations-schema";
+import { isInfoFlowConversationWaiting, type InfoFlowConversationsStatus, type InfoFlowConversationTarget, type InfoFlowConversationRequestTarget } from "../api/infoflow-conversations-schema";
 
 export { infoFlowConversationURL, isInfoFlowConversationWaiting } from "../api/infoflow-conversations-schema";
 export { parseInfoFlowGroupTarget } from "../api/infoflow-groups-schema";
-export type { InfoFlowConversationsStatus, InfoFlowConversationTarget } from "../api/infoflow-conversations-schema";
+export type { InfoFlowConversationsStatus, InfoFlowConversationTarget, InfoFlowConversationRequestTarget } from "../api/infoflow-conversations-schema";
 
 export const infoFlowConversationKeys = {
   status: (userId: string | undefined, workspaceId: string, issueId: string) =>
@@ -79,4 +79,8 @@ export function useBindIssueInfoFlowConversation(workspaceId: string, issueId: s
 
 export function useUnbindIssueInfoFlowConversation(workspaceId: string, issueId: string) {
   return useConversationMutation<string>(workspaceId, issueId, (id, bindingId) => api.unbindIssueInfoFlowConversation(id, bindingId));
+}
+
+export function useCancelIssueInfoFlowRequest(workspaceId: string, issueId: string) {
+  return useConversationMutation<InfoFlowConversationRequestTarget>(workspaceId, issueId, (id, target) => api.cancelIssueInfoFlowRequest(id, target));
 }

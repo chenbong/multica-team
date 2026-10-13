@@ -169,11 +169,14 @@ class FrontendPatches(unittest.TestCase):
     def test_unified_conversation_wiring_and_private_privacy(self):
         self.apply()
         client = (self.target / "packages/core/api/client.ts").read_text()
-        for method in ("getIssueInfoFlowConversations", "bindIssueInfoFlowConversation", "unbindIssueInfoFlowConversation"):
+        for method in ("getIssueInfoFlowConversations", "bindIssueInfoFlowConversation", "unbindIssueInfoFlowConversation", "cancelIssueInfoFlowRequest"):
             self.assertIn(f"async {method}", client)
         self.assertIn("InfoFlowConversationsSchema, null", client)
         self.assertIn("InfoFlowConversationTargetSchema.safeParse(target)", client)
         self.assertIn("InfoFlowConversationBindingIdSchema.safeParse(bindingId)", client)
+        self.assertIn("InfoFlowConversationRequestTargetSchema.safeParse(target)", client)
+        self.assertIn("const { request_id, ...body } = input.data;", client)
+        self.assertIn("/infoflow-conversation-requests/", client)
         self.assertIn('method: "DELETE"', client)
         exports = json.loads((self.target / "packages/core/package.json").read_text())["exports"]
         self.assertEqual(exports["./issues/infoflow-conversations"], "./issues/infoflow-conversations.ts")

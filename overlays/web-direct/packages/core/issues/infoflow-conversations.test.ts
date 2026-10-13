@@ -1,12 +1,12 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation } from "./infoflow-conversations";
+import { useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest } from "./infoflow-conversations";
 import { ApiError } from "../api";
 
-const state = vi.hoisted(() => ({ user: "user-a" as string | undefined, query: vi.fn(), mutation: vi.fn(), get: vi.fn(), post: vi.fn(), remove: vi.fn(), set: vi.fn(), invalidate: vi.fn() }));
+const state = vi.hoisted(() => ({ user: "user-a" as string | undefined, query: vi.fn(), mutation: vi.fn(), get: vi.fn(), post: vi.fn(), remove: vi.fn(), cancel: vi.fn(), set: vi.fn(), invalidate: vi.fn() }));
 vi.mock("@tanstack/react-query", () => ({ useQuery: (options: unknown) => state.query(options), useMutation: (options: unknown) => state.mutation(options), useQueryClient: () => ({ setQueryData: state.set, invalidateQueries: state.invalidate }) }));
 vi.mock("../auth", () => ({ useAuthStore: Object.assign((selector: (value: { user?: { id: string } }) => unknown) => selector({ user: state.user ? { id: state.user } : undefined }), { getState: () => ({ user: state.user ? { id: state.user } : undefined }) }) }));
-vi.mock("../api", async (original) => ({ ...await original<typeof import("../api")>(), api: { getIssueInfoFlowConversations: state.get, bindIssueInfoFlowConversation: state.post, unbindIssueInfoFlowConversation: state.remove } }));
+vi.mock("../api", async (original) => ({ ...await original<typeof import("../api")>(), api: { getIssueInfoFlowConversations: state.get, bindIssueInfoFlowConversation: state.post, unbindIssueInfoFlowConversation: state.remove, cancelIssueInfoFlowRequest: state.cancel } }));
 beforeEach(() => { vi.clearAllMocks(); state.user = "user-a"; });
 const fresh = () => ({ enabled: true, group: { canManage: true, binding: null, request: null, groups: [] }, private: { eligible: true, canManage: true, reason: "", bindings: [], request: null } });
 describe("unified InfoFlow conversation query and mutations", () => {
@@ -40,13 +40,13 @@ describe("unified InfoFlow conversation query and mutations", () => {
     await expect(state.query.mock.calls[0]?.[0].queryFn()).rejects.toThrow("Authentication changed");
     expect(state.set.mock.calls[0]?.[0]).toEqual(["issues", "infoflow-conversations", "user-a", "workspace", "issue"]);
   });
-  it.each([useBindIssueInfoFlowConversation, useUnbindIssueInfoFlowConversation])("does not let a late mutation populate a switched account", (hook) => {
+  it.each([useBindIssueInfoFlowConversation, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest])("does not let a late mutation populate a switched account", (hook) => {
     hook("workspace", "issue"); const options = state.mutation.mock.calls[0]?.[0]; const scope = options.onMutate();
     state.user = "user-b"; options.onSuccess(fresh(), { kind: "private" }, scope);
     expect(state.set).not.toHaveBeenCalled(); expect(state.invalidate).not.toHaveBeenCalled();
     expect(() => options.mutationFn({ kind: "private" })).toThrow("Authentication changed");
   });
-  it.each([useBindIssueInfoFlowConversation, useUnbindIssueInfoFlowConversation])("scrubs a denied mutation and refreshes current permissions", (hook) => {
+  it.each([useBindIssueInfoFlowConversation, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest])("scrubs a denied mutation and refreshes current permissions", (hook) => {
     hook("workspace", "issue"); const options = state.mutation.mock.calls[0]?.[0];
     options.onError(new ApiError("Denied", 403, "Forbidden"), "binding", options.onMutate());
     expect(state.set.mock.calls[0]?.[1]).toMatchObject({ private: { bindings: [] }, group: { binding: null } });
@@ -61,6 +61,14 @@ describe("unified InfoFlow conversation query and mutations", () => {
   it("unlinks only the selected association, never a conversation-wide scope", async () => {
     state.remove.mockResolvedValue(fresh()); useUnbindIssueInfoFlowConversation("workspace", "issue"); const options = state.mutation.mock.calls[0]?.[0];
     await options.mutationFn("exact-binding"); expect(state.remove).toHaveBeenCalledWith("issue", "exact-binding");
+  });
+  it("cancels exactly one admission version and refreshes all observers without optimistic removal", async () => {
+    const target = { kind: "private", request_id: "request", expected_generation: "generation" };
+    state.cancel.mockResolvedValue(fresh()); useCancelIssueInfoFlowRequest("workspace", "issue");
+    const options = state.mutation.mock.calls[0]?.[0];
+    await options.mutationFn(target); expect(state.cancel).toHaveBeenCalledWith("issue", target);
+    expect(state.set).not.toHaveBeenCalled(); options.onSuccess(fresh(), target, options.onMutate());
+    expect(state.invalidate).toHaveBeenCalledTimes(3); expect(options.retry).toBe(false);
   });
   it("does not invent success after a conflict", () => {
     useBindIssueInfoFlowConversation("workspace", "issue"); const options = state.mutation.mock.calls[0]?.[0];

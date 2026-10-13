@@ -334,9 +334,7 @@ func TestInfoFlowWebGroupExistingUnbindCannotResurrect(t *testing.T) {
 	req.ExpectedBindingID = bound.Binding.BindingID
 	req.ExpectedGeneration = bound.Binding.Generation
 	infoFlowCall(t, f.h, req, 200)
-	if state := infoFlowWebResultCall(t, f, infoFlowWebSuccess(f, jobs[0]), 200); state != "failed" {
-		t.Fatal("old result resurrected removed binding")
-	}
+	infoFlowWebResultCall(t, f, infoFlowWebSuccess(f, jobs[0]), 409)
 	if infoFlowCount(t, `SELECT count(*) FROM infoflow_issue_binding WHERE issue_id=$1`, f.issue) != 0 {
 		t.Fatal("removed task rebound")
 	}

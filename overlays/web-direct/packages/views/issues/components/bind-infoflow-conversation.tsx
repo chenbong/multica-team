@@ -5,7 +5,7 @@ import { Loader2, MessageSquare } from "lucide-react";
 import { useAuthStore } from "@multica/core/auth";
 import {
   infoFlowConversationURL, isInfoFlowConversationsUnavailable, parseInfoFlowGroupTarget,
-  useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation,
+  useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest,
   type InfoFlowConversationsStatus,
 } from "@multica/core/issues/infoflow-conversations";
 import { Button, buttonVariants } from "@multica/ui/components/ui/button";
@@ -21,10 +21,11 @@ export function BindInfoFlowConversation({ workspaceId, issueId }: { workspaceId
   const query = useIssueInfoFlowConversations(workspaceId, issueId);
   const bind = useBindIssueInfoFlowConversation(workspaceId, issueId);
   const unbind = useUnbindIssueInfoFlowConversation(workspaceId, issueId);
+  const cancel = useCancelIssueInfoFlowRequest(workspaceId, issueId);
   const [open, setOpen] = useState(false);
   const status = !query.isError && userId ? query.data : undefined;
-  const canManage = status?.enabled === true && (status.group.canManage || status.private.canManage);
-  const busy = bind.isPending || unbind.isPending;
+  const canManage = status?.enabled === true && (status.group.canManage || status.private.canManage || status.group.request?.canCancel || status.private.request?.canCancel);
+  const busy = bind.isPending || unbind.isPending || cancel.isPending;
   // Only endpoint absence is a compatibility signal. A denied or malformed
   // unified response must not fall back to an older permission check.
   if (query.isError && isInfoFlowConversationsUnavailable(query.error) && !open) {
@@ -47,18 +48,19 @@ export function BindInfoFlowConversation({ workspaceId, issueId }: { workspaceId
         <MessageSquare aria-hidden="true" />{t(($) => $.infoflow_conversations.bind)}
       </DialogTrigger>}
       {open && <ConversationDialog key={`${userId}:${workspaceId}:${issueId}`} status={status} readError={query.isError || !userId}
-        refreshing={query.isFetching} refresh={() => { void query.refetch(); }} bind={bind} unbind={unbind} />}
+        refreshing={query.isFetching} refresh={() => { void query.refetch(); }} bind={bind} unbind={unbind} cancel={cancel} />}
     </Dialog>
   </>;
 }
 
-function ConversationDialog({ status, readError, refreshing, refresh, bind, unbind }: {
+function ConversationDialog({ status, readError, refreshing, refresh, bind, unbind, cancel }: {
   status?: InfoFlowConversationsStatus;
   readError: boolean;
   refreshing: boolean;
   refresh: () => void;
   bind: ReturnType<typeof useBindIssueInfoFlowConversation>;
   unbind: ReturnType<typeof useUnbindIssueInfoFlowConversation>;
+  cancel: ReturnType<typeof useCancelIssueInfoFlowRequest>;
 }) {
   const { t } = useT("issues");
   const inputId = useId();
@@ -73,7 +75,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
   const [input, setInput] = useState(reserved || group?.request?.groupId || "");
   const [error, setError] = useState("");
   const inFlight = useRef(false);
-  const busy = bind.isPending || unbind.isPending;
+  const busy = bind.isPending || unbind.isPending || cancel.isPending;
   const groupActive = group?.binding?.state === "active";
   const groupFailed = group?.request?.state === "failed";
   const groupWaiting = !groupActive && !groupFailed && (group?.binding?.state === "pending" || !!group?.request);
@@ -83,6 +85,8 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
   const needsRebind = privateStatus?.bindings.some((binding) => binding.state === "needs_rebind");
   const availableSelection = group?.groups.some((item) => item.groupId === selected) ? selected : "";
   const target = parseInfoFlowGroupTarget(reserved || (mode === "existing" ? availableSelection : input));
+  const request = kind === "group" ? group?.request : privateStatus?.request;
+  const cancellable = status?.enabled === true && !readError && request?.canCancel === true && !!request.generation;
   const writable = kind === "group" ? groupCanManage && !groupActive && !groupWaiting && !!target :
     privateCanManage && privateStatus?.eligible === true && !privateWaiting && !privateActive;
   const reasonCopy: Record<string, string> = {
@@ -127,6 +131,13 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
     if (!permitted || busy || inFlight.current || refreshing || readError) return;
     inFlight.current = true; setError("");
     try { await unbind.mutateAsync(bindingId); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : t(($) => $.infoflow_conversations.failed)); }
+    finally { inFlight.current = false; }
+  }
+  async function cancelRequest() {
+    if (!cancellable || !request?.generation || busy || inFlight.current || refreshing || readError) return;
+    inFlight.current = true; setError("");
+    try { await cancel.mutateAsync({ kind, request_id: request.requestId, expected_generation: request.generation }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : t(($) => $.infoflow_conversations.failed)); }
     finally { inFlight.current = false; }
   }
@@ -215,9 +226,15 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
         </TabsContent>
       </Tabs>}
       {error && <p role="alert">{error}</p>}
+      {kind === "group" && cancellable && <p className="text-caption text-muted-foreground">{t(($) => $.infoflow_conversations.cancel_group_note)}</p>}
       <DialogFooter>
         <DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>{t(($) => $.infoflow_groups.close)}</DialogClose>
         <Button type="button" variant="outline" disabled={busy || refreshing} onClick={refresh}>{t(($) => $.infoflow_groups.refresh)}</Button>
+        {cancellable && <Button type="button" variant="outline" disabled={busy || refreshing} aria-busy={cancel.isPending}
+          aria-label={kind === "group" ? t(($) => $.infoflow_conversations.cancel_group) : t(($) => $.infoflow_conversations.cancel_private)}
+          onClick={() => { void cancelRequest(); }}>
+          {cancel.isPending && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}{t(($) => $.infoflow_conversations.cancel_request)}
+        </Button>}
         {!readError && (kind === "group" ? groupCanManage && !groupActive : privateCanManage && privateStatus?.eligible && !privateActive) &&
           <Button type="submit" disabled={busy || refreshing || !writable} aria-busy={busy}>
             {bind.isPending && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}

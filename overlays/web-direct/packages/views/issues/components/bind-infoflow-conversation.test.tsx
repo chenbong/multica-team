@@ -7,9 +7,10 @@ import { infoFlowConversationURL, type InfoFlowConversationsStatus } from "@mult
 import en from "../../locales/en/issues.json";
 import { BindInfoFlowConversation } from "./bind-infoflow-conversation";
 
-const state = vi.hoisted(() => ({ user: "user-a", get: vi.fn(), post: vi.fn(), remove: vi.fn(), legacy: vi.fn() }));
+const state = vi.hoisted(() => ({ user: "user-a", get: vi.fn(), post: vi.fn(), remove: vi.fn(), cancel: vi.fn(), legacy: vi.fn() }));
 vi.mock("@multica/core/api", async (original) => ({ ...await original<typeof import("@multica/core/api")>(), api: {
   getIssueInfoFlowConversations: state.get, bindIssueInfoFlowConversation: state.post, unbindIssueInfoFlowConversation: state.remove,
+  cancelIssueInfoFlowRequest: state.cancel,
   getIssueInfoFlowGroupBinding: state.legacy, getIssueInfoFlowGroups: vi.fn().mockResolvedValue([]),
 } }));
 vi.mock("@multica/core/auth", () => ({ useAuthStore: Object.assign((selector: (value: { user: { id: string } }) => unknown) => selector({ user: { id: state.user } }), { getState: () => ({ user: { id: state.user } }) }) }));
@@ -21,6 +22,7 @@ beforeEach(() => {
   vi.clearAllMocks(); state.user = "user-a";
   client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
   state.get.mockReset().mockResolvedValue(fresh()); state.post.mockReset().mockResolvedValue(fresh()); state.remove.mockReset().mockResolvedValue(fresh());
+  state.cancel.mockReset().mockResolvedValue(fresh());
   state.legacy.mockReset().mockResolvedValue({ enabled: false, canManage: false, binding: null, request: null, groups: [] });
 });
 afterEach(() => { cleanup(); client.clear(); });
@@ -101,5 +103,42 @@ describe("unified InfoFlow dialog", () => {
     state.get.mockRejectedValue(new ApiError("Denied", status, "Error")); render(view());
     await waitFor(() => expect(client.isFetching()).toBe(0)); expect(state.legacy).not.toHaveBeenCalled();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  });
+  it.each(["group", "private"] as const)("cancels a %s request before any binding exists and allows a new submission", async (kind) => {
+    const generation = "00000000-0000-4000-8000-000000000002";
+    const pending = { requestId: id, generation, canCancel: true, state: "pending" as const, reason: "Waiting" };
+    const current = fresh();
+    if (kind === "group") current.group.request = { ...pending, groupId: "456" };
+    else current.private.request = pending;
+    state.get.mockResolvedValue(current);
+    const user = await open();
+    if (kind === "private") await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.queryByRole("button", { name: en.infoflow_conversations.unbind })).not.toBeInTheDocument();
+    state.get.mockResolvedValue(fresh());
+    await user.click(screen.getByRole("button", { name: kind === "group" ? en.infoflow_conversations.cancel_group : en.infoflow_conversations.cancel_private }));
+    await waitFor(() => expect(state.cancel).toHaveBeenCalledWith("task", { kind, request_id: id, expected_generation: generation }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument(); expect(state.remove).not.toHaveBeenCalled();
+    if (kind === "group") {
+      await user.click(screen.getByRole("radio", { name: en.infoflow_groups.manual }));
+      await user.clear(screen.getByRole("textbox")); await user.type(screen.getByRole("textbox"), "789");
+    }
+    await user.click(screen.getByRole("button", { name: en.infoflow_groups.submit }));
+    await waitFor(() => expect(state.post).toHaveBeenCalledWith("task", kind === "group" ? { kind, group_id: "789" } : { kind }));
+  });
+  it("permits cancelling an own stale private request without granting a new binding", async () => {
+    const current = fresh(); current.group.canManage = false;
+    current.private = { eligible: false, canManage: false, reason: "", bindings: [], request: { requestId: id, generation: id, canCancel: true, state: "queued", reason: "Waiting" } };
+    state.get.mockResolvedValue(current); const user = await open();
+    await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.queryByRole("button", { name: en.infoflow_groups.submit })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: en.infoflow_conversations.cancel_private }));
+    await waitFor(() => expect(state.cancel).toHaveBeenCalledTimes(1)); expect(state.post).not.toHaveBeenCalled();
+  });
+  it("preserves the dialog and reports a stale cancel instead of hiding a newer request", async () => {
+    const current = fresh(); current.group.request = { requestId: id, generation: id, canCancel: true, groupId: "123", state: "queued", reason: "Waiting" };
+    state.get.mockResolvedValue(current); state.cancel.mockRejectedValue(new ApiError("Request changed", 409, "Conflict"));
+    const user = await open(); await user.click(screen.getByRole("button", { name: en.infoflow_conversations.cancel_group }));
+    expect(await screen.findByText("Request changed")).toBeInTheDocument(); expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(state.cancel).toHaveBeenCalledTimes(1);
   });
 });

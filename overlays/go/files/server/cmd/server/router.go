@@ -2068,6 +2068,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.With(handler.RequireHumanActor).Get("/infoflow-conversations", h.GetIssueInfoFlowConversations)
 					r.With(handler.RequireHumanActor).Post("/infoflow-conversations", h.BindIssueInfoFlowConversation)
 					r.With(handler.RequireHumanActor).Delete("/infoflow-conversations/{bindingId}", h.DeleteIssueInfoFlowConversation)
+					r.With(handler.RequireHumanActor).Delete("/infoflow-conversation-requests/{requestId}", h.CancelIssueInfoFlowRequest)
 					r.Put("/", h.UpdateIssue)
 					r.Post("/move", h.MoveIssue)
 					r.With(handler.RequireHumanActor).Post("/transfer-preview", h.PreviewIssueTransfer)

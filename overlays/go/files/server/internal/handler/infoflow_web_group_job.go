@@ -173,7 +173,7 @@ func (h *Handler) InfoFlowWebGroupResult(w http.ResponseWriter, r *http.Request)
 	if !infoFlowDecode(w, r, &req) {
 		return
 	}
-	if !req.infoFlowScope.valid() || !infoFlowValidGroupID(req.GroupID) || len(req.LeaderRobotID) > 256 || strings.ContainsRune(req.LeaderRobotID, 0) || infoFlowWebReason(req.Reason) == "" || req.Reason == "active" || req.Reason == "permission_changed" || req.Reason == "binding_changed" || req.Reason == "request_expired" || !h.infoFlowWebScope(r.Context(), req.infoFlowScope) {
+	if !req.infoFlowScope.valid() || !infoFlowValidGroupID(req.GroupID) || len(req.LeaderRobotID) > 256 || strings.ContainsRune(req.LeaderRobotID, 0) || infoFlowWebReason(req.Reason) == "" || req.Reason == "active" || req.Reason == "permission_changed" || req.Reason == "binding_changed" || req.Reason == "request_expired" || req.Reason == infoFlowRequestCancelled || !h.infoFlowWebScope(r.Context(), req.infoFlowScope) {
 		infoFlowError(w, 400, "result")
 		return
 	}
@@ -214,7 +214,7 @@ func (h *Handler) InfoFlowWebGroupResult(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	j, err = infoFlowScanWebJob(tx.QueryRow(r.Context(), `SELECT `+infoFlowWebJobColumns+` FROM infoflow_web_group_request WHERE id=$1 FOR UPDATE`, id))
-	if err != nil || j.Generation != gen || j.LeaseToken != lease || j.LeaseRobot != req.RobotID || uuidToString(j.LeaseAgent) != strings.ToLower(req.AgentID) || j.State != "pending" || !j.LeaseUntil.Valid || !j.LeaseUntil.Time.After(time.Now()) || !j.Expires.After(time.Now()) || j.GroupID != req.GroupID {
+	if err != nil || !infoFlowWebLeaseCurrent(j.State, j.Generation, j.LeaseToken, j.LeaseUntil, j.Expires, gen, lease) || j.LeaseRobot != req.RobotID || uuidToString(j.LeaseAgent) != strings.ToLower(req.AgentID) || j.GroupID != req.GroupID {
 		infoFlowError(w, 409, "stale result")
 		return
 	}
@@ -232,7 +232,7 @@ func (h *Handler) InfoFlowWebGroupResult(w http.ResponseWriter, r *http.Request)
 	reason, state := req.Reason, "pending"
 	// Entity/grant row locks above can wait longer than the original lease.
 	// Never turn stale IM membership evidence into a newly timestamped binding.
-	if !j.LeaseUntil.Time.After(time.Now()) || !j.Expires.After(time.Now()) {
+	if !infoFlowWebLeaseCurrent(j.State, j.Generation, j.LeaseToken, j.LeaseUntil, j.Expires, gen, lease) {
 		infoFlowError(w, 409, "expired membership proof")
 		return
 	}
