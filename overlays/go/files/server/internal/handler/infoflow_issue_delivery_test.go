@@ -30,6 +30,7 @@ func infoFlowInput(t *testing.T, f infoFlowTestFixture, conversation infoFlowCon
 	req := f.req
 	req.Conversation = conversation
 	req.Operation = "message"
+	infoFlowPin(t, &req)
 	req.MessageID = uuid.NewString()
 	req.Content = "Input for " + conversation.Kind
 	out := infoFlowCall(t, f.h, req, 200)
@@ -185,6 +186,7 @@ func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
 	infoFlowAck(t, f, deliveries[0].ID, nil, 409)
 	msg := f.req
 	msg.Operation = "message"
+	infoFlowPin(t, &msg)
 	msg.MessageID = uuid.NewString()
 	msg.Content = "retry after unbind"
 	before := infoFlowCall(t, f.h, msg, 200)
@@ -199,6 +201,7 @@ func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
 		t.Fatalf("old accepted input fell back after unbind: %+v", again)
 	}
 	msg.MessageID = uuid.NewString()
+	msg.ExpectedBindingID, msg.ExpectedGeneration = "", ""
 	if next := infoFlowCall(t, f.h, msg, 200); next.Handled {
 		t.Fatalf("new unbound message did not fall through: %+v", next)
 	}

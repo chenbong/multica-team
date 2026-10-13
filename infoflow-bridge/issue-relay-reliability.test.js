@@ -7,7 +7,7 @@ import { Bridge } from "./src/bridge.js";
 import { IssueRelay } from "./src/issue-relay.js";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
-const BINDING = { issue_id: "issue-1", identifier: "RETRY-1", workspace_slug: "team", generation: 1 };
+const BINDING = { binding_id: "binding-1", issue_id: "issue-1", identifier: "RETRY-1", workspace_slug: "team", generation: "generation-1" };
 const SUCCESS = { handled: true, silent: true };
 const FIRST_MESSAGE_ID = "1859897297556589312";
 
@@ -54,6 +54,7 @@ function fixture(t) {
   const server = {
     deliveries: [],
     input: async () => response(SUCCESS),
+    preflight: async () => response({ handled: true, silent: false, can_comment: true, binding: BINDING }),
     ack: async (id) => { acknowledged.add(id); return response(SUCCESS); },
     send: async () => ({ messageid: String(1859897297556590000n + BigInt(sent.length)) }),
   };
@@ -78,7 +79,7 @@ function fixture(t) {
       unexpectedRequests.push(url);
       throw new Error("unexpected request; real network is disabled");
     }
-    if (path === "issue-relay") return server.input(body);
+    if (path === "issue-relay") return body.operation === "binding" ? server.preflight(body) : server.input(body);
     if (path === "issue-deliveries") {
       return response({ deliveries: server.deliveries.filter((item) => !acknowledged.has(item.id)) });
     }
@@ -104,7 +105,7 @@ function fixture(t) {
   return {
     config, directory, logger, server, requests, sendAttempts, sent, ownerCalls, acknowledged, send, make,
     track: (instance) => stoppedOnCleanup.push(instance),
-    inputRequests: () => requests.filter((request) => request.path === "issue-relay"),
+    inputRequests: () => requests.filter((request) => request.path === "issue-relay" && request.body.operation !== "binding"),
     ackRequests: () => requests.filter((request) => request.path.endsWith("/ack")),
   };
 }

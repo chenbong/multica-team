@@ -44,6 +44,15 @@ the previous issue's link metadata. Cached notices refresh this field from the
 current state. The Bridge adds mode labels at IM send time only; no label is
 inserted into issue comments. Agent deliveries always retain issue-origin mode.
 A stale binding is handled and never falls through to Chat.
+For `operation:"message"`, the first bound preflight supplies `binding_id` and
+`generation`. The Bridge persists these as `expected_binding_id` and
+`expected_generation` in the mutation body and never refreshes them on retry.
+Both must be valid UUIDs matching the current binding for a new comment. Missing
+or stale targets fail closed, before uploads or task creation. Receipt replay
+is checked first, so an already committed request can be replayed idempotently
+after a rebind/unbind without producing another comment. Previously completed
+Chat messages are filtered before entering this API; they do not become task
+input just because the conversation is now bound.
 Mutation retries use the exact same message_id and payload. A conflicting reuse
 is HTTP 409; bind/unbind/create are idempotent as well as comments. Recheck
 membership before returning a cached result. No-invoke members can save a bound
@@ -54,6 +63,12 @@ or current binder, all still current workspace members. Create also requires
 invoke and uses content as the issue title/description. It binds the new issue.
 Each switch/unbind changes generation and invalidates old routing. Binding the
 same issue retains generation. All operations on a conversation serialize in DB.
+For group rebinding, authority over the existing binding is required before
+checking the target issue's leader/management permissions. The target owner
+cannot overwrite somebody else's binding merely by choosing their own task.
+Group messages addressing the assigned squad leader preserve a squad trigger
+(`is_leader_task=true`, assigned `squad_id`); worker and single-agent messages
+keep ordinary agent triggers, with unchanged invocation permission checks.
 
 Attachments: at most 5, maximum 20 MiB decoded per file and 20 MiB total; JSON body
 maximum 29 MiB. Only message/create accepts them, after membership/dedup checks.
@@ -88,7 +103,8 @@ remain unchanged. Group message handling checks the addressed agent against the
 current assigned team and retains per-agent invocation permissions.
 
 Group binding views add `binding_id` and a `group` object containing `state`
-(`pending` or `active`), `leader_agent_id`, `agent_ids`, optional
+(`pending` or `active`), `leader_agent_id`, `agent_ids`, `agent_names` (current
+participant UUID-to-name map used to exclude unrelated legacy configs), optional
 `leader_robot_id`, and an optional human-readable `reason`. The server derives
 the leader from the issue's single-agent assignee or the assigned squad's
 `leader_id`; the Bridge cannot designate an arbitrary leader. A binding mutation

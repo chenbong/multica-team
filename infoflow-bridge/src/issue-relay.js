@@ -172,9 +172,13 @@ export class IssueRelay {
   async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [] }, record = {}) {
       // Missing/rounded identifiers cannot provide safe retry deduplication.
       if (!messageId || (typeof messageId === "number" && !Number.isSafeInteger(messageId))) return true;
+      // Once preflight hands this input to Chat, later binds must never retarget
+      // it. Unknown Chat POST outcomes are quarantined by drain before this path.
+      if (record.chatHandoff) return false;
       const scope = await this.scope();
       const parsed = relayOperation(text);
-      const body = record.preparedBody || {
+      const wasPrepared = Boolean(record.preparedBody);
+      const body = record.preparedBody ? structuredClone(record.preparedBody) : {
         ...scope, conversation: { kind: conversation.kind, id: String(conversation.id) },
         sender: user, message_id: String(messageId), operation: parsed.operation,
         ...(parsed.issue_ref ? { issue_ref: parsed.issue_ref } : {}),
@@ -183,30 +187,66 @@ export class IssueRelay {
       };
       let staged;
       let result;
+      let preflight;
       try {
-        if (this.groups && conversation.kind === "group" && ["message", "binding"].includes(parsed.operation)) {
-          const preflight = await this.request("issue-relay", { ...body, operation: "binding", content: "" });
+        if (wasPrepared && body.operation === "message" &&
+            (!body.expected_binding_id || !body.expected_generation)) {
+          // A legacy queued request cannot prove its original destination. Do
+          // not retrofit today's binding onto it, even after a restart.
+          throw Object.assign(new Error("unversioned prepared input requires operator review"), { status: 409 });
+        }
+        if (record.preflightPending || (!wasPrepared && (parsed.operation === "message" ||
+            (this.groups && conversation.kind === "group" && parsed.operation === "binding")))) {
+          preflight = await this.request("issue-relay", { ...body, operation: "binding", content: "" });
           this.validateDecision(preflight);
-          if (preflight.binding && !preflight.binding.group) throw new Error("group binding is missing its coordination plan");
-          if (preflight.binding?.group) {
+          if (body.expected_binding_id && (preflight.binding?.binding_id !== body.expected_binding_id ||
+              preflight.binding?.generation !== body.expected_generation)) {
+            throw Object.assign(new Error("binding changed during input preparation"), { status: 409 });
+          }
+          if (!preflight.binding && !preflight.handled && parsed.operation === "message") {
+            record.chatHandoff = true;
+            this.saveInbox();
+            return false;
+          }
+          if (parsed.operation === "message" && preflight.binding) {
+            if (!preflight.binding.binding_id || !preflight.binding.generation) throw new Error("binding version is missing from preflight");
+            body.expected_binding_id = preflight.binding.binding_id;
+            body.expected_generation = preflight.binding.generation;
+            // Freeze the first observed destination before reconciliation,
+            // notices or media work can fail and leave this input pending.
+            record.preparedBody = structuredClone(body);
+            record.preflightPending = true;
+            record.mediaPrepared = images.length === 0;
+            this.saveInbox();
+          }
+          if (this.groups && conversation.kind === "group" && preflight.binding && !preflight.binding.group) throw new Error("group binding is missing its coordination plan");
+          if (this.groups && conversation.kind === "group" && preflight.binding?.group) {
             const checked = await this.reconcileGroup(scope, conversation, preflight.binding, { invite: preflight.can_reconcile_group === true, bootstrap: true });
             if (checked.binding?.group?.state !== "active") {
               await this.sendNotice(conversation, !preflight.can_comment && preflight.notice ? preflight : checked);
               return true;
             }
-          } else if (preflight.handled && !preflight.can_comment) {
+          }
+          if (preflight.handled && !preflight.can_comment && (images.length || !(preflight.binding?.group && this.groups && conversation.kind === "group"))) {
             await this.sendNotice(conversation, preflight);
             return true;
+          }
+          if (parsed.operation === "message") {
+            if (!body.expected_binding_id) throw new Error("binding version is missing from preflight");
+            record.preflightPending = false;
+            this.saveInbox();
           }
         }
-        if (!record.preparedBody && images.length && ["message", "create"].includes(parsed.operation)) {
-          const preflight = await this.request("issue-relay", { ...body, operation: "binding", content: "", ...(parsed.operation === "create" ? { command: "create" } : {}) });
-          this.validateDecision(preflight);
-          if (preflight.handled && !preflight.can_comment) {
+        if (images.length && ((!wasPrepared && parsed.operation === "create") ||
+            (parsed.operation === "message" && record.mediaPrepared === false))) {
+          if (!preflight && parsed.operation === "create") {
+            preflight = await this.request("issue-relay", { ...body, operation: "binding", content: "", command: "create" });
+            this.validateDecision(preflight);
+          }
+          if (preflight?.handled && !preflight.can_comment) {
             await this.sendNotice(conversation, preflight);
             return true;
           }
-          if (!preflight.binding && parsed.operation === "message") return false;
           if (images.length > 5) {
             await this.sendNotice(conversation, { ...preflight, notice: "一次最多发送 5 张图片，请分开发送。" });
             return true;
@@ -226,6 +266,7 @@ export class IssueRelay {
             body.attachments.push({ filename: basename(path), content_type, data_base64: bytes.toString("base64") });
           }
           if (staged.failed.length) body.content += "\n\n图片附件处理失败：\n" + staged.failed.join("\n");
+          record.mediaPrepared = true;
         }
         record.preparedBody = body;
         this.saveInbox();
@@ -239,11 +280,16 @@ export class IssueRelay {
         result = checked;
       }
       if (!result.handled) {
+        if (body.operation === "message" && body.expected_binding_id) {
+          throw Object.assign(new Error("bound input cannot fall back to Chat after binding change"), { status: 409 });
+        }
         if (parsed.explicitBinding) {
           await this.sendNotice(conversation, { notice: "当前会话未绑定任务。使用 /bind <任务编号> 绑定，或 /issue <内容> 新建并绑定。" });
           return true;
         }
         if (parsed.operation !== "message" && parsed.operation !== "binding") return true;
+        record.chatHandoff = true;
+        this.saveInbox();
         return false;
       }
       if (parsed.operation === "binding" && result.binding && result.can_comment && !result.notice) {

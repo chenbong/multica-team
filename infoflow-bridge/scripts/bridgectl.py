@@ -39,6 +39,26 @@ def bridge_environment():
             env=env, capture_output=True, check=True, timeout=10,
         )
         env = dict(entry.split("=", 1) for entry in result.stdout.decode().split("\0") if "=" in entry)
+    # A standalone restart must resolve the same relay secret as deploy/start.sh.
+    # Import only this credential, not database/JWT/plugin secrets, from the
+    # trusted deployment file. Environment-only container deployments still work.
+    if env.get("INFOFLOW_ISSUE_RELAY_ENABLED") == "true":
+        secret_file = ROOT.parent / "deploy" / "secrets.env"
+        if secret_file.is_file():
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", 'set -e; source "$1" >/dev/null; printf "%s" "${INFOFLOW_ISSUE_RELAY_TOKEN-}"',
+                     "bridge-relay-secret", str(secret_file)],
+                    env=env, capture_output=True, check=True, timeout=10,
+                )
+                env["INFOFLOW_ISSUE_RELAY_TOKEN"] = result.stdout.decode()
+            except (OSError, UnicodeError, subprocess.SubprocessError):
+                raise RuntimeError("Cannot load the Bridge relay credential from deploy/secrets.env") from None
+        token = env.get("INFOFLOW_ISSUE_RELAY_TOKEN", "")
+        if len(token) < 32 or "\n" in token or "\r" in token:
+            raise RuntimeError("INFOFLOW_ISSUE_RELAY_TOKEN must be configured with at least 32 characters before starting Bridge")
+    else:
+        env.pop("INFOFLOW_ISSUE_RELAY_TOKEN", None)
     node_dir = env.get("MULTICA_NODE_BIN_DIR", "/opt/homebrew/bin")
     env["PATH"] = node_dir + ":" + env.get("PATH", "")
     config = json.loads(CONFIG.read_text()) if CONFIG.is_file() else {}
@@ -193,8 +213,8 @@ def watchdog():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, handle_signal)
 
-    WATCHDOG_PID_FILE.write_text(str(os.getpid()))
     env = bridge_environment()
+    WATCHDOG_PID_FILE.write_text(str(os.getpid()))
     restart_delay = 1.0
 
     try:
@@ -270,13 +290,14 @@ def start():
         print(f"bridge already running (pid {existing})")
         return
 
+    # Validate before stopping a listener or starting any process.
+    env = bridge_environment()
     lingering = listener_pid(admin_port())
     if lingering:
         print(f"port {admin_port()} is still held by pid {lingering}; stopping it before start")
         terminate(lingering)
 
     LOG.parent.mkdir(exist_ok=True)
-    env = bridge_environment()
     process = subprocess.Popen(
         [sys.executable, str(SCRIPT), "watchdog"],
         cwd=ROOT,
@@ -306,15 +327,22 @@ def status():
         print("bridge is not running")
 
 
-action = sys.argv[1] if len(sys.argv) > 1 else "status"
-if action == "start":
-    start()
-elif action == "stop":
-    stop()
-elif action == "restart":
-    stop(quiet=True)
-    start()
-elif action == "watchdog":
-    watchdog()
-else:
-    status()
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if action == "start":
+        start()
+    elif action == "stop":
+        stop()
+    elif action == "restart":
+        # Do not take down a healthy instance when replacement config is invalid.
+        bridge_environment()
+        stop(quiet=True)
+        start()
+    elif action == "watchdog":
+        watchdog()
+    else:
+        status()
+
+
+if __name__ == "__main__":
+    main()

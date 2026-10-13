@@ -92,6 +92,13 @@ func infoFlowCall(t *testing.T, h *Handler, req infoFlowRelayRequest, status int
 	return out
 }
 
+// Pin once when constructing a new bound-message fixture, never in the HTTP
+// call helper: retries must retain the original admission version.
+func infoFlowPin(t *testing.T, req *infoFlowRelayRequest) {
+	t.Helper()
+	dbfx.QueryRow(t, `SELECT id::text,generation::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind=$2 AND conversation_id=$3 AND ($2='group' OR (robot_id=$4 AND agent_id=$5)) AND issue_id IS NOT NULL`, req.WorkspaceID, req.Conversation.Kind, req.Conversation.ID, req.RobotID, req.AgentID).Scan(&req.ExpectedBindingID, &req.ExpectedGeneration)
+}
+
 func (f infoFlowTestFixture) bind(t *testing.T) infoFlowRelayResponse {
 	t.Helper()
 	out := infoFlowCall(t, f.h, f.req, 200)
@@ -137,6 +144,7 @@ func TestInfoFlowConversationModeIsMetadataOnly(t *testing.T) {
 			}
 			message := req
 			message.Operation, message.MessageID, message.Content = "message", uuid.NewString(), "请检查日志"
+			infoFlowPin(t, &message)
 			got := infoFlowCall(t, f.h, message, 200)
 			if got.ConversationMode != "issue" || got.CommentID == "" || !strings.Contains(got.Notice, "没有智能体权限") {
 				t.Fatalf("comment-only mode: %+v", got)
@@ -175,6 +183,7 @@ func TestInfoFlowAdmissionAndOriginalAuthor(t *testing.T) {
 	f.bind(t)
 	req := f.req
 	req.Operation = "message"
+	infoFlowPin(t, &req)
 	req.Content = "Please inspect"
 	req.MessageID = uuid.NewString()
 	// Unknown identity gets only owner/link metadata and no persisted input.
@@ -292,6 +301,7 @@ func TestInfoFlowUnboundChatBypassKeepsAcceptedReplaysOwned(t *testing.T) {
 	accepted := req
 	accepted.Sender = f.req.Sender
 	accepted.MessageID = uuid.NewString()
+	infoFlowPin(t, &accepted)
 	saved := infoFlowCall(t, f.h, accepted, 200)
 	if saved.CommentID == "" {
 		t.Fatal("owner input was not accepted")
@@ -313,6 +323,7 @@ func TestInfoFlowUnboundChatBypassKeepsAcceptedReplaysOwned(t *testing.T) {
 		t.Fatal("old replay duplicated input")
 	}
 	accepted.MessageID = uuid.NewString()
+	accepted.ExpectedBindingID, accepted.ExpectedGeneration = "", ""
 	if out := infoFlowCall(t, f.h, accepted, 200); out.Handled {
 		t.Fatalf("new unbound traffic still gated: %+v", out)
 	}
@@ -365,6 +376,7 @@ func TestInfoFlowConcurrentIdempotencyAndQuotes(t *testing.T) {
 	f.bind(t)
 	req := f.req
 	req.Operation = "message"
+	infoFlowPin(t, &req)
 	req.MessageID = uuid.NewString()
 	req.Content = "One message"
 	var wg sync.WaitGroup
@@ -423,6 +435,7 @@ func TestInfoFlowConcurrentIdempotencyAndQuotes(t *testing.T) {
 	private.MessageID = uuid.NewString()
 	infoFlowCall(t, f.h, private, 200)
 	private.Operation = "message"
+	infoFlowPin(t, &private)
 	private.MessageID = req.MessageID
 	private.Content = req.Content
 	out = infoFlowCall(t, f.h, private, 200)
@@ -464,6 +477,7 @@ func TestInfoFlowAtomicRollbackAndPostCommitEvents(t *testing.T) {
 	})
 	req := f.req
 	req.Operation = "message"
+	infoFlowPin(t, &req)
 	req.MessageID = uuid.NewString()
 	req.Content = "Atomic message"
 	original := f.h.TxStarter
@@ -486,6 +500,7 @@ func TestInfoFlowAttachmentsPermissionAndRetry(t *testing.T) {
 	f.h.Storage = store
 	req := f.req
 	req.Operation = "message"
+	infoFlowPin(t, &req)
 	req.MessageID = uuid.NewString()
 	req.Content = "image"
 	req.Attachments = []infoFlowAttachment{{Filename: "image.png", ContentType: "image/png", DataBase64: base64.StdEncoding.EncodeToString([]byte("fixture image bytes"))}}
@@ -530,6 +545,7 @@ func TestInfoFlowPermissionRevocationWaitsForAcceptedTransaction(t *testing.T) {
 	req := f.req
 	req.Sender = strings.Split(email, "@")[0]
 	req.Operation = "message"
+	infoFlowPin(t, &req)
 	req.MessageID = uuid.NewString()
 	req.Content = "permission race"
 	done := make(chan *httptest.ResponseRecorder, 1)

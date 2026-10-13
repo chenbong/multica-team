@@ -97,7 +97,7 @@ export class IssueGroups {
   async owns(scope, binding) {
     const leaderId = binding?.group?.leader_agent_id;
     if (!leaderId || scope.agent_id !== leaderId) return false;
-    const entries = await this.entries(scope.workspace_id, [leaderId]);
+    const entries = await this.entries(scope.workspace_id, [leaderId], { agentNames: binding.group.agent_names });
     const leaders = entries.filter(entry => entry.agentId === leaderId);
     return leaders.length === 1 && leaders[0].robotId === scope.robot_id;
   }
@@ -116,7 +116,9 @@ export class IssueGroups {
     if (!group?.leader_agent_id || !Array.isArray(group.agent_ids) || !group.agent_ids.includes(group.leader_agent_id)) {
       return { leader_present: false, reason: "leader_configuration_missing", leader_robot_id: "" };
     }
-    const entries = await this.entries(scope.workspace_id, [...new Set([...group.agent_ids, scope.agent_id])]);
+    const entries = await this.entries(scope.workspace_id, group.agent_ids, {
+      agentNames: group.agent_names, includeRobotId: bootstrap ? scope.robot_id : null,
+    });
     const candidates = entries.filter(entry => entry.agentId === group.leader_agent_id);
     if (candidates.length !== 1) return { leader_present: false, reason: "leader_robot_missing_or_ambiguous", leader_robot_id: "" };
     const leader = candidates[0];

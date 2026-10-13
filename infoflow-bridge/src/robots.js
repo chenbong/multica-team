@@ -7,6 +7,7 @@ import { VerificationCodeRelay } from "./codes.js";
 import { parseConversationBlocks, messageIdString, conversationContext } from "./conversation-context.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
 import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
+import { groupRobotEntries } from "./group-robot-entries.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5000;
 const MAX_INITIAL_RECONNECT_DELAY_MS = 120000;
@@ -20,7 +21,7 @@ export class RobotRuntime {
     this.instances = new Map();
     this.issueGroups = config.issueRelay?.enabled ? new IssueGroups({
       statePath: config.statePath,
-      entries: (workspaceId, agentIds) => this.groupRobotEntries(workspaceId, agentIds),
+      entries: (workspaceId, agentIds, options) => this.groupRobotEntries(workspaceId, agentIds, options),
     }) : null;
     this.relay = null;
     this.reviewNotifications = new ReviewNotifications(this);
@@ -78,34 +79,8 @@ export class RobotRuntime {
     return instance.client.im.message.sendToUser(user, content, "md");
   }
 
-  async groupRobotEntries(workspaceId, agentIds = null) {
-    const entries = [];
-    let catalog;
-    for (const robot of this.config.robots) {
-      if (robot.purpose === "verification" || (robot.workspaceId || this.config.multica.workspaceId) !== workspaceId) continue;
-      const instance = this.instances.get(robot.id);
-      let agentId = String(robot.agent || "");
-      if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(agentId)) {
-        // Resolve legacy names against a workspace catalog, including offline
-        // configs. An unrelated stale name must not block another issue's team.
-        if (!catalog) {
-          const resolver = instance || [...this.instances.values()].find(value =>
-            (value.robot.workspaceId || this.config.multica.workspaceId) === workspaceId);
-          if (!resolver) throw new Error("workspace agent catalog is unavailable");
-          catalog = await resolver.bridge.multica.listAgents();
-        }
-        const matches = catalog.filter(agent => agent.id === agentId || agent.name === agentId);
-        const relevant = agentIds ? matches.filter(agent => agentIds.includes(agent.id)) : matches;
-        if (!relevant.length) continue;
-        if (matches.length !== 1) throw new Error("participant robot agent mapping is ambiguous");
-        agentId = matches[0].id;
-      }
-      if (!agentId || (agentIds && !agentIds.includes(agentId))) continue;
-      const available = robot.enabled && instance && !instance.stopping;
-      entries.push({ robotId: robot.id, agentId, appId: robot.appId,
-        client: available ? instance.client : null, send: available ? instance.send : null });
-    }
-    return entries;
+  async groupRobotEntries(workspaceId, agentIds = null, options = {}) {
+    return groupRobotEntries(this.config, this.instances, workspaceId, agentIds, this.logger, options);
   }
 
   // One verification robot serves everybody: Multica's login codes and the admin

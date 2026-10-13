@@ -149,7 +149,8 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 		Notice     string `json:"notice"`
 		CommentID  string `json:"comment_id"`
 		Binding    *struct {
-			Group *struct {
+			BindingID string `json:"binding_id"`
+			Group     *struct {
 				State         string `json:"state"`
 				LeaderAgentID string `json:"leader_agent_id"`
 			} `json:"group"`
@@ -250,6 +251,28 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 			}
 			body["operation"], body["message_id"], body["content"] = "message", kind+"-message-"+suffix, "Incoming human comment from "+kind
 			delete(body, "issue_ref")
+			// The real router must reject missing/stale admission versions before
+			// a comment or task is created. Keep these requests deliberately raw.
+			for _, pin := range []map[string]string{
+				{},
+				{"expected_binding_id": bound.Binding.BindingID},
+				{"expected_generation": bound.Binding.Generation},
+				{"expected_binding_id": uuid.NewString(), "expected_generation": bound.Binding.Generation},
+				{"expected_binding_id": bound.Binding.BindingID, "expected_generation": uuid.NewString()},
+			} {
+				bad := make(map[string]any, len(body)+2)
+				for key, value := range body {
+					bad[key] = value
+				}
+				for key, value := range pin {
+					bad[key] = value
+				}
+				call(t, http.MethodPost, relayPath, bad, trustedHeaders, http.StatusConflict)
+			}
+			if got := f.Count(t, `SELECT count(*) FROM comment WHERE issue_id=$1 AND content LIKE $2`, issue, "%Incoming human comment from "+kind+"%"); got != 0 {
+				t.Fatalf("invalid message versions created %d comments", got)
+			}
+			body["expected_binding_id"], body["expected_generation"] = bound.Binding.BindingID, bound.Binding.Generation
 			forgedHeaders := map[string]string{
 				"Authorization": "Bearer " + serviceToken, "Cookie": auth.AuthCookieName + "=bogus",
 				"X-User-ID": owner, "X-Workspace-ID": uuid.NewString(),

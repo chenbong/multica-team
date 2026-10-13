@@ -21,24 +21,26 @@ import (
 const infoFlowGroupLease = 45 * time.Second
 
 type infoFlowGroupTopology struct {
-	AssigneeType  string   `json:"assignee_type"`
-	AssigneeID    string   `json:"assignee_id"`
-	LeaderAgentID string   `json:"leader_agent_id"`
-	AgentIDs      []string `json:"agent_ids"`
+	AssigneeType  string            `json:"assignee_type"`
+	AssigneeID    string            `json:"assignee_id"`
+	LeaderAgentID string            `json:"leader_agent_id"`
+	AgentIDs      []string          `json:"agent_ids"`
+	AgentNames    map[string]string `json:"-"`
 }
 
 type infoFlowGroupView struct {
-	State         string   `json:"state"`
-	LeaderAgentID string   `json:"leader_agent_id"`
-	LeaderRobotID string   `json:"leader_robot_id,omitempty"`
-	AgentIDs      []string `json:"agent_ids"`
-	Reason        string   `json:"reason,omitempty"`
+	State         string            `json:"state"`
+	LeaderAgentID string            `json:"leader_agent_id"`
+	LeaderRobotID string            `json:"leader_robot_id,omitempty"`
+	AgentIDs      []string          `json:"agent_ids"`
+	AgentNames    map[string]string `json:"agent_names"`
+	Reason        string            `json:"reason,omitempty"`
 }
 
 // Call inside the binding transaction for mutations. Issue/squad/agent row
 // locks fence reassignment, archived leaders, and existing membership removal.
 func (h *Handler) infoFlowTopology(ctx context.Context, issueID pgtype.UUID, wsID string) (infoFlowGroupTopology, string, error) {
-	t := infoFlowGroupTopology{AgentIDs: []string{}}
+	t := infoFlowGroupTopology{AgentIDs: []string{}, AgentNames: map[string]string{}}
 	err := h.DB.QueryRow(ctx, `SELECT COALESCE(assignee_type,''),COALESCE(assignee_id::text,'') FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, issueID, wsID).Scan(&t.AssigneeType, &t.AssigneeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return t, "任务已失效或移出工作区", nil
@@ -63,8 +65,8 @@ func (h *Handler) infoFlowTopology(ctx context.Context, issueID pgtype.UUID, wsI
 	if t.LeaderAgentID == "" {
 		return t, "请先为任务小队设置队长", nil
 	}
-	var leader string
-	err = h.DB.QueryRow(ctx, `SELECT id::text FROM agent WHERE id::text=$1 AND workspace_id=$2 AND archived_at IS NULL FOR SHARE`, t.LeaderAgentID, wsID).Scan(&leader)
+	var leader, leaderName string
+	err = h.DB.QueryRow(ctx, `SELECT id::text,name FROM agent WHERE id::text=$1 AND workspace_id=$2 AND archived_at IS NULL FOR SHARE`, t.LeaderAgentID, wsID).Scan(&leader, &leaderName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return t, "任务负责人或队长智能体不可用", nil
 	}
@@ -72,18 +74,20 @@ func (h *Handler) infoFlowTopology(ctx context.Context, issueID pgtype.UUID, wsI
 		return t, "", err
 	}
 	t.AgentIDs = append(t.AgentIDs, leader)
+	t.AgentNames[leader] = leaderName
 	if t.AssigneeType == "squad" {
-		rows, err := h.DB.Query(ctx, `SELECT a.id::text FROM squad_member sm JOIN agent a ON a.id=sm.member_id WHERE sm.squad_id=$1 AND sm.member_type='agent' AND a.workspace_id=$2 AND a.archived_at IS NULL ORDER BY a.id FOR SHARE OF sm,a`, t.AssigneeID, wsID)
+		rows, err := h.DB.Query(ctx, `SELECT a.id::text,a.name FROM squad_member sm JOIN agent a ON a.id=sm.member_id WHERE sm.squad_id=$1 AND sm.member_type='agent' AND a.workspace_id=$2 AND a.archived_at IS NULL ORDER BY a.id FOR SHARE OF sm,a`, t.AssigneeID, wsID)
 		if err != nil {
 			return t, "", err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var id string
-			if err = rows.Scan(&id); err != nil {
+			var id, name string
+			if err = rows.Scan(&id, &name); err != nil {
 				return t, "", err
 			}
 			t.AgentIDs = append(t.AgentIDs, id)
+			t.AgentNames[id] = name
 		}
 		if err = rows.Err(); err != nil {
 			return t, "", err
@@ -101,7 +105,7 @@ func infoFlowSameTopology(saved []byte, t infoFlowGroupTopology) bool {
 
 func (h *Handler) infoFlowGroupView(ctx context.Context, b infoFlowBinding, wsID string) *infoFlowGroupView {
 	t, reason, err := h.infoFlowTopology(ctx, b.IssueID, wsID)
-	v := &infoFlowGroupView{State: "pending", LeaderAgentID: t.LeaderAgentID, AgentIDs: t.AgentIDs, Reason: reason}
+	v := &infoFlowGroupView{State: "pending", LeaderAgentID: t.LeaderAgentID, AgentIDs: t.AgentIDs, AgentNames: t.AgentNames, Reason: reason}
 	if err != nil {
 		v.Reason = "暂时无法确认任务负责人，请稍后重试"
 		return v

@@ -43,8 +43,10 @@ jobs:
         working-directory: infoflow-bridge
         run: >-
           node --test chat.test.js conversation-context.test.js
-          issue-relay.test.js issue-relay-reliability.test.js issue-groups.test.js reply-mode.test.js
+          issue-relay.test.js issue-relay-reliability.test.js issue-groups.test.js issue-review-regressions.test.js reply-mode.test.js
           reactions.test.js review-notifications.test.js
+      - name: Verify standalone restart credentials and private state exclusions
+        run: python3 -m unittest discover -s infoflow-bridge/test -p 'test_bridgectl.py' -v
       - name: Prepare isolated database and Go overlay
         run: |
           set -euo pipefail

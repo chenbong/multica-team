@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
@@ -40,6 +40,7 @@ export class Bridge {
     this.multica = new Multica(config.multica, logger);
     this.getImageAccessToken = getImageAccessToken;
     this.state = this.#loadState();
+    this.inboundQueues = new Map();
     this.chat = new ChatRelay(config, this.multica,
       async (conversation, user, content) => {
         for (const part of splitMessage(content)) await this.sender(conversation, withReplyMode(part, "chat"), {});
@@ -63,18 +64,35 @@ export class Bridge {
 
   // conversation: { kind: "private" | "group", id }. For a private chat the id is
   // the username to reply to; for a group it is the numeric group id.
-  async handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null }) {
+  handleMessage(message) {
+    // Relay fallback runs inside the outer call and must not wait on itself.
+    if (message.skipIssueRelay) return this.#handleMessage(message);
+    const key = JSON.stringify([message.conversation?.kind, String(message.conversation?.id), this.resolveUser(message.user)]);
+    const prior = this.inboundQueues.get(key) || Promise.resolve();
+    const pending = prior.catch(() => {}).then(() => this.#handleMessage(message));
+    this.inboundQueues.set(key, pending);
+    return pending.finally(() => { if (this.inboundQueues.get(key) === pending) this.inboundQueues.delete(key); });
+  }
+
+  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
     const user = this.resolveUser(rawUser);
-    // The relay has persistent, server-side deduplication and authenticates the
-    // real sender before any receipt, owner-profile command, or chat fallback.
-    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context })) return;
-    if (messageId && (handoff ? this.#loadState().seenMessageIds.includes(String(messageId)) : this.#alreadyHandled(messageId))) {
+    // A completed Chat input must keep its original destination even if the
+    // conversation has since bound an issue. This is a read-only check: failed
+    // and not-yet-accepted inputs must remain retryable.
+    if (messageId && this.#loadState().seenMessageIds.includes(String(messageId))) {
       this.logger.warn(`ignoring redelivered InfoFlow message ${messageId} from ${rawUser}`);
       return;
     }
+    if (messageId && this.#loadState().uncertainChatMessageIds.includes(String(messageId))) {
+      this.logger.warn("Chat submission outcome uncertain; inspect retained Chat state before retrying");
+      return;
+    }
+    // The relay has persistent, server-side deduplication and authenticates the
+    // real sender before any receipt, owner-profile command, or chat fallback.
+    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context })) return;
 
     if (!this.#allowed(user, conversation)) {
       this.logger.warn(`rejected ${conversation.kind} message from ${user}: not in allowUsers`);
@@ -84,35 +102,47 @@ export class Bridge {
       return;
     }
 
+    const complete = () => {
+      if (messageId) this.#alreadyHandled(messageId);
+      handoff?.afterSubmit();
+    };
     try {
       const issueBody = issueRequest(body);
       if (issueBody !== null) {
         if (!issueBody) {
           await this.reply(conversation, user, "请提供任务内容，例如 /issue 优化推理性能。");
+          complete();
           return;
         }
         await this.#dispatch(conversation, user, issueBody, inboundImages);
+        complete();
         return;
       }
       if (body.startsWith("/")) {
-        await this.#handleCommand(conversation, user, body);
+        await this.#handleCommand(conversation, user, body, complete);
+        complete();
         return;
       }
       const progress = body.match(/^([A-Za-z][A-Za-z0-9]*-\d+)\s*(?:的)?(?:进度|进展|状态|完成了吗|怎么样了)(?:怎么样|怎么样了|如何|呢)?[？?\s]*$/);
       if (progress) {
         await this.#issueStatus(conversation, user, progress[1]);
+        complete();
         return;
       }
       if (/^(?:刚才|之前|上一个|最近)(?:的)?(?:那个)?任务(?:的)?(?:进度|进展|状态|完成了吗|怎么样了)[？?\s]*$/.test(body)) {
         await this.#issueStatus(conversation, user, "");
+        complete();
         return;
       }
-      const chatHandoff = handoff && {
-        beforeSubmit: handoff.beforeSubmit,
-        afterSubmit: () => { handoff.afterSubmit(); if (messageId) this.#alreadyHandled(messageId); },
+      const chatHandoff = {
+        beforeSubmit: () => {
+          if (handoff) handoff.beforeSubmit();
+          else if (messageId) this.#markChatSubmitting(messageId);
+        },
+        afterSubmit: complete,
       };
       await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff);
-      if (handoff && messageId) this.#alreadyHandled(messageId);
+      complete();
     } catch (error) {
       if (handoff) throw error;
       this.logger.error(`handling message from ${user} failed: ${error.message}`);
@@ -120,11 +150,12 @@ export class Bridge {
     }
   }
 
-  async reply(conversation, user, content, mode = "chat") {
+  async reply(conversation, user, content, mode = "chat", strict = false) {
     try {
       for (const part of splitMessage(content)) await this.sender(conversation, withReplyMode(part, mode), {});
     } catch (error) {
       this.logger.error(`sending to ${conversation.kind}:${conversation.id} failed: ${error.message}`);
+      if (strict) throw error;
     }
   }
 
@@ -140,17 +171,18 @@ export class Bridge {
     return this.config.allowUsers.some((name) => name.toLowerCase() === String(user).toLowerCase());
   }
 
-  async #handleCommand(conversation, user, body) {
+  async #handleCommand(conversation, user, body, complete) {
     const [command, ...rest] = body.split(/\s+/);
     const argument = rest.join(" ").trim();
+    const reply = content => this.reply(conversation, user, content, "chat", true);
 
     if (command === "/new") {
-      await this.chat.reset(conversation, user);
+      await this.chat.reset(conversation, user, complete);
       return;
     }
 
     if (command === "/help") {
-      await this.reply(conversation, user, HELP);
+      await reply(HELP);
       return;
     }
     if (command === "/agents") {
@@ -159,12 +191,12 @@ export class Bridge {
       const lines = agents.map(
         (agent) => `- ${agent.name === current ? "**" + agent.name + "**（当前）" : agent.name}　${agent.model ?? ""}`,
       );
-      await this.reply(conversation, user, lines.length > 0 ? lines.join("\n") : "这个工作区还没有 agent。");
+      await reply(lines.length > 0 ? lines.join("\n") : "这个工作区还没有 agent。");
       return;
     }
     if (command === "/agent") {
       if (argument === "") {
-        await this.reply(conversation, user, `你当前的 agent：${this.agentFor(user)}。用 \`/agent <名字>\` 切换。`);
+        await reply(`你当前的 agent：${this.agentFor(user)}。用 \`/agent <名字>\` 切换。`);
         return;
       }
       const agents = await this.multica.listAgents();
@@ -172,11 +204,12 @@ export class Bridge {
         agents.find((agent) => agent.name === argument) ??
         agents.find((agent) => agent.name.toLowerCase() === argument.toLowerCase());
       if (!match) {
-        await this.reply(conversation, user, `没找到叫「${argument}」的 agent。用 \`/agents\` 看看有哪些。`);
+        await reply(`没找到叫「${argument}」的 agent。用 \`/agents\` 看看有哪些。`);
         return;
       }
       this.#rememberUser(user, { agent: match.name });
-      await this.reply(conversation, user, `好，之后你的任务派给「${match.name}」。`);
+      complete();
+      await reply(`好，之后你的任务派给「${match.name}」。`);
       return;
     }
     if (command === "/status") {
@@ -184,7 +217,7 @@ export class Bridge {
       await this.#issueStatus(conversation, user, argument);
       return;
     }
-    await this.reply(conversation, user, `不认识的命令：${command}。发 \`/help\` 看用法。`);
+    await reply(`不认识的命令：${command}。发 \`/help\` 看用法。`);
   }
 
   async #issueStatus(conversation, user, reference) {
@@ -325,28 +358,42 @@ export class Bridge {
     this.state = this.#loadState();
     const id = String(messageId);
     if (this.state.seenMessageIds.includes(id)) return true;
+    this.state.uncertainChatMessageIds = this.state.uncertainChatMessageIds.filter(value => value !== id);
     this.state.seenMessageIds.push(id);
     if (this.state.seenMessageIds.length > Bridge.SEEN_MESSAGE_LIMIT) {
       this.state.seenMessageIds = this.state.seenMessageIds.slice(-Bridge.SEEN_MESSAGE_LIMIT);
     }
-    this.#persist();
+    this.#persist(true);
     return false;
   }
 
-  #persist() {
+  #markChatSubmitting(messageId) {
+    this.state = this.#loadState();
+    const id = String(messageId);
+    if (this.state.uncertainChatMessageIds.includes(id)) throw new Error("Chat submission outcome uncertain");
+    if (this.state.uncertainChatMessageIds.length >= 500) throw new Error("uncertain Chat submissions require operator review");
+    this.state.uncertainChatMessageIds.push(id);
+    // This is not a completed-message marker. A lost POST response must remain
+    // unresolved instead of being submitted again or retargeted to an issue.
+    this.#persist(true);
+  }
+
+  #persist(strict = false) {
     try {
-      writeFileSync(this.config.statePath, JSON.stringify(this.state, null, 2) + "\n", { mode: 0o600 });
+      writeFileSync(this.config.statePath + ".tmp", JSON.stringify(this.state, null, 2) + "\n", { mode: 0o600 });
+      renameSync(this.config.statePath + ".tmp", this.config.statePath);
     } catch (error) {
       this.logger.warn(`could not persist state: ${error.message}`);
+      if (strict) throw error;
     }
   }
 
   #loadState() {
     try {
       const parsed = JSON.parse(readFileSync(this.config.statePath, "utf8"));
-      return { users: parsed.users ?? {}, seenMessageIds: parsed.seenMessageIds ?? [] };
+      return { users: parsed.users ?? {}, seenMessageIds: parsed.seenMessageIds ?? [], uncertainChatMessageIds: parsed.uncertainChatMessageIds ?? [] };
     } catch {
-      return { users: {}, seenMessageIds: [] };
+      return { users: {}, seenMessageIds: [], uncertainChatMessageIds: [] };
     }
   }
 }

@@ -79,14 +79,14 @@ test("runtime maps participant configs across Bridge callbacks without workspace
   const statePath = join(dir, "state");
   const config = { statePath, issueRelay: { enabled: true }, robots: [
     { id: "a", agent: a, appId: "101", workspaceId: "ws", enabled: true },
-    { id: "b", agent: "member-name", appId: "202", workspaceId: "ws", enabled: false },
-    { id: "stale", agent: "unrelated-deleted-name", appId: "303", workspaceId: "ws", enabled: false },
+    { id: "b", agent: b, appId: "202", workspaceId: "ws", enabled: false },
+    { id: "stale", agent: "33333333-3333-4333-8333-333333333333", appId: "303", workspaceId: "ws", enabled: false },
     { id: "other", agent: a, appId: "404", workspaceId: "another-ws", enabled: true },
-  ], multica: { workspaceId: "ws" } };
+  ], multica: { workspaceId: "ws", cli: join(dir, "missing-test-cli") } };
   const logger = { log() {}, warn() {}, error() {} };
   const runtime = new RobotRuntime(config, logger); runtime.reviewNotifications.stop();
   const bridge = new Bridge({ robotId: "a", statePath, issueRelay: { enabled: true }, pollIntervalMs: 3600000,
-    multica: { workspaceId: "ws", defaultAgent: a, serverUrl: "https://api.example.invalid", webUrl: "https://web.example.invalid" } },
+    multica: { cli: join(dir, "missing-test-cli"), workspaceId: "ws", defaultAgent: a, serverUrl: "https://api.example.invalid", webUrl: "https://web.example.invalid" } },
     async () => { throw new Error("unexpected send"); }, logger, { issueGroups: runtime.issueGroups });
   bridge.multica.listAgents = async () => [{ id: a, name: "leader" }, { id: b, name: "member-name" }];
   runtime.instances.set("a", { robot: config.robots[0], bridge, client: { marker: "fake" }, send: async () => {} });

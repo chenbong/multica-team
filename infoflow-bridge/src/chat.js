@@ -39,11 +39,14 @@ export class ChatRelay {
     this.queues.set(key, next);
     return next.finally(() => { if (this.queues.get(key) === next) this.queues.delete(key); });
   }
-  reset(conversation, user) {
+  reset(conversation, user, onReset = null) {
     const key = this.key(conversation, user);
     return this.serial(key, async () => {
       delete this.state.threads[key];
       this.save();
+      // The reset is committed even if its external receipt fails. Never replay
+      // that effect against a newer conversation just to resend a notification.
+      onReset?.();
       await this.reply(conversation, user, "已开启新对话。之后的消息使用新的聊天上下文；之前正在执行的对话会继续完成。\n使用 /issue <内容> 创建任务。");
     });
   }

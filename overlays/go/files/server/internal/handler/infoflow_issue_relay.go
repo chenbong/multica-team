@@ -42,16 +42,18 @@ type infoFlowScope struct {
 
 type infoFlowRelayRequest struct {
 	infoFlowScope
-	Conversation     infoFlowConversation `json:"conversation"`
-	Sender           string               `json:"sender"`
-	MessageID        string               `json:"message_id"`
-	Operation        string               `json:"operation"`
-	Command          string               `json:"command,omitempty"`
-	IssueRef         string               `json:"issue_ref,omitempty"`
-	Content          string               `json:"content,omitempty"`
-	ReplyToMessageID string               `json:"reply_to_message_id,omitempty"`
-	HasAttachments   bool                 `json:"has_attachments,omitempty"`
-	Attachments      []infoFlowAttachment `json:"attachments,omitempty"`
+	Conversation       infoFlowConversation `json:"conversation"`
+	Sender             string               `json:"sender"`
+	MessageID          string               `json:"message_id"`
+	Operation          string               `json:"operation"`
+	Command            string               `json:"command,omitempty"`
+	IssueRef           string               `json:"issue_ref,omitempty"`
+	Content            string               `json:"content,omitempty"`
+	ReplyToMessageID   string               `json:"reply_to_message_id,omitempty"`
+	HasAttachments     bool                 `json:"has_attachments,omitempty"`
+	Attachments        []infoFlowAttachment `json:"attachments,omitempty"`
+	ExpectedBindingID  string               `json:"expected_binding_id,omitempty"`
+	ExpectedGeneration string               `json:"expected_generation,omitempty"`
 }
 
 type infoFlowBindingView struct {
@@ -422,7 +424,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if !acceptedBeforeUnbind {
+		if !acceptedBeforeUnbind && req.ExpectedBindingID == "" && req.ExpectedGeneration == "" {
 			out := infoFlowRelayResponse{ConversationMode: "chat"}
 			if req.Operation == "binding" && req.Command != "" {
 				out.Handled = true
@@ -433,10 +435,10 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	user, role, identityErr := sh.infoFlowIdentity(r.Context(), req.Sender, req.WorkspaceID)
-	// Multiple bound groups may submit to one issue concurrently. Acquire the
+	// Multiple bound conversations may submit to one issue concurrently. Acquire the
 	// eventual comment-write lock before reading topology; two FOR SHARE locks
 	// upgraded later by CreateComment would otherwise deadlock each other.
-	if identityErr == nil && req.Conversation.Kind == "group" && req.Operation == "message" && b.IssueID.Valid {
+	if identityErr == nil && req.Operation == "message" && b.IssueID.Valid {
 		var live pgtype.UUID
 		e := tx.QueryRow(r.Context(), `SELECT id FROM issue WHERE id=$1 AND workspace_id=$2 FOR NO KEY UPDATE`, b.IssueID, req.WorkspaceID).Scan(&live)
 		if e != nil && !errors.Is(e, pgx.ErrNoRows) {
@@ -558,10 +560,36 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Operation != "message" && !canManage && !(req.Conversation.Kind == "group" && req.Operation == "bind") {
+	// Only a first group binding may use the target leader's ownership instead
+	// of authority over the existing binding. Even rebinding the same issue
+	// changes its binder and presence state, so it requires the old authority.
+	if req.Operation != "message" && !canManage && !(req.Conversation.Kind == "group" && req.Operation == "bind" && !b.IssueID.Valid) {
 		resp.Notice = "只有智能体所有者、工作区管理员或当前绑定人可以修改任务绑定"
 		writeJSON(w, 200, resp)
 		return
+	}
+	if req.Operation == "message" {
+		// Receipt replay above wins over version changes. An uncommitted input,
+		// however, must never silently follow a rebind or become unbound Chat.
+		if req.ExpectedBindingID == "" || req.ExpectedGeneration == "" || !b.IssueID.Valid {
+			infoFlowError(w, 409, "binding version required")
+			return
+		}
+		invalid := &infoFlowCapture{}
+		expectedID, ok := parseUUIDOrBadRequest(invalid, req.ExpectedBindingID, "expected_binding_id")
+		if !ok {
+			infoFlowError(w, 400, "invalid binding id")
+			return
+		}
+		expectedGeneration, ok := parseUUIDOrBadRequest(invalid, req.ExpectedGeneration, "expected_generation")
+		if !ok {
+			infoFlowError(w, 400, "invalid binding generation")
+			return
+		}
+		if expectedID != b.ID || expectedGeneration != b.Generation {
+			infoFlowError(w, 409, "binding changed")
+			return
+		}
 	}
 	if req.Conversation.Kind == "group" && req.Operation == "message" && resp.Binding != nil {
 		g := resp.Binding.Group
@@ -640,6 +668,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	memberReq := infoFlowMemberRequest(r.Context(), uuidToString(user.ID), req.WorkspaceID, "", nil)
 	switch req.Operation {
 	case "bind":
+		previouslyBound := b.IssueID.Valid
 		capture := &infoFlowCapture{}
 		issue, ok := sh.loadIssueForUser(capture, memberReq, req.IssueRef)
 		if !ok {
@@ -681,7 +710,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				infoFlowError(w, 500, "leader")
 				return
 			}
-			if uuidToString(leader.OwnerID) != uuidToString(user.ID) && role != "owner" && role != "admin" && !(b.BinderID.Valid && b.BinderID == user.ID) {
+			if !previouslyBound && uuidToString(leader.OwnerID) != uuidToString(user.ID) && role != "owner" && role != "admin" {
 				resp.CanComment = false
 				resp.Notice = "只有任务负责人、队长所有者、工作区管理员或当前绑定人可以修改群聊绑定"
 				writeJSON(w, 200, resp)
@@ -752,7 +781,21 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				infoFlowError(w, 409, "unknown or stale reply")
 				return
 			}
-			body := map[string]any{"content": fmt.Sprintf("[@Agent](mention://agent/%s)\n\n%s", req.AgentID, content), "attachment_ids": attachmentIDs}
+			mention := fmt.Sprintf("[@Agent](mention://agent/%s)", req.AgentID)
+			// Preserve the issue's squad-leader dispatch semantics. Direct
+			// mentions of other members and single-agent assignments stay agent
+			// invocations. The issue is already locked above; lock the squad too
+			// so a leader change cannot race the authored mention.
+			var squadID pgtype.UUID
+			e := tx.QueryRow(r.Context(), `SELECT s.id FROM issue i JOIN squad s ON i.assignee_type='squad' AND i.assignee_id=s.id AND s.workspace_id=i.workspace_id WHERE i.id=$1 AND i.workspace_id=$2 AND s.leader_id=$3 AND s.archived_at IS NULL FOR SHARE OF s`, b.IssueID, req.WorkspaceID, agent.ID).Scan(&squadID)
+			if e != nil && !errors.Is(e, pgx.ErrNoRows) {
+				infoFlowError(w, 500, "squad dispatch")
+				return
+			}
+			if squadID.Valid {
+				mention = fmt.Sprintf("[@Squad](mention://squad/%s)", uuidToString(squadID))
+			}
+			body := map[string]any{"content": mention + "\n\n" + content, "attachment_ids": attachmentIDs}
 			// A concurrent NEW grant must not change the already-returned
 			// no-invoke decision into a run during the handler's second check.
 			if !canInvoke {

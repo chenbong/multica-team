@@ -8,7 +8,7 @@ import { IssueRelay, relayOperation, splitMessage } from "./src/issue-relay.js";
 import { withReplyMode } from "./src/reply-format.js";
 
 const agent = "00000000-0000-4000-8000-000000000001";
-const binding = { issue_id: "issue", identifier: "TEST-1", workspace_slug: "team", generation: 1 };
+const binding = { binding_id: "binding-1", issue_id: "issue", identifier: "TEST-1", workspace_slug: "team", generation: "generation-1" };
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), "infoflow-binding-test-"));
   const config = { robotId: "robot", issueRelay: { enabled: true }, statePath: join(dir, "state.json"),
@@ -17,7 +17,7 @@ function fixture(t) {
   const sent = [], requests = [], warnings = [];
   const bridge = new Bridge(config, async (conversation, content, options) => { sent.push({ conversation, content, options }); return { messageid: "123" }; },
     { log() {}, error() {}, warn(message) { warnings.push(message); } });
-  bridge.issueRelay.request = async (path, body) => { requests.push({ path, body }); return { handled: true, silent: false, binding }; };
+  bridge.issueRelay.request = async (path, body) => { requests.push({ path, body }); return { handled: true, silent: false, can_comment: true, binding }; };
   bridge.chat.send = async () => { throw new Error("unexpected Chat fallback"); };
   t.after(() => { bridge.stop(); rmSync(dir, { recursive: true, force: true }); });
   return { bridge, config, dir, sent, requests, warnings,
@@ -47,7 +47,7 @@ test("denied workspace user gets owner notice and issue footer, no receipt or Ch
 
 test("comment-only result reports no invoke permission and never says run started", async t => {
   const f = fixture(t);
-  f.bridge.issueRelay.request = async () => ({ handled: true, silent: false, binding, comment_id: "c1",
+  f.bridge.issueRelay.request = async (_path, body) => body.operation === "binding" ? { handled: true, silent: false, can_comment: true, binding } : ({ handled: true, silent: false, binding, comment_id: "c1",
     notice: "没有智能体权限，当前仅新增评论，但无法调用智能体，请向 agent-owner 申请智能体权限" });
   await f.send("测试");
   assert.match(f.sent[0].content, /当前仅新增评论/);
@@ -58,8 +58,10 @@ test("both-permissions input sends exact real sender and source without owner cr
   const f = fixture(t);
   await f.send("请继续", { replyToMessageId: "99" });
   assert.equal(f.sent.length, 0);
-  assert.deepEqual(f.requests[0].body, { robot_id: "robot", agent_id: agent, workspace_id: "workspace",
-    conversation: { kind: "group", id: "42" }, sender: "alice", message_id: "100", operation: "message", content: "请继续", reply_to_message_id: "99" });
+  assert.equal(f.requests[0].body.operation, "binding");
+  assert.deepEqual(f.requests[1].body, { robot_id: "robot", agent_id: agent, workspace_id: "workspace",
+    conversation: { kind: "group", id: "42" }, sender: "alice", message_id: "100", operation: "message", content: "请继续", reply_to_message_id: "99",
+    expected_binding_id: binding.binding_id, expected_generation: binding.generation });
 });
 
 test("private user scope and group scope are forwarded independently", async t => {
@@ -96,8 +98,9 @@ test("retry reuses the event ID rather than pre-marking it as handled locally", 
   const f = fixture(t);
   await f.send("同一条消息");
   await f.send("同一条消息");
-  assert.equal(f.requests.length, 2);
-  assert.equal(f.requests[0].body.message_id, f.requests[1].body.message_id);
+  const mutations = f.requests.filter(request => request.body.operation === "message");
+  assert.equal(mutations.length, 2);
+  assert.deepEqual(mutations[0].body, mutations[1].body);
 });
 
 test("missing and unsafe inbound message IDs do not write or fall through", async t => {
@@ -252,7 +255,10 @@ test("more than 500 permanently invalid inputs do not occupy the normal inbox ca
   assert.equal(Object.keys(f.bridge.issueRelay.inbox).length, 0);
   assert.equal(readdirSync(f.bridge.issueRelay.quarantinePath).length, 501);
   let handled = 0;
-  f.bridge.issueRelay.request = async () => { handled++; return { handled: true, silent: true }; };
+  f.bridge.issueRelay.request = async (_path, body) => {
+    if (body.operation === "binding") return { handled: true, silent: true, can_comment: true, binding };
+    handled++; return { handled: true, silent: true };
+  };
   await f.send("good", { conversation: { kind: "group", id: "43" }, messageId: "2000" });
   assert.equal(handled, 1);
 });

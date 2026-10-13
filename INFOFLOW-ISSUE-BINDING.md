@@ -25,6 +25,9 @@ Binding administration requires the relevant owner, a workspace owner/admin, or
 the current binder, who must still be a workspace member. Creating an assigned
 issue also requires permission to invoke the agent. Switching a binding does
 not cancel existing work, but stops routing old-generation answers.
+Replacing an existing group binding first requires management authority over
+that existing binding; owning a different target task's leader is not enough.
+The target issue's binding requirements are then checked separately.
 
 ## Required leader presence and sending identity
 
@@ -63,6 +66,17 @@ checkpoints. A retry does not switch between member and leader. Each delivery
 has one coordinator, not a separate poller per author. Robot-origin input is
 filtered to prevent forwarded agent replies from starting robot conversations.
 Mode/author labels are transport-only; canonical issue comments are unchanged.
+When a group addresses the assigned squad's leader, the internal trigger retains
+the squad ID and leader role so the runtime receives the squad briefing. Other
+members and single-agent assignments keep ordinary agent invocation semantics.
+Robot names from older configurations are resolved using each robot's own
+account, including configured-but-offline robots. Hidden, missing or ambiguous
+names are not interpreted as an absent robot; prefer stable agent UUIDs.
+The server's current task roster supplies participant names solely to exclude
+unrelated legacy configurations before lookup. Only a complete roster can make
+that exclusion; an unresolved matching participant still blocks routing. An
+authorized bootstrap explicitly includes the addressed inviter when it is not
+part of the task, without treating it as the task's leader.
 
 Example: an issue is assigned to a squad led by A with member B. A's robot must
 be in the group. If B's robot is present, B sends:
@@ -161,6 +175,13 @@ Set these only in restricted deployment environment files:
 | API | `INFOFLOW_ISSUE_IDENTITY_DOMAIN` | Verified platform email domain matching the IM identity namespace |
 | Bridge | `INFOFLOW_ISSUE_RELAY_ENABLED=true` | Explicit opt-in; default off |
 
+The standalone `bridgectl.py start/restart` path loads the relay token from the
+restricted `deploy/secrets.env` file, just like the deployment entry point. Only
+that value is imported; unrelated database/JWT/plugin secrets are not copied
+from the file. Environment-only container configuration is also supported.
+Missing or invalid relay credentials are rejected before stopping an existing
+process or launching a replacement. Disabled relay mode does not require a token.
+
 The Bridge also needs explicit `multica.serverUrl`, `multica.webUrl` and a pinned
 robot workspace and agent. Prefer the agent UUID. Secrets never go to browser
 responses, daemon environments, prompts or Git. Keep the service channel on
@@ -182,6 +203,16 @@ lineage; private deliveries retain the original single-agent scope. This is not
 a broadcast of every unrelated human comment or historical/background event.
 Binding changes/deletion/moves invalidate old routing. Private deliveries also
 recheck the recipient's membership.
+
+Ordinary bound input pins `expected_binding_id` and `expected_generation` from
+its first preflight before persistence/submission. Retries retain that target;
+an uncommitted message cannot silently move to another issue after a rebind.
+The server checks existing receipts before the target-version fence, so an
+already accepted input remains idempotent after binding changes. Conflicting
+or legacy unversioned prepared requests require review instead of being rerouted.
+Completed Chat input is checked before issue routing, preserving its original
+destination after switching to task mode; successful chat commands also retain
+deduplication records.
 
 ## Reliability and storage
 
@@ -219,9 +250,10 @@ Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
 
-Local verification on 2026-10-13: 131 Bridge tests; 158 selected handler,
+Local verification on 2026-10-13: 157 Bridge tests; 182 selected handler,
 permission, comment and transfer cases with the race detector; 12 real-router
-HTTP cases with the race detector; 153 frontend API/query/component regressions
+HTTP cases with the race detector; 13 isolated lifecycle/secret/gitignore tests;
+153 frontend API/query/component regressions
 (including 26 new group-entry cases); 10 existing legacy-browser compatibility
 tests; core/views type checks; production Web build; syntax checks, Go vet and a
 Linux/amd64 API build passed. No test was skipped in those runs. New migrations

@@ -51,6 +51,7 @@ func TestInfoFlowMultipleGroupsConcurrentComments(t *testing.T) {
 	start := make(chan struct{})
 	for _, req := range []infoFlowRelayRequest{f.req, second} {
 		req.Operation = "message"
+		infoFlowPin(t, &req)
 		req.MessageID = uuid.NewString()
 		req.Content = "concurrent group input"
 		go func() {
@@ -93,6 +94,7 @@ func TestInfoFlowNestedExternalMentionCannotInvokeOtherAgent(t *testing.T) {
 			dbfx.QueryRow(t, `SELECT email FROM "user" WHERE id=$1`, f.user).Scan(&email)
 			req := f.req
 			req.Operation = "message"
+			infoFlowPin(t, &req)
 			req.MessageID = uuid.NewString()
 			req.Sender = strings.Split(email, "@")[0]
 			req.Content = fmt.Sprintf("[@outer [@C](mention://agent/%s)](mention://agent/%s) [@outer [@squad](mention://squad/%s)](mention://squad/%s)", c, c, squad, squad)
@@ -151,6 +153,7 @@ func TestInfoFlowGroupPendingLeaseAndLink(t *testing.T) {
 	}
 	message := f.req
 	message.Operation = "message"
+	infoFlowPin(t, &message)
 	message.MessageID = uuid.NewString()
 	message.Content = "pending input"
 	if got := infoFlowCall(t, f.h, message, 200); got.CanComment || got.CommentID != "" || got.Notice == "" {
@@ -276,6 +279,7 @@ func TestInfoFlowGroupTopologyAndParticipantRouting(t *testing.T) {
 	}
 	req := other.req
 	req.Operation = "message"
+	infoFlowPin(t, &req)
 	req.MessageID = uuid.NewString()
 	req.Content = "B please work"
 	if got := infoFlowCall(t, f.h, req, 200); got.CommentID == "" {

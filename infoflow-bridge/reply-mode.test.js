@@ -8,7 +8,7 @@ import { Bridge } from "./src/bridge.js";
 import { withReplyMode, noticeReplyMode } from "./src/reply-format.js";
 
 const agent = "00000000-0000-4000-8000-000000000001";
-const binding = { issue_id: "issue", identifier: "TASK-1", workspace_slug: "team" };
+const binding = { binding_id: "binding", generation: "generation", issue_id: "issue", identifier: "TASK-1", workspace_slug: "team" };
 const answer = "已完成分析。\n\n**结论**：需要调整批量大小。";
 const footer = "\n\n完整任务对话：https://team.example.test/team/issues/TASK-1";
 
@@ -30,7 +30,10 @@ function fixture(t, kind, mode) {
   });
   bridge.issueRelay.request = async (path, body) => {
     if (path === "issue-relay") {
-      if (mode === "issue") { apiInputs.push(body.content); return { handled: true, silent: false, binding, conversation_mode: "issue" }; }
+      if (mode === "issue") {
+        if (body.operation === "message") apiInputs.push(body.content);
+        return { handled: true, silent: false, can_comment: true, binding, conversation_mode: "issue" };
+      }
       return { handled: false, silent: false, conversation_mode: "chat" };
     }
     if (path === "issue-deliveries") return { deliveries: [delivery] };
