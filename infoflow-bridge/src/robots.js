@@ -1,5 +1,3 @@
-import { Client } from "@baidu/infoflow-sdk-nodejs";
-import { createWSClient } from "./ws-transport.js";
 import { Bridge } from "./bridge.js";
 import { ReviewNotifications } from "./review-notifications.js";
 import { acknowledge } from "./reactions.js";
@@ -163,6 +161,11 @@ export class RobotRuntime {
   }
 
   async #start(robot) {
+    // Pure coordination and fake-transport tests do not need the private SDK.
+    // Load it only when starting an actual configured robot connection.
+    const [{ Client }, { createWSClient }] = await Promise.all([
+      import("@baidu/infoflow-sdk-nodejs"), import("./ws-transport.js"),
+    ]);
     const client = new Client({
       appKey: robot.appKey,
       appSecret: robot.appSecret,

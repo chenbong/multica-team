@@ -294,7 +294,8 @@ func (h *Handler) GetIssueInfoFlowGroups(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if _, ok = h.requireWorkspaceMember(w, r, uuidToString(i.WorkspaceID), "issue not found"); !ok {
+	member, ok := h.requireWorkspaceMember(w, r, uuidToString(i.WorkspaceID), "issue not found")
+	if !ok {
 		return
 	}
 	if len(os.Getenv("INFOFLOW_ISSUE_RELAY_TOKEN")) < 32 || !infoFlowDomain.MatchString(os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")) {
@@ -308,6 +309,17 @@ func (h *Handler) GetIssueInfoFlowGroups(w http.ResponseWriter, r *http.Request)
 	}
 	defer tx.Rollback(r.Context())
 	ws := uuidToString(i.WorkspaceID)
+	// The compatibility read route also fences current membership. A newer
+	// browser must not regain a revoked destination through its old-route fallback.
+	var role string
+	if err = tx.QueryRow(r.Context(), `SELECT role FROM member WHERE workspace_id=$1 AND user_id=$2 FOR SHARE`, ws, member.UserID).Scan(&role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 404, "issue not found")
+		} else {
+			writeError(w, 500, "Failed to load groups")
+		}
+		return
+	}
 	rows, err := tx.Query(r.Context(), `SELECT conversation_id,id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND issue_id=$2 AND conversation_kind='group' ORDER BY conversation_id`, ws, i.ID)
 	if err != nil {
 		writeError(w, 500, "Failed to load groups")

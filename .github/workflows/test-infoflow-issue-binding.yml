@@ -39,9 +39,6 @@ jobs:
         with:
           go-version-file: multica/server/go.mod
           cache-dependency-path: multica/server/go.sum
-      - name: Install pinned Bridge SDK dependencies
-        working-directory: infoflow-bridge
-        run: npm ci
       - name: Test transport-independent Bridge behavior with fakes
         working-directory: infoflow-bridge
         run: >-

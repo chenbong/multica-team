@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
@@ -467,5 +468,33 @@ func TestInfoFlowWebGroupOldFailureDoesNotHideNewIMBinding(t *testing.T) {
 	view := infoFlowWebCall(t, f, "GET", f.owner, nil, 200)
 	if view.Binding == nil || view.Binding.GroupID != im.Conversation.ID || view.Request != nil {
 		t.Fatalf("stale failure contradicted new binding: %+v", view)
+	}
+}
+
+type infoFlowReadFenceStarter struct {
+	before func(context.Context)
+}
+
+func (s infoFlowReadFenceStarter) Begin(ctx context.Context) (pgx.Tx, error) {
+	s.before(ctx)
+	return testPool.Begin(ctx)
+}
+
+func TestInfoFlowWebGroupReadFenceIncludesCompatibilityRoute(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new", true: "compatibility"}[legacy], func(t *testing.T) {
+			f := newInfoFlowWebFixture(t)
+			f.bind(t)
+			f.h.TxStarter = infoFlowReadFenceStarter{before: func(ctx context.Context) {
+				if _, err := testPool.Exec(ctx, `DELETE FROM member WHERE id=$1`, f.member); err != nil {
+					t.Error(err)
+				}
+			}}
+			if legacy {
+				infoFlowReadGroups(t, f, f.user, 404)
+			} else {
+				infoFlowWebCall(t, f, "GET", f.user, nil, 404)
+			}
+		})
 	}
 }

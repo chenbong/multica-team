@@ -367,7 +367,7 @@ Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
 
-Local verification on 2026-10-13: 262 Bridge tests; 203 selected handler,
+Local verification on 2026-10-13: 262 Bridge tests; 206 selected handler,
 permission, comment and transfer cases with the race detector; 14 real-router
 HTTP cases with the race detector; 17 isolated lifecycle/secret/gitignore and
 migration-runner tests; 69 core API/query and 134 view/component regressions;

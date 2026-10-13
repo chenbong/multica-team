@@ -103,8 +103,8 @@ func (h *Handler) infoFlowWebView(ctx context.Context, tx pgx.Tx, ws string, iss
 	if !out.Enabled {
 		return out, nil
 	}
-	// Membership caches may lag revocation. Do not expose even an active group
-	// destination until the current member row is fenced inside this read.
+	// The outer membership check is a snapshot. Revalidate and fence the member
+	// row before exposing even an active destination from this transaction.
 	var role string
 	if err := tx.QueryRow(ctx, `SELECT role FROM member WHERE workspace_id=$1 AND user_id=$2 FOR SHARE`, ws, user).Scan(&role); err != nil {
 		return out, err
