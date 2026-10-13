@@ -9,39 +9,43 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
 // Presence is an admission lease, not a permanent assertion about IM membership.
 const infoFlowGroupLease = 45 * time.Second
 
 type infoFlowGroupTopology struct {
-	AssigneeType  string            `json:"assignee_type"`
-	AssigneeID    string            `json:"assignee_id"`
-	LeaderAgentID string            `json:"leader_agent_id"`
-	AgentIDs      []string          `json:"agent_ids"`
-	AgentNames    map[string]string `json:"-"`
+	AssignmentVersion int64             `json:"assignment_version,string"`
+	AssigneeType      string            `json:"assignee_type"`
+	AssigneeID        string            `json:"assignee_id"`
+	LeaderAgentID     string            `json:"leader_agent_id"`
+	AgentIDs          []string          `json:"agent_ids"`
+	AgentNames        map[string]string `json:"-"`
 }
 
 type infoFlowGroupView struct {
-	State         string            `json:"state"`
-	LeaderAgentID string            `json:"leader_agent_id"`
-	LeaderRobotID string            `json:"leader_robot_id,omitempty"`
-	AgentIDs      []string          `json:"agent_ids"`
-	AgentNames    map[string]string `json:"agent_names"`
-	Reason        string            `json:"reason,omitempty"`
+	AssignmentVersion int64             `json:"assignment_version,string"`
+	State             string            `json:"state"`
+	LeaderAgentID     string            `json:"leader_agent_id"`
+	LeaderRobotID     string            `json:"leader_robot_id,omitempty"`
+	AgentIDs          []string          `json:"agent_ids"`
+	AgentNames        map[string]string `json:"agent_names"`
+	Reason            string            `json:"reason,omitempty"`
 }
 
 // Call inside the binding transaction for mutations. Issue/squad/agent row
 // locks fence reassignment, archived leaders, and existing membership removal.
 func (h *Handler) infoFlowTopology(ctx context.Context, issueID pgtype.UUID, wsID string) (infoFlowGroupTopology, string, error) {
 	t := infoFlowGroupTopology{AgentIDs: []string{}, AgentNames: map[string]string{}}
-	err := h.DB.QueryRow(ctx, `SELECT COALESCE(assignee_type,''),COALESCE(assignee_id::text,'') FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, issueID, wsID).Scan(&t.AssigneeType, &t.AssigneeID)
+	err := h.DB.QueryRow(ctx, `SELECT COALESCE(assignee_type,''),COALESCE(assignee_id::text,''),infoflow_assignment_version FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, issueID, wsID).Scan(&t.AssigneeType, &t.AssigneeID, &t.AssignmentVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return t, "任务已失效或移出工作区", nil
 	}
@@ -100,12 +104,12 @@ func (h *Handler) infoFlowTopology(ctx context.Context, issueID pgtype.UUID, wsI
 
 func infoFlowSameTopology(saved []byte, t infoFlowGroupTopology) bool {
 	var old infoFlowGroupTopology
-	return json.Unmarshal(saved, &old) == nil && old.AssigneeType == t.AssigneeType && old.AssigneeID == t.AssigneeID && old.LeaderAgentID == t.LeaderAgentID && slices.Equal(old.AgentIDs, t.AgentIDs)
+	return json.Unmarshal(saved, &old) == nil && old.AssignmentVersion == t.AssignmentVersion && old.AssigneeType == t.AssigneeType && old.AssigneeID == t.AssigneeID && old.LeaderAgentID == t.LeaderAgentID && slices.Equal(old.AgentIDs, t.AgentIDs)
 }
 
 func (h *Handler) infoFlowGroupView(ctx context.Context, b infoFlowBinding, wsID string) *infoFlowGroupView {
 	t, reason, err := h.infoFlowTopology(ctx, b.IssueID, wsID)
-	v := &infoFlowGroupView{State: "pending", LeaderAgentID: t.LeaderAgentID, AgentIDs: t.AgentIDs, AgentNames: t.AgentNames, Reason: reason}
+	v := &infoFlowGroupView{AssignmentVersion: t.AssignmentVersion, State: "pending", LeaderAgentID: t.LeaderAgentID, AgentIDs: t.AgentIDs, AgentNames: t.AgentNames, Reason: reason}
 	if err != nil {
 		v.Reason = "暂时无法确认任务负责人，请稍后重试"
 		return v
@@ -113,7 +117,7 @@ func (h *Handler) infoFlowGroupView(ctx context.Context, b infoFlowBinding, wsID
 	if reason != "" {
 		return v
 	}
-	if !infoFlowSameTopology(b.GroupTopology, t) {
+	if b.AssignmentVersion != t.AssignmentVersion || !infoFlowSameTopology(b.GroupTopology, t) {
 		v.Reason = "任务负责人或小队成员已变化，等待重新确认队长入群"
 		return v
 	}
@@ -192,12 +196,13 @@ func (h *Handler) InfoFlowIssueGroups(w http.ResponseWriter, r *http.Request) {
 
 type infoFlowGroupStatusRequest struct {
 	infoFlowScope
-	Conversation  infoFlowConversation `json:"conversation"`
-	BindingID     string               `json:"binding_id"`
-	Generation    string               `json:"generation"`
-	LeaderAgentID string               `json:"leader_agent_id"`
-	LeaderRobotID string               `json:"leader_robot_id"`
-	LeaderPresent bool                 `json:"leader_present"`
+	Conversation      infoFlowConversation `json:"conversation"`
+	BindingID         string               `json:"binding_id"`
+	Generation        string               `json:"generation"`
+	LeaderAgentID     string               `json:"leader_agent_id"`
+	LeaderRobotID     string               `json:"leader_robot_id"`
+	LeaderPresent     bool                 `json:"leader_present"`
+	AssignmentVersion string               `json:"assignment_version,omitempty"`
 }
 
 func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Request) {
@@ -253,14 +258,25 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 		infoFlowError(w, 409, "stale topology")
 		return
 	}
+	if req.AssignmentVersion != "" && req.AssignmentVersion != strconv.FormatInt(t.AssignmentVersion, 10) || req.AssignmentVersion == "" && b.AssignmentVersion != t.AssignmentVersion {
+		infoFlowError(w, 409, "stale assignment proof")
+		return
+	}
 	state := "pending"
 	var verified any
+	revalidated := false
 	if req.LeaderPresent {
 		state = "active"
 		verified = time.Now()
+		revalidated = b.AssignmentVersion != t.AssignmentVersion || !infoFlowSameTopology(b.GroupTopology, t)
+		if revalidated {
+			b.Generation = dbid.NewV7()
+			b.BoundAt = time.Now()
+		}
+		b.AssignmentVersion = t.AssignmentVersion
+		b.GroupTopology, _ = json.Marshal(t)
 	}
-	topology, _ := json.Marshal(t)
-	_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET group_topology=$2,group_state=$3,leader_robot_id=NULLIF($4,''),leader_verified_at=$5 WHERE id=$1`, b.ID, topology, state, req.LeaderRobotID, verified)
+	_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET group_topology=$2,group_state=$3,leader_robot_id=NULLIF($4,''),leader_verified_at=$5,assignment_version=$6,generation=$7,bound_at=$8 WHERE id=$1`, b.ID, b.GroupTopology, state, req.LeaderRobotID, verified, b.AssignmentVersion, b.Generation, b.BoundAt)
 	if err != nil {
 		infoFlowError(w, 500, "status")
 		return
@@ -279,7 +295,7 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 		infoFlowError(w, 500, "commit")
 		return
 	}
-	writeJSON(w, 200, infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Binding: v, Notice: notice})
+	writeJSON(w, 200, infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Binding: v, Notice: notice, BindingRevalidated: revalidated})
 }
 
 func infoFlowGroupURL(id string) string {

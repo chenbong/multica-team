@@ -133,14 +133,10 @@ func TestInfoFlowPinnedMessagesCannotFollowBindingChanges(t *testing.T) {
 				mutation := f.req
 				mutation.MessageID = uuid.NewString()
 				mutation.Operation = "unbind"
-				if kind == "group" {
-					infoFlowPin(t, &mutation)
-				}
+				infoFlowPin(t, &mutation)
 				if change == "rebind" {
-					if kind == "group" {
-						infoFlowCall(t, f.h, mutation, 200)
-						mutation.MessageID = uuid.NewString()
-					}
+					infoFlowCall(t, f.h, mutation, 200)
+					mutation.MessageID = uuid.NewString()
 					mutation.Operation, mutation.IssueRef = "bind", target
 					mutation.ExpectedBindingID, mutation.ExpectedGeneration = "", ""
 				}
@@ -219,6 +215,13 @@ func TestInfoFlowSquadDispatchPreservesLeaderRole(t *testing.T) {
 				}
 				if kind == "private" {
 					f.req.Conversation = infoFlowConversation{Kind: kind, ID: f.req.Sender}
+				}
+				if kind == "private" && target != "single" {
+					out := infoFlowCall(t, f.h, f.req, 200)
+					if !out.Handled || out.Binding != nil || out.Notice == "" || infoFlowCount(t, `SELECT count(*) FROM comment WHERE issue_id=$1`, f.issue) != 0 || infoFlowCount(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1`, f.issue) != 0 {
+						t.Fatalf("private squad bind was not rejected: %+v", out)
+					}
+					return
 				}
 				f.bind(t)
 				req := f.req

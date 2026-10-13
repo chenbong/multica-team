@@ -268,7 +268,7 @@ test("unbound unbind preflight reports no-op without mutation or Chat", async t 
   await relay.handle(f.input("/unbind"));
   assert.equal(calls.length, 1); assert.equal(calls[0].body.operation, "binding");
   assert.equal(calls[0].body.command, "unbind");
-  assert.match(f.state.sent[0].content, /^\[聊天模式\]\n\n当前群未绑定/);
+  assert.match(f.state.sent[0].content, /^\[聊天模式\]\n\n当前对话未绑定/);
 });
 
 test("committed unbind with a lost response retries identical mutation, not another preflight", async t => {
@@ -293,13 +293,17 @@ test("committed unbind with a lost response retries identical mutation, not anot
   assert.equal(Object.keys(restored.inbox).length, 0);
 });
 
-test("private unbind keeps its existing wire behavior and server-selected Chat mode", async t => {
+test("private unbind pins the selected binding just like group unbind and preserves server-selected mode", async t => {
   const f = fixture(t), relay = f.make(); const calls = [];
   relay.request = async (path, body) => { calls.push({ path, body }); return { handled: true, silent: false,
-    binding: { ...binding(1), group: undefined }, notice: "已解除任务绑定", conversation_mode: "chat" }; };
+    binding: { ...binding(1), group: undefined, private: { state: "active", reason: "" } },
+    notice: body.operation === "unbind" ? "已解除任务绑定" : "", conversation_mode: body.operation === "unbind" ? "chat" : "issue" }; };
   await relay.handle(f.input("/unbind", { conversation: { kind: "private", id: "alice" } }));
-  assert.equal(calls.length, 1); assert.equal(calls[0].body.operation, "unbind");
-  assert.equal(calls[0].body.expected_binding_id, undefined);
+  assert.equal(calls.length, 2); assert.equal(calls[0].body.operation, "binding");
+  assert.equal(calls[0].body.command, "unbind");
+  assert.equal(calls[1].body.operation, "unbind");
+  assert.equal(calls[1].body.expected_binding_id, binding(1).binding_id);
+  assert.equal(calls[1].body.expected_generation, binding(1).generation);
   assert.match(f.state.sent[0].content, /^\[聊天模式\]\n\n已解除任务绑定/);
 });
 
@@ -325,6 +329,29 @@ test("same-group plans and status confirmations are keyed by binding ID, never o
   assert.equal(checks.length, 2);
   assert.ok(checks.every(c => c.conversation.id === GROUP));
   assert.deepEqual(checks.map(c => [c.binding_id, c.generation]), [1, 2].map(n => [binding(n).binding_id, binding(n).generation]));
+});
+
+test("group verification sends current exact assignment proof without repinning prepared input", async t => {
+  const f = fixture(t), relay = f.make();
+  const current = f.state.plans[0].binding;
+  current.group.assignment_version = "9007199254740993";
+  const originalGeneration = current.generation, request = relay.request;
+  relay.request = async (path, body) => {
+    const result = await request(path, body);
+    if (path === "issue-group-status") {
+      assert.equal(body.assignment_version, "9007199254740993");
+      result.binding.generation = "30000000-0000-4000-8000-000000000001";
+      result.binding_revalidated = true;
+    }
+    return result;
+  };
+  const checked = await relay.reconcileGroup(await relay.scope(), conversation, current);
+  assert.notEqual(checked.binding.generation, originalGeneration);
+  assert.equal(current.generation, originalGeneration);
+  await relay.handle(f.input("INFE-1 继续", { messageId: "101" }));
+  assert.equal(f.state.requests.filter(item => item.path === "issue-group-status").length, 2);
+  assert.equal(f.state.comments.length, 0);
+  assert.equal(Object.keys(relay.inbox).length, 0);
 });
 
 test("wrong binding in status reply is rejected even if group, leader and generation match", async t => {

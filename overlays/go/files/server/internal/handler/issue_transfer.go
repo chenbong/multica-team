@@ -146,6 +146,10 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 	if err = tx.QueryRow(ctx, `SELECT to_regclass('infoflow_web_group_request') IS NOT NULL`).Scan(&hasInfoFlowWebRequests); err != nil {
 		return nil, err
 	}
+	var hasInfoFlowPrivateRequests bool
+	if err = tx.QueryRow(ctx, `SELECT to_regclass('infoflow_web_private_request') IS NOT NULL`).Scan(&hasInfoFlowPrivateRequests); err != nil {
+		return nil, err
+	}
 	if apply {
 		if _, err = tx.Exec(ctx, `SELECT id FROM workspace WHERE id IN ($1,$2) ORDER BY id FOR UPDATE NOWAIT`, source, target); err != nil {
 			return nil, err
@@ -172,6 +176,11 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 		}
 		if hasInfoFlowWebRequests {
 			if _, err = tx.Exec(ctx, `LOCK TABLE infoflow_web_group_request IN SHARE ROW EXCLUSIVE MODE NOWAIT`); err != nil {
+				return nil, err
+			}
+		}
+		if hasInfoFlowPrivateRequests {
+			if _, err = tx.Exec(ctx, `LOCK TABLE infoflow_web_private_request IN SHARE ROW EXCLUSIVE MODE NOWAIT`); err != nil {
 				return nil, err
 			}
 		}
@@ -275,6 +284,9 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 	}
 	if hasInfoFlowWebRequests {
 		checks = append(checks, struct{ code, sql string }{"infoflow_pending_binding", `SELECT EXISTS(SELECT 1 FROM infoflow_web_group_request WHERE issue_id=$1 AND state IN ('queued','pending') AND expires_at>clock_timestamp())`})
+	}
+	if hasInfoFlowPrivateRequests {
+		checks = append(checks, struct{ code, sql string }{"infoflow_pending_private_binding", `SELECT EXISTS(SELECT 1 FROM infoflow_web_private_request WHERE issue_id=$1 AND state IN ('queued','pending') AND expires_at>clock_timestamp())`})
 	}
 	for _, c := range checks {
 		var blocked bool

@@ -12,7 +12,7 @@ RETIRED = {"479_infoflow_binding_scope.up.sql", "488_infoflow_group_coordination
 CURRENT = {"477_infoflow_issue_relay.up.sql", "492_infoflow_issue_group_unique.up.sql",
            "493_infoflow_private_scope.up.sql", "494_infoflow_remove_robot_group_scope.up.sql",
            "495_infoflow_remove_workspace_group_scope.up.sql", "496_infoflow_remove_global_group_scope.up.sql",
-           "497_infoflow_multitask_rollback_guard.up.sql"}
+           "497_infoflow_multitask_rollback_guard.up.sql", "505_infoflow_private_issue_unique.up.sql", "506_infoflow_private_scope_unique.up.sql"}
 
 
 class TeamMigrationReplayTests(unittest.TestCase):
@@ -31,7 +31,8 @@ import os, sys
 from pathlib import Path
 args = sys.argv[1:]
 if '-Atqc' in args:
-    print(os.environ['TEST_GROUP_MODEL'])
+    query = args[args.index('-Atqc')+1]
+    print(os.environ.get('TEST_PRIVATE_MODEL', 'legacy') if 'infoflow_binding_private_issue_idx' in query else os.environ['TEST_GROUP_MODEL'])
     sys.exit(0)
 name = Path(args[args.index('-f')+1]).name
 with open(os.environ['TEST_MIGRATION_CALLS'], 'a') as f:
@@ -70,6 +71,17 @@ if name == os.environ.get('TEST_FAIL_MIGRATION'):
                 result = self.run_model(value)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.calls(), [])
+
+    def test_private_multitask_never_recreates_retired_private_scope(self):
+        result = self.run_model("multi", TEST_PRIVATE_MODEL="multi")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), sorted(CURRENT - {"493_infoflow_private_scope.up.sql"}))
+        self.assertIn("skip retired migration: 493_infoflow_private_scope.up.sql", result.stdout)
+
+    def test_invalid_private_marker_fails_before_any_migration(self):
+        result = self.run_model("multi", TEST_PRIVATE_MODEL="invalid")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
 
     def test_migration_failure_stops_before_later_files(self):
         name = "493_infoflow_private_scope.up.sql"

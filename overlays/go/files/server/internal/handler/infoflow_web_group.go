@@ -18,6 +18,7 @@ import (
 )
 
 type infoFlowWebState struct {
+	BindingID string `json:"binding_id,omitempty"`
 	GroupID   string `json:"group_id"`
 	State     string `json:"state"`
 	Reason    string `json:"reason"`
@@ -59,7 +60,7 @@ func infoFlowWebBinding(ctx context.Context, tx pgx.Tx, ws string, issue pgtype.
 	count := 0
 	for rows.Next() {
 		count++
-		if err = rows.Scan(&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt, &b.Kind, &b.GroupTopology, &b.GroupState, &b.LeaderRobotID, &b.LeaderVerifiedAt, &group); err != nil {
+		if b, err = infoFlowScanBinding(rows, &group); err != nil {
 			return b, "", err
 		}
 	}
@@ -73,7 +74,7 @@ func infoFlowWebBinding(ctx context.Context, tx pgx.Tx, ws string, issue pgtype.
 // manager. Cached membership and the configured robot owner's PAT are not gates.
 func (h *Handler) infoFlowWebAuthority(ctx context.Context, ws string, issue, user pgtype.UUID, b infoFlowBinding) (infoFlowGroupTopology, string, bool, error) {
 	t, reason, err := h.infoFlowTopology(ctx, issue, ws)
-	if err != nil || reason != "" {
+	if err != nil {
 		return t, "", false, err
 	}
 	var email, role string
@@ -89,6 +90,11 @@ func (h *Handler) infoFlowWebAuthority(ctx context.Context, ws string, issue, us
 	local, suffix, found := strings.Cut(email, "@")
 	if !found || suffix != domain || !infoFlowUsername.MatchString(local) || auth.IsTemporarilyDisabledUser(uuidToString(user), email) {
 		return t, "", false, nil
+	}
+	// An invalid assignment cannot activate a binding, but its authorized
+	// manager must still be able to inspect and remove the retained destination.
+	if reason != "" {
+		return t, local, b.ID.Valid && (role == "owner" || role == "admin" || b.BinderID == user), nil
 	}
 	var owner pgtype.UUID
 	err = h.DB.QueryRow(ctx, `SELECT owner_id FROM agent WHERE id=$1 AND workspace_id=$2 AND archived_at IS NULL FOR SHARE`, t.LeaderAgentID, ws).Scan(&owner)
@@ -121,7 +127,7 @@ func (h *Handler) infoFlowWebView(ctx context.Context, tx pgx.Tx, ws string, iss
 	out.CanManage = manage
 	if b.ID.Valid {
 		v := sh.infoFlowGroupView(ctx, b, ws)
-		out.Binding = &infoFlowWebState{GroupID: group, State: v.State, Reason: v.Reason}
+		out.Binding = &infoFlowWebState{BindingID: uuidToString(b.ID), GroupID: group, State: v.State, Reason: v.Reason}
 	}
 	// Members without management authority may open the verified destination, but
 	// do not receive candidate group metadata or another user's queued request.
@@ -245,6 +251,10 @@ func (h *Handler) BindIssueInfoFlowGroup(w http.ResponseWriter, r *http.Request)
 	}
 	if !manage {
 		writeError(w, 403, "Only the leader owner, workspace admin or current binder can manage group binding")
+		return
+	}
+	if t.LeaderAgentID == "" || !slices.Contains(t.AgentIDs, t.LeaderAgentID) {
+		writeError(w, 409, "Group binding requires an available assigned agent or squad leader")
 		return
 	}
 	if group != "" && group != req.GroupID {

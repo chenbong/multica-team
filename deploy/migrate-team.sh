@@ -21,8 +21,24 @@ case "$group_model" in
   *) echo "Cannot verify the issue-group migration index; repair the failed migration before retrying" >&2; exit 1 ;;
 esac
 
+# Index 505 is created before retiring the private scope constraint (506).
+private_model="$(psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc "
+SELECT CASE
+ WHEN to_regclass('public.infoflow_binding_private_issue_idx') IS NULL THEN 'legacy'
+ WHEN EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('public.infoflow_binding_private_issue_idx') AND indisvalid) THEN 'multi'
+ ELSE 'invalid' END;
+")"
+case "$private_model" in
+  legacy|multi) ;;
+  *) echo "Cannot verify the private-task migration index; repair the failed migration before retrying" >&2; exit 1 ;;
+esac
+
 for migration in "$migration_dir"/*.up.sql; do
   [ -e "$migration" ] || continue
+  if [ "$private_model" = multi ] && [ "${migration##*/}" = 493_infoflow_private_scope.up.sql ]; then
+    echo "skip retired migration: ${migration##*/}"
+    continue
+  fi
   if [ "$group_model" = multi ]; then
     case "${migration##*/}" in
       479_infoflow_binding_scope.up.sql|488_infoflow_group_coordination.up.sql|489_infoflow_group_scope.up.sql|490_infoflow_group_global_scope.up.sql)

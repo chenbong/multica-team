@@ -149,13 +149,14 @@ export class IssueGroups {
     await publish({ ...scope, group_id: id, name: "", members: roster.members });
   }
 
-  async webJobLock(workspaceId, action) {
+  async webJobLock(workspaceId, action, kind = "group") {
     // Other robot timers in this workspace skip rather than queue stale polls.
-    if (this.webJobLocks.has(workspaceId)) return;
+    const key = JSON.stringify([kind, workspaceId]);
+    if (this.webJobLocks.has(key)) return;
     const pending = Promise.resolve().then(action);
-    this.webJobLocks.set(workspaceId, pending);
+    this.webJobLocks.set(key, pending);
     try { return await pending; }
-    finally { if (this.webJobLocks.get(workspaceId) === pending) this.webJobLocks.delete(workspaceId); }
+    finally { if (this.webJobLocks.get(key) === pending) this.webJobLocks.delete(key); }
   }
 
   async owns(scope, binding) {

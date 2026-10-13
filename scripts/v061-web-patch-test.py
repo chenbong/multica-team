@@ -152,7 +152,7 @@ class FrontendPatches(unittest.TestCase):
         self.assertIn("InfoFlowGroupTargetSchema.safeParse(target)", client)
         self.assertIn("async getIssueInfoFlowGroups", client)
         detail = (self.target / "packages/views/issues/components/issue-detail.tsx").read_text()
-        self.assertIn("<IssueInfoFlowGroupBinding", detail)
+        self.assertIn("<BindInfoFlowConversation", detail)
         self.assertNotIn("<IssueInfoFlowGroups ", detail)
         fixture = (self.target / "packages/views/issues/components/issue-detail.test.tsx").read_text()
         self.assertIn("getIssueInfoFlowGroupBinding: vi.fn()", fixture)
@@ -164,6 +164,28 @@ class FrontendPatches(unittest.TestCase):
         self.assertEqual(set(copies[0]), set(copies[1]))
         for copy in copies:
             for key in ("bind", "warning", "waiting", "approval", "failed", "retry", "invalid", "read_failed", "open"):
+                self.assertTrue(copy[key])
+
+    def test_unified_conversation_wiring_and_private_privacy(self):
+        self.apply()
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        for method in ("getIssueInfoFlowConversations", "bindIssueInfoFlowConversation", "unbindIssueInfoFlowConversation"):
+            self.assertIn(f"async {method}", client)
+        self.assertIn("InfoFlowConversationsSchema, null", client)
+        self.assertIn("InfoFlowConversationTargetSchema.safeParse(target)", client)
+        self.assertIn("InfoFlowConversationBindingIdSchema.safeParse(bindingId)", client)
+        self.assertIn('method: "DELETE"', client)
+        exports = json.loads((self.target / "packages/core/package.json").read_text())["exports"]
+        self.assertEqual(exports["./issues/infoflow-conversations"], "./issues/infoflow-conversations.ts")
+        detail = (self.target / "packages/views/issues/components/issue-detail.tsx").read_text()
+        self.assertIn('<BindInfoFlowConversation key={`${issue.workspace_id}:${issue.id}`}', detail)
+        fixture = (self.target / "packages/views/issues/components/issue-detail.test.tsx").read_text()
+        self.assertIn("getIssueInfoFlowConversations: vi.fn()", fixture)
+        copies = [json.loads((self.target / f"packages/views/locales/{locale}/issues.json").read_text())["infoflow_conversations"]
+                  for locale in ("en", "zh-Hans")]
+        self.assertEqual(set(copies[0]), set(copies[1]))
+        for copy in copies:
+            for key in ("bind", "private", "private_restriction", "needs_rebind", "reassignment", "unbind", "group_pending"):
                 self.assertTrue(copy[key])
 
     def test_brand_is_checked_idempotent_and_keeps_bot_identity(self):

@@ -171,7 +171,7 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 	const relayPath = "/api/integrations/infoflow/issue-relay"
 	scope := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace}
 	trustedHeaders := map[string]string{"Authorization": "Bearer " + serviceToken}
-	paths := []string{relayPath, "/api/integrations/infoflow/issue-groups", "/api/integrations/infoflow/issue-group-status", "/api/integrations/infoflow/infoflow-group-observation", "/api/integrations/infoflow/web-group-jobs", "/api/integrations/infoflow/web-group-result", "/api/integrations/infoflow/issue-deliveries", "/api/integrations/infoflow/issue-deliveries/" + uuid.NewString() + "/ack"}
+	paths := []string{relayPath, "/api/integrations/infoflow/issue-groups", "/api/integrations/infoflow/issue-group-status", "/api/integrations/infoflow/infoflow-group-observation", "/api/integrations/infoflow/web-group-jobs", "/api/integrations/infoflow/web-group-result", "/api/integrations/infoflow/web-private-jobs", "/api/integrations/infoflow/web-private-result", "/api/integrations/infoflow/issue-deliveries", "/api/integrations/infoflow/issue-deliveries/" + uuid.NewString() + "/ack"}
 
 	t.Run("ordinary_PAT_is_valid_but_never_a_relay_credential", func(t *testing.T) {
 		call(t, http.MethodGet, "/api/me", nil, map[string]string{"Authorization": "Bearer " + pat}, http.StatusOK)
@@ -210,6 +210,44 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 	if got := f.Count(t, `SELECT count(*) FROM infoflow_issue_binding WHERE robot_id=$1`, robot); got != 0 {
 		t.Fatalf("rejected HTTP requests wrote %d bindings", got)
 	}
+	t.Run("unified_private_binding_uses_human_identity_and_leased_service_metadata", func(t *testing.T) {
+		webIssue := f.Issue(t, "Unified private HTTP fixture", testutil.Cols{"assignee_type": "agent", "assignee_id": agent})
+		f.Cleanup(t, `DELETE FROM infoflow_issue_binding WHERE issue_id=$1`, webIssue)
+		f.Cleanup(t, `DELETE FROM infoflow_web_private_request WHERE issue_id=$1`, webIssue)
+		path := "/api/issues/" + webIssue + "/infoflow-conversations"
+		memberHeaders := map[string]string{"Authorization": "Bearer " + pat, "X-Workspace-ID": workspace}
+		for _, headers := range []map[string]string{nil, trustedHeaders, {"X-User-ID": owner, "X-Workspace-ID": workspace}} {
+			call(t, http.MethodGet, path, nil, headers, 401)
+			call(t, http.MethodPost, path, map[string]string{"kind": "private"}, headers, 401)
+			call(t, http.MethodDelete, path+"/"+uuid.NewString(), nil, headers, 401)
+		}
+		call(t, http.MethodPost, path, map[string]string{"kind": "private", "sender": actorSender}, memberHeaders, 400)
+		data := call(t, http.MethodPost, path, map[string]string{"kind": "private"}, memberHeaders, 202)
+		if !strings.Contains(string(data), `"state":"queued"`) || strings.Contains(string(data), "lease_token") {
+			t.Fatalf("invalid private request: %s", data)
+		}
+		var jobs struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		data = call(t, http.MethodPost, "/api/integrations/infoflow/web-private-jobs", scope, trustedHeaders, 200)
+		if json.Unmarshal(data, &jobs) != nil || len(jobs.Jobs) != 1 {
+			t.Fatalf("private claim: %s", data)
+		}
+		job := jobs.Jobs[0]
+		result := map[string]any{"robot_id": robot, "agent_id": agent, "workspace_id": workspace, "request_id": job["request_id"], "generation": job["generation"], "lease_token": job["lease_token"], "target_agent_id": agent, "target_robot_id": robot, "robot_chat_id": "9007199254740993", "robot_name": "Fixture robot", "reason": ""}
+		call(t, http.MethodPost, "/api/integrations/infoflow/web-private-result", result, memberHeaders, 401)
+		call(t, http.MethodPost, "/api/integrations/infoflow/web-private-result", result, trustedHeaders, 200)
+		data = call(t, http.MethodGet, path, nil, memberHeaders, 200)
+		if !strings.Contains(string(data), `"robot_chat_id":"9007199254740993"`) || strings.Contains(string(data), serviceToken) || strings.Contains(string(data), "lease_token") {
+			t.Fatalf("private metadata leak or missing link: %s", data)
+		}
+		var binding string
+		f.QueryRow(t, `SELECT id::text FROM infoflow_issue_binding WHERE issue_id=$1 AND conversation_kind='private'`, webIssue).Scan(&binding)
+		call(t, http.MethodDelete, path+"/"+binding, nil, memberHeaders, 200)
+		if f.Count(t, `SELECT count(*) FROM infoflow_issue_binding WHERE issue_id=$1`, webIssue) != 0 || f.Count(t, `SELECT count(*) FROM comment WHERE issue_id=$1`, webIssue) != 0 || f.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1`, webIssue) != 0 {
+			t.Fatal("unified bind/unbind created work")
+		}
+	})
 	t.Run("web_binding_requires_member_auth_and_verified_group_result", func(t *testing.T) {
 		webIssue := f.Issue(t, "Web group binding HTTP fixture", testutil.Cols{"assignee_type": "agent", "assignee_id": agent})
 		f.Cleanup(t, `DELETE FROM infoflow_web_group_request WHERE issue_id=$1`, webIssue)

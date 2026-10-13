@@ -249,9 +249,13 @@ func (h *Handler) InfoFlowWebGroupResult(w http.ResponseWriter, r *http.Request)
 		}
 		if !b.ID.Valid {
 			b.ID, b.Generation = dbid.NewV7(), dbid.NewV7()
-			_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_binding(id,robot_id,workspace_id,agent_id,conversation_kind,conversation_id,issue_id,binder_id,generation,group_topology,group_state,leader_robot_id,leader_verified_at) VALUES($1,$2,$3,$4,'group',$5,$6,$7,$8,$9,'active',$2,clock_timestamp())`, b.ID, req.LeaderRobotID, j.WorkspaceID, t.LeaderAgentID, j.GroupID, j.IssueID, j.RequesterID, b.Generation, j.Topology)
+			_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_binding(id,robot_id,workspace_id,agent_id,conversation_kind,conversation_id,issue_id,binder_id,generation,group_topology,group_state,leader_robot_id,leader_verified_at,assignment_version) VALUES($1,$2,$3,$4,'group',$5,$6,$7,$8,$9,'active',$2,clock_timestamp(),$10)`, b.ID, req.LeaderRobotID, j.WorkspaceID, t.LeaderAgentID, j.GroupID, j.IssueID, j.RequesterID, b.Generation, j.Topology, t.AssignmentVersion)
 		} else {
-			_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET group_topology=$2,group_state='active',leader_robot_id=$3,leader_verified_at=clock_timestamp() WHERE id=$1`, b.ID, j.Topology, req.LeaderRobotID)
+			generation := b.Generation
+			if b.AssignmentVersion != t.AssignmentVersion {
+				generation = dbid.NewV7()
+			}
+			_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET group_topology=$2,group_state='active',leader_robot_id=$3,leader_verified_at=clock_timestamp(),assignment_version=$4,generation=$5,bound_at=CASE WHEN generation<>$5 THEN clock_timestamp() ELSE bound_at END WHERE id=$1`, b.ID, j.Topology, req.LeaderRobotID, t.AssignmentVersion, generation)
 		}
 		if err != nil {
 			infoFlowError(w, 409, "group admission failed")

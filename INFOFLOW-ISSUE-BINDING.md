@@ -11,16 +11,21 @@ Private chats and group mentions then accept:
 - `/bind PREFIX-123`: bind an existing issue in the robot's workspace.
 - `/binding [PREFIX-123]`: show the selected binding and issue link.
 - `/unbind [PREFIX-123]`: remove only the selected binding, not the issue/comments.
-  If the group has multiple matching tasks, specify which one; never unbind all.
+  If the conversation has multiple matching tasks, specify which one; never unbind all.
 - `/issue description`: create a new issue assigned to the robot's agent and
   bind the conversation. Explicit natural-language issue creation still works.
 
 A private binding still belongs to the robot, workspace, agent and sender.
+One private conversation may associate with multiple issues; `/bind` is additive
+in both private and group conversations. Private binding requires an issue
+assigned to the exact single agent represented by the addressed robot. Squad,
+human-assigned and unassigned issues cannot bind privately. It does not invent
+a private squad coordinator or invoke a different assignee's robot.
 A group binds directly to issues, independently of which robot received the
 command. **An issue can have at most one group, while a group can have many
 issues.** Pending leader verification also occupies the issue's group slot.
 Private-chat bindings remain independent and do not consume that slot.
-`/bind` adds an association rather than replacing other tasks in the group.
+`/bind` adds an association rather than replacing other tasks in the conversation.
 Binding an issue already associated with another group is rejected until its
 existing association is explicitly removed by an authorized user.
 For an existing issue assigned to a squad, the configured squad leader is the
@@ -34,13 +39,13 @@ Replacing an existing group binding first requires management authority over
 that existing binding; owning a different target task's leader is not enough.
 The target issue's binding requirements are then checked separately.
 
-## Routing within a multi-task group
+## Routing within a multi-task conversation
 
 The server selects one issue for each ordinary message, in this order:
 
-1. A stored quoted inbound/outbound message belonging to that group and scope.
+1. A stored quoted inbound/outbound message belonging to that conversation and scope.
 2. An explicit issue reference in the request/text.
-3. The addressed agent's sole associated task in the group.
+3. The addressed agent's sole associated task in the conversation.
 
 Multiple candidates result in a clarification notice, no comment and no run.
 There is no shared implicit "current task", no model guessing, and no broadcast
@@ -158,10 +163,57 @@ allowed action from a validated ID instead of trusting arbitrary response URLs.
 Launching requires the user's InfoFlow client and browser permission. Actual
 desktop/mobile protocol launch is a separate manual acceptance check.
 
+## Unified issue-page conversation binding
+
+The issue header uses **Bind InfoFlow conversation / 绑定如流对话** with group
+and **My private conversation / 我的私聊** tabs. An issue may retain one group
+and each participating user's independent private associations. Private lists
+and links are returned only to their own binder; workspace admins do not see or
+delete another user's private conversation through these endpoints.
+
+- `GET /api/issues/{id}/infoflow-conversations`: permitted group state and only
+  the caller's own private state.
+- `POST` to the same path with `{kind: "group", group_id: "123"}` or
+  `{kind: "private"}`: request verified binding, never submit a recipient,
+  robot credential, browser-selected user or agent identity.
+- `DELETE /api/issues/{id}/infoflow-conversations/{bindingId}`: remove one exact
+  association, preserving other tasks and immutable source/delivery history.
+
+For a private request the server derives the caller's corporate sender, current
+single-agent assignee and assignment version. A separate ninety-second Bridge
+lease resolves a unique configured robot and reads `robot.getInfo()` to verify
+private chat is enabled and retrieve its exact decimal `puid` and public name.
+Only these whitelisted fields return to the server/browser. No login secrets,
+test message, recipient probe or model run is used. Pending private jobs have
+twenty-minute expiry, independent polling and stale-result fences. The private
+open link is the same canonical AppLink with `type: "4"`, not a user-selected URL.
+Old group-only routes remain as compatibility read/write endpoints.
+
+### Assignment changes
+
+The issue's assignment version increments transactionally on assignee type/ID
+or workspace change, including A -> B -> A. Title/description/display-name
+changes do not increment it. Existing runs continue; only IM routing is fenced.
+
+- Private associations become `needs_rebind`. They do not follow a replacement
+  agent or automatically reactivate after switching back. Explicit `/bind` or
+  the page's rebind action confirms the current assigned robot and rotates the
+  association generation. Old prepared input, delivery and ack cannot follow it.
+- Groups keep their one reserved destination but become pending until the
+  current leader/assigned robot is freshly confirmed in that group. The status
+  proof includes the exact assignment version; changed topology/version rotates
+  the generation. Already prepared input is not repinned to the new leader.
+- Squad/human/unassigned private bindings remain visible and individually
+  removable to their own binder. Invalid group assignments remain removable to
+  their authorized manager, but cannot be activated before valid reassignment.
+- Pending web results repeat membership, management and assignment checks.
+  Unbind, revoked permissions, changed generations or expired leases cannot
+  resurrect a binding.
+
 ## Bind an existing group from the issue page
 
-Authorized human users see **Bind InfoFlow group / 绑定如流群聊** in the issue
-header. Choose an observed group or enter its exact decimal group number.
+Authorized human users choose the group tab of **Bind InfoFlow conversation /
+绑定如流对话**. Choose an observed group or enter its exact decimal group number.
 Invitation links and arbitrary URLs are not accepted. The picker chooses the
 initial destination; an issue still has at most one group and no multi-group
 switcher. Unbind the current group before selecting another.
@@ -243,7 +295,8 @@ invent a task number or a single-task footer.
 The optional `conversation_mode` response metadata distinguishes an active issue
 binding from the old issue link retained on a successful unbind notice. Bind
 success is issue mode. Removing one group association does not switch the group
-to Chat while other task bindings remain. Private unbind restores Chat as before.
+to Chat while other task bindings remain. Private unbind also retains task mode
+until the last association in that private scope is removed.
 Delayed answers keep their
 origin's mode. Existing plaintext delivery digests/checkpoints remain unchanged.
 Verification-code messages are not conversation replies and are not relabeled.
@@ -315,9 +368,12 @@ deduplication records.
 
 ## Reliability and storage
 
-Team migrations **477–503** create separate binding, source-receipt and delivery
+Team migrations **477–512** create separate binding, source-receipt and delivery
 tables plus indexes. Migrations 491–497 change uniqueness from group-scoped to
-issue-scoped and retain private-scope uniqueness. Conflicting older data is
+issue-scoped. Migrations 504–507 add transactional assignment versions and
+change private uniqueness to scope-plus-issue, with guarded rollback. 508–512
+add caller-scoped private browser requests and independent concurrent indexes.
+Conflicting older data is
 rejected instead of silently deleted. Rollback refuses multi-task group data
 that cannot satisfy the old constraints; restore a pre-upgrade backup or perform
 explicit authorized reconciliation rather than discarding history. These do
@@ -327,13 +383,19 @@ an enclosing transaction. Apply them to a disposable database before rollout.
 Use `bash deploy/migrate-team.sh` (also used by `deploy/start.sh`) for normal
 upgrades/replays. Once the new issue-unique index is valid, it skips the retired
 479/488/489/490 guards instead of recreating the old one-task-per-group indexes.
+The valid 505 transition index also prevents replaying retired 493 private-scope
+uniqueness against populated multi-task private conversations.
 An invalid transition index stops the runner and requires explicit repair.
 Migrations 498–503 add observed-group metadata and leased browser requests with
 independent concurrent indexes. The highest-numbered downward guard refuses
 rollback with live requests before any admission index is removed. Finish or
 explicitly cancel requests after stopping intake before attempting rollback.
 Issue transfer also refuses a live pending browser request; failed or expired
-requests do not block it.
+requests do not block it. This also applies to pending private browser requests.
+Rollback guard 512 rejects live private requests before removing admission
+indexes. Guard 507 refuses multiple retained private rows or nonzero assignment
+history; do not reset versions or delete receipts to force a downgrade. Restore
+the pre-upgrade backup or explicitly reconcile retained history with authorization.
 
 Incoming changes and source receipts are atomic, serialized per conversation,
 and idempotent by external message ID. WebSocket retries cannot duplicate an
@@ -366,6 +428,16 @@ inspection, not blindly resubmitted as a second agent task. Already persisted
 Chat task IDs continue through the existing reply poller.
 
 ## Testing and future rollout
+
+Unified conversation verification on 2026-10-14: 311 local Bridge tests (293 in
+the public fake-only suite), 129 core and 145 view/component tests, 155 selected
+Go handler/migration/transfer cases and 15 authenticated HTTP cases passed with
+the race detector. The independent transfer HTTP fixture also passed. Types,
+legacy WebView checks, production Web build, Go vet and Linux/amd64 API build
+passed. Assignment ABA, stale deliveries/acks, mixed targets, personal metadata
+isolation, old leased results, invalid group removal and multi-private migration
+replay were covered. These are isolated/fake checks, not production IM sends,
+invitations or manual AppLink launch. This candidate remains undeployed.
 
 Local verification on 2026-10-13: 262 Bridge tests; 206 selected handler,
 permission, comment and transfer cases with the race detector; 14 real-router

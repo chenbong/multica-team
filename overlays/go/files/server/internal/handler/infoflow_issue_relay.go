@@ -57,24 +57,26 @@ type infoFlowRelayRequest struct {
 }
 
 type infoFlowBindingView struct {
-	BindingID     string             `json:"binding_id"`
-	Group         *infoFlowGroupView `json:"group,omitempty"`
-	IssueID       string             `json:"issue_id"`
-	Identifier    string             `json:"identifier"`
-	WorkspaceSlug string             `json:"workspace_slug"`
-	Title         string             `json:"title,omitempty"`
-	Generation    string             `json:"generation"`
+	BindingID     string               `json:"binding_id"`
+	Group         *infoFlowGroupView   `json:"group,omitempty"`
+	Private       *infoFlowPrivateView `json:"private,omitempty"`
+	IssueID       string               `json:"issue_id"`
+	Identifier    string               `json:"identifier"`
+	WorkspaceSlug string               `json:"workspace_slug"`
+	Title         string               `json:"title,omitempty"`
+	Generation    string               `json:"generation"`
 }
 
 type infoFlowRelayResponse struct {
-	CanReconcileGroup bool                 `json:"can_reconcile_group,omitempty"`
-	ConversationMode  string               `json:"conversation_mode,omitempty"`
-	Handled           bool                 `json:"handled"`
-	Silent            bool                 `json:"silent"`
-	CanComment        bool                 `json:"can_comment"`
-	Notice            string               `json:"notice,omitempty"`
-	Binding           *infoFlowBindingView `json:"binding,omitempty"`
-	CommentID         string               `json:"comment_id,omitempty"`
+	CanReconcileGroup  bool                 `json:"can_reconcile_group,omitempty"`
+	BindingRevalidated bool                 `json:"binding_revalidated,omitempty"`
+	ConversationMode   string               `json:"conversation_mode,omitempty"`
+	Handled            bool                 `json:"handled"`
+	Silent             bool                 `json:"silent"`
+	CanComment         bool                 `json:"can_comment"`
+	Notice             string               `json:"notice,omitempty"`
+	Binding            *infoFlowBindingView `json:"binding,omitempty"`
+	CommentID          string               `json:"comment_id,omitempty"`
 }
 
 // Routing metadata is separate from the retained issue link on unbind notices.
@@ -87,16 +89,52 @@ func infoFlowConversationMode(b infoFlowBinding) string {
 }
 
 type infoFlowBinding struct {
-	ID               pgtype.UUID
-	IssueID          pgtype.UUID
-	BinderID         pgtype.UUID
-	Generation       pgtype.UUID
-	BoundAt          time.Time
-	Kind             string
-	GroupTopology    []byte
-	GroupState       string
-	LeaderRobotID    string
-	LeaderVerifiedAt pgtype.Timestamptz
+	ID                pgtype.UUID
+	IssueID           pgtype.UUID
+	BinderID          pgtype.UUID
+	Generation        pgtype.UUID
+	BoundAt           time.Time
+	Kind              string
+	GroupTopology     []byte
+	GroupState        string
+	LeaderRobotID     string
+	LeaderVerifiedAt  pgtype.Timestamptz
+	AssignmentVersion int64
+	RobotChatID       string
+	RobotName         string
+}
+
+type infoFlowPrivateView struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// The caller's transaction holds the issue fence through admission/delivery.
+// Only an explicit bind may update the saved version, including after A->B->A.
+func (h *Handler) infoFlowPrivateView(ctx context.Context, b infoFlowBinding, wsID, agentID string) *infoFlowPrivateView {
+	v := &infoFlowPrivateView{State: "needs_rebind"}
+	var kind, assignee string
+	var version int64
+	err := h.DB.QueryRow(ctx, `SELECT COALESCE(assignee_type,''),COALESCE(assignee_id::text,''),infoflow_assignment_version FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, b.IssueID, wsID).Scan(&kind, &assignee, &version)
+	if err != nil {
+		v.Reason = "任务已失效或暂时无法确认负责人，请重新绑定"
+		return v
+	}
+	if kind != "agent" {
+		v.Reason = "私聊绑定仅支持由单独一个智能体负责的任务，请改用群聊或重新分配任务"
+		return v
+	}
+	if !strings.EqualFold(assignee, agentID) || version != b.AssignmentVersion {
+		v.Reason = "任务负责人已变化，私聊绑定需要重新绑定"
+		return v
+	}
+	var live pgtype.UUID
+	if err = h.DB.QueryRow(ctx, `SELECT id FROM agent WHERE id=$1 AND workspace_id=$2 AND archived_at IS NULL FOR SHARE`, assignee, wsID).Scan(&live); err != nil {
+		v.Reason = "任务负责智能体不可用，请重新绑定"
+		return v
+	}
+	v.State = "active"
+	return v
 }
 
 var infoFlowUsername = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -162,17 +200,6 @@ func (s infoFlowScope) lockKey(c infoFlowConversation) string {
 func infoFlowLock(ctx context.Context, tx pgx.Tx, s infoFlowScope, c infoFlowConversation) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, s.lockKey(c))
 	return err
-}
-
-func infoFlowLoadPrivateBinding(ctx context.Context, tx pgx.Tx, s infoFlowScope, c infoFlowConversation) (infoFlowBinding, error) {
-	if c.Kind != "private" {
-		return infoFlowBinding{}, pgx.ErrNoRows
-	}
-	var b infoFlowBinding
-	err := tx.QueryRow(ctx, `SELECT id,issue_id,binder_id,generation,bound_at,conversation_kind,group_topology,group_state,COALESCE(leader_robot_id,''),leader_verified_at FROM infoflow_issue_binding
-		WHERE workspace_id=$2 AND conversation_kind=$4 AND conversation_id=$5 AND robot_id=$1 AND agent_id::text=lower($3)`,
-		s.RobotID, s.WorkspaceID, s.AgentID, c.Kind, c.ID).Scan(&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt, &b.Kind, &b.GroupTopology, &b.GroupState, &b.LeaderRobotID, &b.LeaderVerifiedAt)
-	return b, err
 }
 
 // Use a new request, not a cloned header map. No externally supplied actor,
@@ -293,6 +320,13 @@ func (h *Handler) infoFlowBindingView(ctx context.Context, b infoFlowBinding, ws
 	out.BindingID = uuidToString(b.ID)
 	if b.Kind == "group" {
 		out.Group = h.infoFlowGroupView(ctx, b, wsID)
+	} else if b.Kind == "private" {
+		var agentID string
+		if err := h.DB.QueryRow(ctx, `SELECT agent_id::text FROM infoflow_issue_binding WHERE id=$1 AND workspace_id=$2`, b.ID, wsID).Scan(&agentID); err != nil {
+			out.Private = &infoFlowPrivateView{State: "needs_rebind", Reason: "私聊绑定已失效，请重新绑定"}
+		} else {
+			out.Private = h.infoFlowPrivateView(ctx, b, wsID, agentID)
+		}
 	}
 	if full {
 		out.Title = title
@@ -363,7 +397,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	sh, flush := h.infoFlowScoped(tx)
 	var b infoFlowBinding
-	if req.Conversation.Kind == "group" {
+	{
 		var notice string
 		b, notice, err = sh.infoFlowRouteGroup(r.Context(), tx, req)
 		if errors.Is(err, errInfoFlowGroupEcho) {
@@ -393,12 +427,23 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Notice: notice})
 			return
 		}
-	} else {
-		b, err = infoFlowLoadPrivateBinding(r.Context(), tx, req.infoFlowScope, req.Conversation)
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		infoFlowError(w, 500, "binding")
 		return
+	}
+	// Lock the issue in its eventual write mode before topology/private views
+	// take SHARE locks. Concurrent conversations cannot deadlock upgrading them.
+	if b.IssueID.Valid {
+		lock := "FOR SHARE"
+		if req.Operation == "message" {
+			lock = "FOR NO KEY UPDATE"
+		}
+		var live pgtype.UUID
+		if e := tx.QueryRow(r.Context(), `SELECT id FROM issue WHERE id=$1 AND workspace_id=$2 `+lock, b.IssueID, req.WorkspaceID).Scan(&live); e != nil && !errors.Is(e, pgx.ErrNoRows) {
+			infoFlowError(w, 500, "issue fence")
+			return
+		}
 	}
 	// Lock the agent before its grants, matching owner updates. Revocation of
 	// either permission_mode or an existing target waits for the accepted write.
@@ -472,9 +517,9 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := infoFlowRelayResponse{Handled: true, CanComment: identityErr == nil, ConversationMode: infoFlowConversationMode(b)}
-	if req.Conversation.Kind == "group" && !b.IssueID.Valid {
+	if !b.IssueID.Valid {
 		var remaining bool
-		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind='group' AND conversation_id=$1 AND issue_id IS NOT NULL)`, req.Conversation.ID).Scan(&remaining); err != nil {
+		if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind=$2 AND conversation_id=$1 AND issue_id IS NOT NULL AND ($2='group' OR (robot_id=$3 AND workspace_id=$4 AND agent_id::text=lower($5))))`, req.Conversation.ID, req.Conversation.Kind, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&remaining); err != nil {
 			infoFlowError(w, 500, "remaining")
 			return
 		}
@@ -548,6 +593,10 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				resp.Notice = "该机器人不属于任务负责人或当前小队，请联系队长机器人"
 			}
 		}
+		if resp.Binding != nil && resp.Binding.Private != nil && resp.Binding.Private.State != "active" {
+			resp.CanComment = false
+			resp.Notice = resp.Binding.Private.Reason
+		}
 		if !b.IssueID.Valid {
 			// This is a preflight for an already accepted input, not a new
 			// unbound Chat message. Do not redownload media or fall through.
@@ -562,8 +611,9 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	fingerprint := hex.EncodeToString(hash[:])
 	if b.ID.Valid {
 		var savedHash, savedSender string
+		var savedGeneration pgtype.UUID
 		var saved []byte
-		err = tx.QueryRow(r.Context(), `SELECT request_hash,sender,response FROM infoflow_issue_source WHERE binding_id=$1 AND message_id=$2`, b.ID, req.MessageID).Scan(&savedHash, &savedSender, &saved)
+		err = tx.QueryRow(r.Context(), `SELECT request_hash,sender,response,generation FROM infoflow_issue_source WHERE binding_id=$1 AND message_id=$2`, b.ID, req.MessageID).Scan(&savedHash, &savedSender, &saved, &savedGeneration)
 		if err == nil {
 			if savedHash != fingerprint || savedSender != req.Sender {
 				infoFlowError(w, 409, "message conflict")
@@ -574,13 +624,17 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				infoFlowError(w, 500, "receipt")
 				return
 			}
+			if b.IssueID.Valid && (savedGeneration != b.Generation || resp.Binding != nil && (resp.Binding.Private != nil && resp.Binding.Private.State != "active" || resp.Binding.Group != nil && resp.Binding.Group.AssignmentVersion != b.AssignmentVersion)) {
+				writeJSON(w, 200, infoFlowRelayResponse{Handled: true, Silent: true, ConversationMode: "issue", Notice: "该消息已处理，任务负责人或绑定已变化，不会重复执行"})
+				return
+			}
 			// Do not replay old binding metadata after a switch or removal.
 			if resp.Binding != nil {
 				cached.Binding = resp.Binding
 			}
 			cached.CanComment = true
 			cached.ConversationMode = resp.ConversationMode
-			if req.Conversation.Kind == "group" {
+			{
 				cached.CanReconcileGroup = false
 				if resp.Binding == nil {
 					previous := cached.Binding
@@ -630,7 +684,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, resp)
 		return
 	}
-	if req.Operation == "message" || req.Operation == "unbind" && req.Conversation.Kind == "group" {
+	if req.Operation == "message" || req.Operation == "unbind" {
 		// Receipt replay above wins over version changes. An uncommitted input,
 		// however, must never silently follow a rebind or become unbound Chat.
 		if req.ExpectedBindingID == "" || req.ExpectedGeneration == "" || !b.IssueID.Valid {
@@ -652,6 +706,15 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			infoFlowError(w, 409, "binding changed")
 			return
 		}
+	}
+	if req.Conversation.Kind == "private" && req.Operation == "message" && (resp.Binding == nil || resp.Binding.Private == nil || resp.Binding.Private.State != "active") {
+		resp.CanComment = false
+		resp.Notice = "私聊任务绑定已失效，请重新绑定"
+		if resp.Binding != nil && resp.Binding.Private != nil {
+			resp.Notice = resp.Binding.Private.Reason
+		}
+		writeJSON(w, 200, resp)
+		return
 	}
 	if req.Conversation.Kind == "group" && req.Operation == "message" && resp.Binding != nil {
 		g := resp.Binding.Group
@@ -679,6 +742,11 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.HasAttachments && len(req.Attachments) == 0 {
 		infoFlowError(w, 400, "attachment bytes required")
+		return
+	}
+	if req.Operation == "unbind" && !b.IssueID.Valid {
+		resp.Notice = "当前对话没有绑定任务"
+		writeJSON(w, 200, resp)
 		return
 	}
 	if len(req.Attachments) > 0 && req.Operation != "message" && req.Operation != "create" {
@@ -762,8 +830,9 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 		// Fence issue transfer/deletion through the binding commit. The loader
 		// alone is a snapshot and can succeed just before a transfer commits.
-		var live pgtype.UUID
-		if err = tx.QueryRow(r.Context(), `SELECT id FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, issue.ID, req.WorkspaceID).Scan(&live); err != nil {
+		var assigneeType, assigneeID string
+		var assignmentVersion int64
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE(assignee_type,''),COALESCE(assignee_id::text,''),infoflow_assignment_version FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, issue.ID, req.WorkspaceID).Scan(&assigneeType, &assigneeID, &assignmentVersion); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				resp.Notice = "任务已移出该工作区，请重新选择任务"
 				writeJSON(w, 200, resp)
@@ -772,10 +841,19 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if b.IssueID != issue.ID {
+		if req.Conversation.Kind == "private" && (assigneeType != "agent" || !strings.EqualFold(assigneeID, req.AgentID)) {
+			resp.CanComment, resp.Binding = false, nil
+			resp.Notice = "私聊绑定仅支持由当前机器人对应的单独智能体负责的任务，请改用群聊或负责智能体的机器人"
+			writeJSON(w, 200, resp)
+			return
+		}
+		if !groupRepeat && (b.IssueID != issue.ID || b.AssignmentVersion != assignmentVersion) {
 			b.Generation = dbid.NewV7()
 		}
 		b.IssueID = issue.ID
+		if !groupRepeat {
+			b.AssignmentVersion = assignmentVersion
+		}
 		resp.Notice = "已绑定任务"
 		if req.Conversation.Kind == "group" {
 			t, reason, e := sh.infoFlowTopology(r.Context(), b.IssueID, req.WorkspaceID)
@@ -853,6 +931,10 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			b.IssueID = parseUUID(out.ID)
+			if err = tx.QueryRow(r.Context(), `SELECT infoflow_assignment_version FROM issue WHERE id=$1 AND workspace_id=$2 FOR SHARE`, b.IssueID, req.WorkspaceID).Scan(&b.AssignmentVersion); err != nil {
+				infoFlowError(w, 500, "created issue version")
+				return
+			}
 			b.Generation = dbid.NewV7()
 			b.BinderID = user.ID
 			err = tx.QueryRow(r.Context(), `SELECT id FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2 ORDER BY created_at DESC,id DESC LIMIT 1`, b.IssueID, agent.ID).Scan(&taskID)
@@ -928,7 +1010,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Operation != "message" && !groupRepeat {
-		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation)
+		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END,assignment_version=$5 WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation, b.AssignmentVersion)
 		if err != nil {
 			infoFlowError(w, 500, "binding update")
 			return
@@ -972,9 +1054,9 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	resp.ConversationMode = infoFlowConversationMode(b)
 	if req.Operation == "unbind" {
 		resp.Binding = previousBindingView
-		if req.Conversation.Kind == "group" {
+		{
 			var remaining bool
-			if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind='group' AND conversation_id=$1 AND issue_id IS NOT NULL)`, req.Conversation.ID).Scan(&remaining); err != nil {
+			if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind=$2 AND conversation_id=$1 AND issue_id IS NOT NULL AND ($2='group' OR (robot_id=$3 AND workspace_id=$4 AND agent_id::text=lower($5))))`, req.Conversation.ID, req.Conversation.Kind, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&remaining); err != nil {
 				infoFlowError(w, 500, "remaining bindings")
 				return
 			}

@@ -601,22 +601,24 @@ test("independent web poll is non-reentrant and stopped relays never claim furth
   assert.equal(f.state.requests.filter(item => item.path === "web-group-jobs").length, 1);
 });
 
-test("stop clears independent output and web timers and both timer callbacks use separate methods", async t => {
+test("stop clears all three independent timers and callbacks use separate methods", async t => {
   const timers = new Map();
-  let unrefs = 0, outputPolls = 0, webPolls = 0;
+  let unrefs = 0, outputPolls = 0, webPolls = 0, privatePolls = 0;
   t.mock.method(globalThis, "setInterval", (callback, interval) => {
     const token = { unref() { unrefs++; } };
     timers.set(token, { callback, interval }); return token;
   });
   t.mock.method(globalThis, "clearInterval", token => { timers.delete(token); });
   const f = fixture(t);
-  assert.equal(timers.size, 2); assert.equal(unrefs, 2);
+  assert.equal(timers.size, 3); assert.equal(unrefs, 3);
   f.relay.poll = async () => { outputPolls++; };
   f.relay.pollWebBindings = async () => { webPolls++; };
+  f.relay.pollWebPrivateBindings = async () => { privatePolls++; };
   for (const timer of timers.values()) timer.callback();
   await Promise.resolve();
-  assert.equal(outputPolls, 1); assert.equal(webPolls, 1);
+  assert.equal(outputPolls, 1); assert.equal(webPolls, 1); assert.equal(privatePolls, 1);
   f.relay.stop();
   assert.equal(timers.size, 0);
   assert.equal(f.relay.timer, null); assert.equal(f.relay.webJobTimer, null);
+  assert.equal(f.relay.webPrivateJobTimer, null);
 });

@@ -149,7 +149,7 @@ func TestInfoFlowDeliveryPrivateGroupIsolationAndAmbiguity(t *testing.T) {
 	}
 }
 
-func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
+func TestInfoFlowCreateAddUnbindAndStaleDelivery(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	f.req.Conversation = infoFlowConversation{Kind: "private", ID: f.req.Sender}
 	// Fixture.Insert intentionally bypasses the application's issue counter.
@@ -178,8 +178,15 @@ func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
 	if len(deliveries) != 1 {
 		t.Fatalf("create-origin output: %+v", deliveries)
 	}
-	// Switch while output is pending cancels the old generation, including ack.
+	// Adding another task retains the first association and its delivery.
 	f.bind(t)
+	if got := infoFlowPoll(t, f, 20); len(got) != 1 {
+		t.Fatalf("additive bind cancelled original output: %+v", got)
+	}
+	removeCreated := f.req
+	removeCreated.Operation, removeCreated.MessageID, removeCreated.IssueRef = "unbind", uuid.NewString(), issue
+	removeCreated.ExpectedBindingID, removeCreated.ExpectedGeneration = out.Binding.BindingID, out.Binding.Generation
+	infoFlowCall(t, f.h, removeCreated, 200)
 	if got := infoFlowPoll(t, f, 20); len(got) != 0 {
 		t.Fatalf("old issue routed after switch: %+v", got)
 	}
@@ -193,6 +200,7 @@ func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
 	unbind := f.req
 	unbind.Operation = "unbind"
 	unbind.MessageID = uuid.NewString()
+	infoFlowPin(t, &unbind)
 	unbound := infoFlowCall(t, f.h, unbind, 200)
 	if unbound.Binding == nil || unbound.Binding.IssueID != f.issue {
 		t.Fatal("unbind lost footer metadata")
@@ -202,6 +210,7 @@ func TestInfoFlowCreateSwitchUnbindAndStaleDelivery(t *testing.T) {
 	}
 	msg.MessageID = uuid.NewString()
 	msg.ExpectedBindingID, msg.ExpectedGeneration = "", ""
+	msg.IssueRef = ""
 	if next := infoFlowCall(t, f.h, msg, 200); next.Handled {
 		t.Fatalf("new unbound message did not fall through: %+v", next)
 	}

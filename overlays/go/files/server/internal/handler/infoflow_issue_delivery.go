@@ -157,6 +157,9 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 		return nil, nil
 	}
 	if c.Kind == "private" {
+		if view.Private == nil || view.Private.State != "active" {
+			return nil, nil
+		}
 		if _, _, err = sh.infoFlowIdentity(ctx, c.ID, s.WorkspaceID); errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -284,6 +287,17 @@ func (h *Handler) InfoFlowIssueDeliveryAck(w http.ResponseWriter, r *http.Reques
 			infoFlowError(w, 409, "stale coordinator")
 			return
 		}
+	} else {
+		b, e := infoFlowLoadBindingID(r.Context(), tx, req.infoFlowScope, c, bindingID)
+		if e != nil {
+			infoFlowError(w, 409, "stale private binding")
+			return
+		}
+		sh, _ := h.infoFlowScoped(tx)
+		if v := sh.infoFlowPrivateView(r.Context(), b, req.WorkspaceID, req.AgentID); !b.IssueID.Valid || v.State != "active" {
+			infoFlowError(w, 409, "stale private assignment")
+			return
+		}
 	}
 	if req.MessageIDs == nil {
 		req.MessageIDs = []string{}
@@ -293,7 +307,7 @@ func (h *Handler) InfoFlowIssueDeliveryAck(w http.ResponseWriter, r *http.Reques
 		external_message_ids=ARRAY(SELECT DISTINCT unnest(d.external_message_ids || $6::text[]))
 		FROM infoflow_issue_binding b,comment c,issue i WHERE d.id=$1 AND b.id=d.binding_id AND b.workspace_id=$3 AND ((b.conversation_kind='private' AND b.robot_id=$2 AND b.agent_id=$4) OR (b.conversation_kind='group' AND b.leader_robot_id=$2))
 		AND d.generation=b.generation AND c.id=d.comment_id AND c.issue_id=b.issue_id AND c.deleted_at IS NULL
-		AND i.id=b.issue_id AND i.workspace_id=b.workspace_id`, id, req.RobotID, req.WorkspaceID, req.AgentID, req.MessageID, req.MessageIDs)
+		AND i.id=b.issue_id AND i.workspace_id=b.workspace_id AND i.infoflow_assignment_version=b.assignment_version`, id, req.RobotID, req.WorkspaceID, req.AgentID, req.MessageID, req.MessageIDs)
 	if err != nil {
 		infoFlowError(w, 500, "ack")
 		return

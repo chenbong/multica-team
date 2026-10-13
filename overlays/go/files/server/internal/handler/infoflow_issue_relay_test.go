@@ -163,9 +163,7 @@ func TestInfoFlowConversationModeIsMetadataOnly(t *testing.T) {
 			dbfx.Exec(t, `INSERT INTO member(id,workspace_id,user_id,role) VALUES($1,$2,$3,'admin')`, f.member, testWorkspaceID, f.user)
 			unbind := req
 			unbind.Operation, unbind.MessageID = "unbind", uuid.NewString()
-			if kind == "group" {
-				infoFlowPin(t, &unbind)
-			}
+			infoFlowPin(t, &unbind)
 			unbound := infoFlowCall(t, f.h, unbind, 200)
 			if unbound.ConversationMode != "chat" || unbound.Binding == nil || unbound.Binding.IssueID != f.issue {
 				t.Fatalf("unbind should retain link but switch mode: %+v", unbound)
@@ -539,14 +537,15 @@ func TestInfoFlowPermissionRevocationWaitsForAcceptedTransaction(t *testing.T) {
 	dbfx.Insert(t, "agent_invocation_target", testutil.Cols{"agent_id": f.req.AgentID, "target_type": "member", "target_id": f.user, "created_by": f.owner})
 	var email string
 	dbfx.QueryRow(t, `SELECT email FROM "user" WHERE id=$1`, f.user).Scan(&email)
-	// Block the actual CreateComment issue update after admission acquired locks.
+	// Block the comment INSERT after admission acquired all grant locks. Routing
+	// now reads the issue earlier, so an issue lock is not an admission barrier.
 	ctx := context.Background()
 	blocker, err := testPool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer blocker.Rollback(ctx)
-	if _, err = blocker.Exec(ctx, `SELECT id FROM issue WHERE id=$1 FOR UPDATE`, f.issue); err != nil {
+	if _, err = blocker.Exec(ctx, `LOCK TABLE comment IN SHARE MODE`); err != nil {
 		t.Fatal(err)
 	}
 	req := f.req
@@ -562,11 +561,11 @@ func TestInfoFlowPermissionRevocationWaitsForAcceptedTransaction(t *testing.T) {
 		f.h.InfoFlowIssueRelay(w, r)
 		done <- w
 	}()
-	// Wait for the live relay's issue-lock wait, proving it passed admission.
+	// Wait for the INSERT, proving the relay passed admission.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var waiting bool
-		err = testPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE '%CreateComment%' OR query LIKE '%COALESCE(assignee_type%' OR query LIKE '%FOR NO KEY UPDATE%'))`).Scan(&waiting)
+		err = testPool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%INSERT INTO comment%')`).Scan(&waiting)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -10,11 +10,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const infoFlowBindingColumns = `id,issue_id,binder_id,generation,bound_at,conversation_kind,group_topology,group_state,COALESCE(leader_robot_id,''),leader_verified_at`
+const infoFlowBindingColumns = `id,issue_id,binder_id,generation,bound_at,conversation_kind,group_topology,group_state,COALESCE(leader_robot_id,''),leader_verified_at,assignment_version,robot_chat_id,robot_name`
 
-func infoFlowScanBinding(row pgx.Row) (infoFlowBinding, error) {
+func infoFlowScanBinding(row pgx.Row, extra ...any) (infoFlowBinding, error) {
 	var b infoFlowBinding
-	err := row.Scan(&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt, &b.Kind, &b.GroupTopology, &b.GroupState, &b.LeaderRobotID, &b.LeaderVerifiedAt)
+	fields := []any{&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt, &b.Kind, &b.GroupTopology, &b.GroupState, &b.LeaderRobotID, &b.LeaderVerifiedAt, &b.AssignmentVersion, &b.RobotChatID, &b.RobotName}
+	err := row.Scan(append(fields, extra...)...)
 	return b, err
 }
 
@@ -29,14 +30,14 @@ var infoFlowTaskRef = regexp.MustCompile(`(?i)\b[A-Z0-9]{1,10}-[0-9]+\b`)
 // acquire a second task when another robot or selector handles its retry.
 func infoFlowGroupReceipt(ctx context.Context, tx pgx.Tx, req infoFlowRelayRequest) (infoFlowBinding, error) {
 	var id string
-	err := tx.QueryRow(ctx, `SELECT b.id::text FROM infoflow_issue_source s JOIN infoflow_issue_binding b ON b.id=s.binding_id WHERE b.conversation_kind='group' AND b.conversation_id=$1 AND s.message_id=$2 ORDER BY s.created_at,s.id LIMIT 1`, req.Conversation.ID, req.MessageID).Scan(&id)
+	err := tx.QueryRow(ctx, `SELECT b.id::text FROM infoflow_issue_source s JOIN infoflow_issue_binding b ON b.id=s.binding_id WHERE b.conversation_kind=$3 AND b.conversation_id=$1 AND s.message_id=$2 AND ($3='group' OR (b.robot_id=$4 AND b.workspace_id=$5 AND b.agent_id::text=lower($6))) ORDER BY s.created_at,s.id LIMIT 1`, req.Conversation.ID, req.MessageID, req.Conversation.Kind, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&id)
 	if err != nil {
 		return infoFlowBinding{}, err
 	}
 	return infoFlowLoadBindingID(ctx, tx, req.infoFlowScope, req.Conversation, id)
 }
 
-// Selectors never use private conversations or another group's provenance.
+// Selectors never use another conversation's provenance.
 // Quoted messages have priority over text, even when the text names another task.
 func infoFlowGroupQuoteBinding(ctx context.Context, tx pgx.Tx, req infoFlowRelayRequest) (string, bool, error) {
 	if req.ReplyToMessageID == "" {
@@ -45,7 +46,7 @@ func infoFlowGroupQuoteBinding(ctx context.Context, tx pgx.Tx, req infoFlowRelay
 	rows, err := tx.Query(ctx, `SELECT DISTINCT b.id::text, (b.issue_id IS NOT NULL AND b.generation=x.generation AND b.issue_id=x.issue_id) AS current FROM infoflow_issue_binding b JOIN (
 	 SELECT binding_id,generation,issue_id FROM infoflow_issue_source WHERE message_id=$3
 	 UNION ALL SELECT d.binding_id,d.generation,c.issue_id FROM infoflow_issue_delivery d JOIN comment c ON c.id=d.comment_id WHERE d.external_message_id=$3 OR $3=ANY(d.external_message_ids)
-	) x ON x.binding_id=b.id WHERE b.conversation_kind='group' AND b.conversation_id=$1 AND b.workspace_id=$2`, req.Conversation.ID, req.WorkspaceID, req.ReplyToMessageID)
+	) x ON x.binding_id=b.id WHERE b.conversation_kind=$4 AND b.conversation_id=$1 AND b.workspace_id=$2 AND ($4='group' OR (b.robot_id=$5 AND b.agent_id::text=lower($6)))`, req.Conversation.ID, req.WorkspaceID, req.ReplyToMessageID, req.Conversation.Kind, req.RobotID, req.AgentID)
 	if err != nil {
 		return "", false, err
 	}
@@ -92,7 +93,7 @@ func infoFlowExplicitRef(req infoFlowRelayRequest) (string, bool) {
 }
 
 // Returns a handled notice for missing/ambiguous selectors. Only a genuinely
-// unbound group may fall back to Chat. The caller must gate every notice by
+// unbound conversation may fall back to Chat. The caller must gate every notice by
 // workspace membership before exposing task metadata or choices.
 func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlowRelayRequest) (infoFlowBinding, string, error) {
 	if req.MessageID != "" {
@@ -104,7 +105,7 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 			return b, "", err
 		}
 		var received, echo bool
-		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_source s JOIN infoflow_issue_binding b ON b.id=s.binding_id WHERE b.conversation_kind='group' AND b.conversation_id=$1 AND s.message_id=$2),EXISTS(SELECT 1 FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id WHERE b.conversation_kind='group' AND b.conversation_id=$1 AND (d.external_message_id=$2 OR $2=ANY(d.external_message_ids)))`, req.Conversation.ID, req.MessageID).Scan(&received, &echo)
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_source s JOIN infoflow_issue_binding b ON b.id=s.binding_id WHERE b.conversation_kind=$3 AND b.conversation_id=$1 AND s.message_id=$2 AND ($3='group' OR (b.robot_id=$4 AND b.workspace_id=$5 AND b.agent_id::text=lower($6)))),EXISTS(SELECT 1 FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id WHERE b.conversation_kind=$3 AND b.conversation_id=$1 AND (d.external_message_id=$2 OR $2=ANY(d.external_message_ids)) AND ($3='group' OR (b.robot_id=$4 AND b.workspace_id=$5 AND b.agent_id::text=lower($6))))`, req.Conversation.ID, req.MessageID, req.Conversation.Kind, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&received, &echo)
 		if err != nil {
 			return b, "", err
 		}
@@ -116,7 +117,7 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 		return infoFlowBinding{}, "", nil
 	}
 	var anyGroup bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind='group' AND conversation_id=$1 AND issue_id IS NOT NULL)`, req.Conversation.ID).Scan(&anyGroup)
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind=$2 AND conversation_id=$1 AND issue_id IS NOT NULL AND ($2='group' OR (robot_id=$3 AND workspace_id=$4 AND agent_id::text=lower($5))))`, req.Conversation.ID, req.Conversation.Kind, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&anyGroup)
 	if err != nil {
 		return infoFlowBinding{}, "", err
 	}
@@ -177,12 +178,12 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 		if err != nil {
 			return infoFlowBinding{}, "", err
 		}
-		err = tx.QueryRow(ctx, `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind='group' AND conversation_id=$2 AND issue_id=$3`, req.WorkspaceID, req.Conversation.ID, issue).Scan(&selected)
+		err = tx.QueryRow(ctx, `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind=$4 AND conversation_id=$2 AND issue_id=$3 AND ($4='group' OR (robot_id=$5 AND agent_id::text=lower($6)))`, req.WorkspaceID, req.Conversation.ID, issue, req.Conversation.Kind, req.RobotID, req.AgentID).Scan(&selected)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if req.Operation == "bind" {
 				return infoFlowBinding{}, "", nil
 			}
-			return infoFlowBinding{}, "该任务未绑定当前群，请先使用 /bind 任务编号", nil
+			return infoFlowBinding{}, "该任务未绑定当前对话，请先使用 /bind 任务编号", nil
 		}
 		if err != nil {
 			return infoFlowBinding{}, "", err
@@ -205,7 +206,7 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 	if req.Operation == "bind" {
 		return infoFlowBinding{}, "请指定要绑定的任务编号", nil
 	}
-	rows, err := tx.Query(ctx, `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind='group' AND conversation_id=$2 AND issue_id IS NOT NULL ORDER BY id`, req.WorkspaceID, req.Conversation.ID)
+	rows, err := tx.Query(ctx, `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind=$3 AND conversation_id=$2 AND issue_id IS NOT NULL AND ($3='group' OR (robot_id=$4 AND agent_id::text=lower($5))) ORDER BY issue_id,id`, req.WorkspaceID, req.Conversation.ID, req.Conversation.Kind, req.RobotID, req.AgentID)
 	if err != nil {
 		return infoFlowBinding{}, "", err
 	}
@@ -240,6 +241,13 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 				return b, "", e
 			}
 		}
+		if req.Conversation.Kind == "private" {
+			// Retain invalid associations as candidates. A stale private binding
+			// must ask for an explicit rebind, never become owner-authority Chat
+			// or silently route to a different remaining task.
+			candidates = append(candidates, b)
+			continue
+		}
 		t, reason, e := h.infoFlowTopology(ctx, b.IssueID, req.WorkspaceID)
 		if e != nil {
 			return b, "", e
@@ -255,7 +263,7 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 		return infoFlowBinding{}, "当前智能体关联多个任务，请回复对应任务消息或指定任务编号", nil
 	}
 	if anyGroup {
-		return infoFlowBinding{}, "当前群没有可路由到该智能体的任务，请指定已绑定的任务编号或联系任务负责人", nil
+		return infoFlowBinding{}, "当前对话没有可路由到该智能体的任务，请指定已绑定的任务编号或联系任务负责人", nil
 	}
 	return infoFlowBinding{}, "", nil
 }

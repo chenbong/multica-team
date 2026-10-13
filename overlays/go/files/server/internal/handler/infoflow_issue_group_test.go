@@ -128,7 +128,9 @@ func TestInfoFlowNestedExternalMentionCannotInvokeOtherAgent(t *testing.T) {
 
 func infoFlowActivate(t *testing.T, f infoFlowTestFixture, req infoFlowRelayRequest, generation string) infoFlowRelayResponse {
 	t.Helper()
-	out := infoFlowGroupStatus(t, f, infoFlowGroupStatusRequest{infoFlowScope: req.infoFlowScope, Conversation: req.Conversation, Generation: generation, LeaderAgentID: req.AgentID, LeaderRobotID: req.RobotID, LeaderPresent: true}, 200)
+	var version string
+	dbfx.QueryRow(t, `SELECT infoflow_assignment_version::text FROM issue WHERE id=$1`, req.IssueRef).Scan(&version)
+	out := infoFlowGroupStatus(t, f, infoFlowGroupStatusRequest{infoFlowScope: req.infoFlowScope, Conversation: req.Conversation, Generation: generation, LeaderAgentID: req.AgentID, LeaderRobotID: req.RobotID, LeaderPresent: true, AssignmentVersion: version}, 200)
 	if out.Binding == nil || out.Binding.Group == nil || out.Binding.Group.State != "active" {
 		t.Fatalf("activate: %+v", out)
 	}
@@ -328,7 +330,7 @@ func TestInfoFlowGroupTopologyAndParticipantRouting(t *testing.T) {
 	}
 	status := infoFlowGroupStatusRequest{infoFlowScope: f.req.infoFlowScope, Conversation: f.req.Conversation, Generation: bound.Binding.Generation, LeaderAgentID: f.req.AgentID, LeaderRobotID: f.req.RobotID, LeaderPresent: true}
 	infoFlowGroupStatus(t, f, status, 409)
-	infoFlowActivate(t, other, other.req, bound.Binding.Generation)
+	bound = infoFlowActivate(t, other, other.req, bound.Binding.Generation)
 	// Single assignment is a different topology even when its leader is equal.
 	dbfx.Exec(t, `UPDATE issue SET assignee_type='agent',assignee_id=$2 WHERE id=$1`, f.issue, member)
 	if got := infoFlowCall(t, f.h, req, 200); got.Binding.Group.State != "pending" {
