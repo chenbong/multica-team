@@ -91,6 +91,42 @@ func infoFlowWebObserve(t *testing.T, f infoFlowTestFixture, group string, membe
 	testutil.Call(t, f.h.InfoFlowGroupObservation, r).Want(200)
 }
 
+func TestInfoFlowGroupNameSelectionBindingAndMetadataFailure(t *testing.T) {
+	f := newInfoFlowWebFixture(t)
+	observe := func(name string) {
+		r := testutil.WithHeaders(testutil.JSONRequest("POST", "/observation", infoFlowGroupObservation{infoFlowScope: f.req.infoFlowScope, GroupID: f.req.Conversation.ID, Name: name, Members: []string{f.req.Sender}}), "Authorization", "Bearer "+infoFlowTestToken)
+		testutil.Call(t, f.h.InfoFlowGroupObservation, r).Want(200)
+	}
+	observe("Original name")
+	view := infoFlowWebCall(t, f, "GET", f.owner, nil, 200)
+	if len(view.Groups) != 1 || view.Groups[0].Name != "Original name" {
+		t.Fatalf("missing choice name: %+v", view)
+	}
+	infoFlowWebCall(t, f, "POST", f.owner, map[string]string{"group_id": f.req.Conversation.ID}, 202)
+	jobs := infoFlowWebClaim(t, f)
+	if len(jobs) != 1 {
+		t.Fatal("missing binding job")
+	}
+	infoFlowWebResultCall(t, f, infoFlowWebSuccess(f, jobs[0]), 200)
+	observe("Renamed group")
+	observe("") // An optional metadata API failure must not erase a known name.
+	view = infoFlowWebCall(t, f, "GET", f.owner, nil, 200)
+	if view.Binding == nil || view.Binding.Name != "Renamed group" || view.Binding.State != "active" {
+		t.Fatalf("missing active name: %+v", view)
+	}
+	groups := infoFlowReadGroups(t, f, f.owner, 200)
+	if len(groups) != 1 || groups[0]["name"] != "Renamed group" {
+		t.Fatalf("compatibility link missing name: %+v", groups)
+	}
+	// Names cannot manufacture membership or candidate discovery.
+	r := testutil.WithHeaders(testutil.JSONRequest("POST", "/observation", infoFlowGroupObservation{infoFlowScope: f.req.infoFlowScope, GroupID: f.req.Conversation.ID, Name: "Still visible", Members: []string{}}), "Authorization", "Bearer "+infoFlowTestToken)
+	testutil.Call(t, f.h.InfoFlowGroupObservation, r).Want(200)
+	view = infoFlowWebCall(t, f, "GET", f.owner, nil, 200)
+	if len(view.Groups) != 0 {
+		t.Fatalf("name exposed unauthorized choice: %+v", view.Groups)
+	}
+}
+
 func TestInfoFlowWebGroupVerifiedAdmission(t *testing.T) {
 	f := newInfoFlowWebFixture(t)
 	view := infoFlowWebCall(t, f, "POST", f.owner, map[string]string{"group_id": f.req.Conversation.ID}, 202)

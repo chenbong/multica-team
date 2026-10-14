@@ -3,7 +3,7 @@ import { api, ApiError } from "../api";
 import { useAuthStore } from "../auth";
 import { isInfoFlowGroupBindingWaiting, type InfoFlowGroupBindingStatus, type InfoFlowGroupTarget } from "../api/infoflow-groups-schema";
 
-export { infoFlowGroupURL, parseInfoFlowGroupTarget, isInfoFlowGroupBindingWaiting } from "../api/infoflow-groups-schema";
+export { infoFlowGroupURL, infoFlowGroupLabel, parseInfoFlowGroupTarget, isInfoFlowGroupBindingWaiting } from "../api/infoflow-groups-schema";
 export type { InfoFlowGroupBindingStatus, InfoFlowGroupTarget } from "../api/infoflow-groups-schema";
 
 export const infoFlowGroupBindingKeys = {

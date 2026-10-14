@@ -33,6 +33,16 @@ async function open() {
 }
 
 describe("unified InfoFlow dialog", () => {
+  it("shows the exact group number and name in choices and verified binding details", async () => {
+    const user = await open();
+    expect(screen.getByRole("option", { name: "123 · Existing group" })).toHaveValue("123");
+    const active = fresh(); active.group.binding = { bindingId: id, groupId: "123", name: "Renamed group", state: "active", reason: "" };
+    state.get.mockResolvedValue(active);
+    await user.click(screen.getByRole("button", { name: en.infoflow_groups.refresh }));
+    expect(await screen.findByText(`${en.infoflow_groups.target}：123 · Renamed group`)).toBeInTheDocument();
+    expect(screen.getByTitle("123 · Renamed group")).toHaveAttribute("href", infoFlowConversationURL("123", "group"));
+    expect(state.post).not.toHaveBeenCalled();
+  });
   it("has one labeled entry, group and own-private tabs", async () => {
     await open(); expect(screen.getByRole("dialog", { name: en.infoflow_conversations.bind })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: en.infoflow_conversations.group })).toBeInTheDocument();

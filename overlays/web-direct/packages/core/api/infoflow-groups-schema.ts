@@ -25,11 +25,16 @@ export interface InfoFlowGroup {
   url: string;
 }
 
+export function infoFlowGroupLabel(groupId: string, name?: string): string {
+  return name?.trim() ? `${groupId} · ${name.trim()}` : groupId;
+}
+
 export const InfoFlowGroupBindingSchema = z.object({
   enabled: z.boolean().default(false),
   can_manage: z.boolean().default(false),
   binding: z.object({
     group_id: InfoFlowGroupIdSchema,
+    name: z.string().max(256).default(""),
     state: z.enum(["pending", "active"]),
     reason: z.string().max(256).default(""),
   }).nullable().default(null),
@@ -54,7 +59,7 @@ export type InfoFlowGroupBindingWire = z.infer<typeof InfoFlowGroupBindingSchema
 export interface InfoFlowGroupBindingStatus {
   enabled: boolean;
   canManage: boolean;
-  binding: { groupId: string; state: "pending" | "active"; reason: string } | null;
+  binding: { groupId: string; name?: string; state: "pending" | "active"; reason: string } | null;
   request: { requestId: string; groupId: string; state: "queued" | "pending" | "failed" | "active"; reason: string } | null;
   groups: { groupId: string; name: string }[];
 }
@@ -64,7 +69,7 @@ export function infoFlowGroupBindingStatus(value: InfoFlowGroupBindingWire): Inf
   const binding = value.enabled && (value.binding?.state === "active" || canManage) ? value.binding : null;
   return {
     enabled: value.enabled, canManage,
-    binding: binding ? { groupId: binding.group_id, state: binding.state, reason: binding.reason } : null,
+    binding: binding ? { groupId: binding.group_id, ...(binding.name ? { name: binding.name } : {}), state: binding.state, reason: binding.reason } : null,
     request: canManage && value.request ? { requestId: value.request.request_id, groupId: value.request.group_id, state: value.request.state, reason: value.request.reason } : null,
     groups: canManage ? value.groups.map((group) => ({ groupId: group.group_id, name: group.name })) : [],
   };

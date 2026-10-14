@@ -379,7 +379,12 @@ func (h *Handler) GetIssueInfoFlowGroups(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		if v := sh.infoFlowGroupView(r.Context(), b, ws); v.State == "active" {
-			out = append(out, map[string]string{"group_id": id[0], "url": infoFlowGroupURL(id[0])})
+			name, err := infoFlowObservedGroupName(r.Context(), tx, ws, id[0])
+			if err != nil {
+				writeError(w, 500, "Failed to load group name")
+				return
+			}
+			out = append(out, map[string]string{"group_id": id[0], "name": name, "url": infoFlowGroupURL(id[0])})
 		}
 	}
 	writeJSON(w, 200, map[string]any{"groups": out})

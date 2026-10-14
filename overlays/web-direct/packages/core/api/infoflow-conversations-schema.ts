@@ -44,6 +44,7 @@ const ConversationGroupSchema = z.object({
   binding: z.object({
     binding_id: InfoFlowConversationBindingIdSchema.optional(),
     group_id: InfoFlowGroupIdSchema,
+    name: z.string().max(256).default(""),
     state: z.enum(["pending", "active"]),
     reason: z.string().max(256).default(""),
   }).nullable().default(null),
@@ -85,7 +86,7 @@ export interface InfoFlowConversationsStatus {
   enabled: boolean;
   group: {
     canManage: boolean;
-    binding: { bindingId?: string; groupId: string; state: "pending" | "active"; reason: string } | null;
+    binding: { bindingId?: string; groupId: string; name?: string; state: "pending" | "active"; reason: string } | null;
     request: { requestId: string; groupId: string; state: "queued" | "pending" | "failed" | "active"; reason: string; generation?: string; canCancel?: boolean } | null;
     groups: { groupId: string; name: string }[];
   };

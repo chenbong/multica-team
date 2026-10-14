@@ -524,6 +524,13 @@ export class IssueRelay {
         if (group.conversation?.kind !== "group" || !group.conversation.id || !group.binding?.binding_id || !group.binding.group) throw new Error("invalid issue group plan");
         if (!(await this.groups.owns(scope, group.binding))) continue;
         const state = await this.reconcileGroup(scope, group.conversation, group.binding, { invite: true });
+        // Refresh names for existing bindings too, independently of admission
+        // leases and deliveries. observeGroup coalesces each robot/group/minute.
+        void this.groups.entries(scope.workspace_id, [scope.agent_id], { agentNames: group.binding.group.agent_names })
+          .then(entries => {
+            const robot = entries.find(entry => entry.robotId === scope.robot_id && entry.agentId === scope.agent_id);
+            if (robot?.client && !this.stopped) return this.observeGroupEvent({ groupId: group.conversation.id, appId: robot.appId, client: robot.client });
+          }).catch(() => {});
         // Multiple task bindings can share one physical group/leader. A failed
         // task's topology or membership must not pause unrelated deliveries.
         checked.set(group.binding.binding_id, { ...state, conversation: group.conversation });

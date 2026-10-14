@@ -77,6 +77,17 @@ export async function groupMembers(client, groupId) {
   return (await groupRoster(client, groupId)).bots;
 }
 
+export async function groupInfo(client, groupId) {
+  const id = exactGroupId(groupId);
+  const result = apiEnvelope(await client.httpClient.post("/robot/group/getGroupInfo", `{"groupId":${id}}`, { disableRetry: true }));
+  if (result.code !== 0 || exactGroupId(result.data?.groupId) !== id || typeof result.data?.name !== "string") {
+    throw new Error("group metadata could not be verified");
+  }
+  const name = result.data.name.replace(/[\x00-\x1f\x7f]/g, " ").trim();
+  if (Buffer.byteLength(name, "utf8") > 256) throw new Error("group name exceeds metadata limit");
+  return { name };
+}
+
 export async function inviteGroupLeader(client, groupId, appId) {
   const id = exactGroupId(groupId), target = exactGroupId(appId);
   const result = apiEnvelope(await client.httpClient.post("/robot/group/addMembers",
@@ -108,13 +119,14 @@ export function botOrigin(raw) {
 // A single process-wide coordinator is shared by every robot. Configuration
 // mappings include offline robots: transport failure is NOT evidence of absence.
 export class IssueGroups {
-  constructor({ entries, statePath, now = Date.now, members = groupMembers, roster = groupRoster, invite = inviteGroupLeader,
+  constructor({ entries, statePath, now = Date.now, members = groupMembers, roster = groupRoster, info = groupInfo, invite = inviteGroupLeader,
     candidateRobotIds = () => [] }) {
     this.entries = entries;
     this.candidateRobotIds = candidateRobotIds;
     this.now = now;
     this.members = members;
     this.roster = roster;
+    this.info = info;
     this.invite = invite;
     this.path = statePath + ".issue-group-invites.json";
     this.deliveryPath = statePath + ".issue-group-deliveries.json";
@@ -146,7 +158,10 @@ export class IssueGroups {
     const roster = validatedRoster(await this.roster(robot.client, id));
     if (!roster.bots.some(bot => bot.appId === appId)) throw new Error("discovery robot is not in group");
     this.rememberBots(roster.bots);
-    await publish({ ...scope, group_id: id, name: "", members: roster.members });
+    let name = "";
+    // Display metadata is optional and never proof of membership or authority.
+    try { name = (await this.info(robot.client, id)).name; } catch { /* Keep the ID if the optional API is unavailable. */ }
+    await publish({ ...scope, group_id: id, name, members: roster.members });
   }
 
   async webJobLock(workspaceId, action, kind = "group") {

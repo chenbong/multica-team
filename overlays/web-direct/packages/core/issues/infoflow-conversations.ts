@@ -4,7 +4,7 @@ import { useAuthStore } from "../auth";
 import { isInfoFlowConversationWaiting, type InfoFlowConversationsStatus, type InfoFlowConversationTarget, type InfoFlowConversationRequestTarget } from "../api/infoflow-conversations-schema";
 
 export { infoFlowConversationURL, isInfoFlowConversationWaiting } from "../api/infoflow-conversations-schema";
-export { parseInfoFlowGroupTarget } from "../api/infoflow-groups-schema";
+export { parseInfoFlowGroupTarget, infoFlowGroupLabel } from "../api/infoflow-groups-schema";
 export type { InfoFlowConversationsStatus, InfoFlowConversationTarget, InfoFlowConversationRequestTarget } from "../api/infoflow-conversations-schema";
 
 export const infoFlowConversationKeys = {

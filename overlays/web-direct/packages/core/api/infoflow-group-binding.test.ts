@@ -13,6 +13,13 @@ function respond(body: unknown, status = 200) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("web group binding API boundary", () => {
+  it("preserves display names for active bindings without granting discovery access", async () => {
+    respond({ ...pending, can_manage: false, binding: { group_id: "9007199254740993", name: "Test group", state: "active" } });
+    const result = await client().getIssueInfoFlowGroupBinding("TEST-1");
+    expect(result.binding?.name).toBe("Test group"); expect(result.groups).toEqual([]);
+    respond({ ...pending, binding: { group_id: "123", state: "active", name: 123 } });
+    await expect(client().getIssueInfoFlowGroupBinding("TEST-1")).rejects.toThrow();
+  });
   it("reads checked, camel-case state while preserving int64 IDs", async () => {
     const fetch = respond(pending);
     expect(await client().getIssueInfoFlowGroupBinding("TEST/1")).toEqual({ enabled: true, canManage: true, binding: null,

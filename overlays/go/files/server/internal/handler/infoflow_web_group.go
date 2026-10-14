@@ -19,6 +19,7 @@ import (
 type infoFlowWebState struct {
 	BindingID  string `json:"binding_id,omitempty"`
 	GroupID    string `json:"group_id"`
+	Name       string `json:"name,omitempty"`
 	State      string `json:"state"`
 	Reason     string `json:"reason"`
 	RequestID  string `json:"request_id,omitempty"`
@@ -128,7 +129,11 @@ func (h *Handler) infoFlowWebView(ctx context.Context, tx pgx.Tx, ws string, iss
 	out.CanManage = manage
 	if b.ID.Valid {
 		v := sh.infoFlowGroupView(ctx, b, ws)
-		out.Binding = &infoFlowWebState{BindingID: uuidToString(b.ID), GroupID: group, State: v.State, Reason: v.Reason}
+		name, e := infoFlowObservedGroupName(ctx, tx, ws, group)
+		if e != nil {
+			return out, e
+		}
+		out.Binding = &infoFlowWebState{BindingID: uuidToString(b.ID), GroupID: group, Name: name, State: v.State, Reason: v.Reason}
 	}
 	var id, gid, state, reason string
 	var expires time.Time
@@ -159,7 +164,7 @@ func (h *Handler) infoFlowWebView(ctx context.Context, tx pgx.Tx, ws string, iss
 		return out, nil
 	}
 	encoded, _ := json.Marshal([]string{sender})
-	rows, err := tx.Query(ctx, `SELECT group_id,MAX(name) FROM infoflow_group_observation WHERE workspace_id=$1 AND members @> $2::jsonb AND observed_at>clock_timestamp()-interval '24 hours' GROUP BY group_id ORDER BY group_id LIMIT 100`, ws, encoded)
+	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (o.group_id) o.group_id,COALESCE((SELECT n.name FROM infoflow_group_observation n WHERE n.workspace_id=o.workspace_id AND n.group_id=o.group_id AND n.name<>'' ORDER BY n.observed_at DESC,n.robot_id LIMIT 1),'') FROM infoflow_group_observation o WHERE o.workspace_id=$1 AND o.members @> $2::jsonb AND o.observed_at>clock_timestamp()-interval '24 hours' ORDER BY o.group_id,o.observed_at DESC LIMIT 100`, ws, encoded)
 	if err != nil {
 		return out, err
 	}
@@ -278,12 +283,18 @@ func (h *Handler) InfoFlowGroupObservation(w http.ResponseWriter, r *http.Reques
 		req.Members = []string{}
 	}
 	members, _ := json.Marshal(req.Members)
-	_, err := h.DB.Exec(r.Context(), `INSERT INTO infoflow_group_observation(workspace_id,group_id,robot_id,agent_id,name,members) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(workspace_id,group_id,robot_id) DO UPDATE SET agent_id=EXCLUDED.agent_id,name=EXCLUDED.name,members=EXCLUDED.members,observed_at=clock_timestamp()`, req.WorkspaceID, req.GroupID, req.RobotID, req.AgentID, req.Name, members)
+	_, err := h.DB.Exec(r.Context(), `INSERT INTO infoflow_group_observation(workspace_id,group_id,robot_id,agent_id,name,members) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(workspace_id,group_id,robot_id) DO UPDATE SET agent_id=EXCLUDED.agent_id,name=COALESCE(NULLIF(EXCLUDED.name,''),infoflow_group_observation.name),members=EXCLUDED.members,observed_at=clock_timestamp()`, req.WorkspaceID, req.GroupID, req.RobotID, req.AgentID, req.Name, members)
 	if err != nil {
 		infoFlowError(w, 500, "observation")
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func infoFlowObservedGroupName(ctx context.Context, tx pgx.Tx, ws, group string) (string, error) {
+	var name string
+	err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT name FROM infoflow_group_observation WHERE workspace_id=$1 AND group_id=$2 AND name<>'' ORDER BY observed_at DESC,robot_id LIMIT 1),'')`, ws, group).Scan(&name)
+	return name, err
 }
 
 func infoFlowWebReason(reason string) string {

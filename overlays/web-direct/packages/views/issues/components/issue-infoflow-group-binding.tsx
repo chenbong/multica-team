@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Loader2, MessageSquare } from "lucide-react";
 import { useAuthStore } from "@multica/core/auth";
 import {
-  infoFlowGroupURL, isInfoFlowGroupBindingUnavailable, isInfoFlowGroupBindingWaiting,
+  infoFlowGroupURL, infoFlowGroupLabel, isInfoFlowGroupBindingUnavailable, isInfoFlowGroupBindingWaiting,
   parseInfoFlowGroupTarget, useBindIssueInfoFlowGroup, useIssueInfoFlowGroupBinding,
   type InfoFlowGroupBindingStatus,
 } from "@multica/core/issues/infoflow-group-binding";
@@ -35,7 +35,7 @@ export function IssueInfoFlowGroupBinding({ workspaceId, issueId }: { workspaceI
   if (!open && !active && !canManage) return null;
   return <>
     {active && <a href={infoFlowGroupURL(active.groupId)} className={buttonVariants({ variant: "outline", size: "sm" })}
-      title={t(($) => $.infoflow_groups.group, { id: active.groupId })}>
+      title={infoFlowGroupLabel(active.groupId, active.name)}>
       <MessageSquare aria-hidden="true" />{t(($) => $.infoflow_groups.open)}
     </a>}
     <Dialog open={open} onOpenChange={(value) => { if (!mutation.isPending) setOpen(value); }}>
@@ -109,7 +109,7 @@ function BindingDialog({ status, readError, refreshing, refresh, mutation, canMa
       {(readError || !canManage) && <p role="alert">{t(($) => $.infoflow_groups.read_failed)}</p>}
       {canManage && !readError && <>
         {reserved ? <div className="grid gap-1 text-caption">
-          <p className="flex flex-wrap gap-2"><span>{t(($) => $.infoflow_groups.target)}</span><span>{reserved}</span></p>
+          <p className="flex flex-wrap gap-2"><span>{t(($) => $.infoflow_groups.target)}</span><span className="break-words">{infoFlowGroupLabel(reserved, status?.binding?.name)}</span></p>
           {!active && <p className="text-muted-foreground">{t(($) => $.infoflow_groups.reserved)}</p>}
         </div> : <>
           <fieldset className="grid gap-3" disabled={busy}>
@@ -120,11 +120,11 @@ function BindingDialog({ status, readError, refreshing, refresh, mutation, canMa
             </label>
             {mode === "existing" && <div className="grid gap-2 text-caption">
               <label htmlFor={`${inputId}-existing`}>{t(($) => $.infoflow_groups.choose)}</label>
-              <select className="w-full min-w-0 rounded-lg border border-input bg-background p-2 text-body text-foreground"
+              <select className="w-full min-w-0 rounded-lg border border-[color:var(--input)] bg-background p-2 text-body text-foreground"
                 id={`${inputId}-existing`} value={availableSelection} onChange={(event) => { setSelected(event.target.value); setError(""); }}>
                 <option value="">{t(($) => $.infoflow_groups.choose)}</option>
                 {status?.groups.map((group) => <option key={group.groupId} value={group.groupId}>
-                  {group.name ? `${group.name} · ${group.groupId}` : group.groupId}
+                  {infoFlowGroupLabel(group.groupId, group.name)}
                 </option>)}
               </select>
               {status?.groups.length === 0 && <span className="text-muted-foreground">{t(($) => $.infoflow_groups.empty)}</span>}

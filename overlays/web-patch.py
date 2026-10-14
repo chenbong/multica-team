@@ -304,10 +304,32 @@ def login_page_changes():
     ]
 
 
+# Embedded visual editors can inject an unscoped .border-input control style.
+# Keep our semantic color token without sharing that foreign class name.
+FORM_BORDER_COMPONENTS = (
+    "input", "textarea", "checkbox", "toggle", "select", "time-input",
+    "input-otp", "input-group",
+)
+
+
+def login_test_changes():
+    source = (HERE.parent / "multica/packages/views/auth/login-page.test.tsx").read_text()
+    updated = source.replace("/sign in to multica/i", "enAuth.signin.title")
+    if BOT_CONFIGURED:
+        updated = updated.replace("/check your email/i", "/verification messages/i")
+    return [(source, updated)]
+
 CHANGES = {
+    **{
+        f"packages/ui/components/ui/{component}.tsx": [
+            (" border-input ", " border-[color:var(--input)] "),
+        ]
+        for component in FORM_BORDER_COMPONENTS
+    },
     AUTH_ZH: auth_zh_changes(),
     AUTH_EN: auth_en_changes(),
     LOGIN_PAGE: login_page_changes(),
+    "packages/views/auth/login-page.test.tsx": login_test_changes(),
     LOGIN_ROUTE: [
         # The web shell passes a "prefer the desktop app? download" slot into the
         # sign-in card. This deployment has no desktop build to point at, so the

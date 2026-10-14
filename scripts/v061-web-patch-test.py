@@ -83,6 +83,41 @@ class FrontendPatches(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.assertFalse((self.target / ".overlay-backup").exists())
 
+    def test_form_controls_avoid_foreign_editor_class_without_changing_other_styles(self):
+        self.apply()
+        for component in self.module["FORM_BORDER_COMPONENTS"]:
+            rel = f"packages/ui/components/ui/{component}.tsx"
+            with self.subTest(component=component):
+                original = self.originals[rel]
+                self.assertEqual(original.count(" border-input "), 1)
+                patched = (self.target / rel).read_text()
+                self.assertEqual(patched, original.replace(" border-input ", " border-[color:var(--input)] "))
+                self.assertNotIn(" border-input ", patched)
+                self.assertIn(" border-[color:var(--input)] ", patched)
+        for component in ("bind-infoflow-conversation", "issue-infoflow-group-binding"):
+            source = (ROOT / f"overlays/web-direct/packages/views/issues/components/{component}.tsx").read_text()
+            self.assertNotIn(" border-input ", source)
+            self.assertIn(" border-[color:var(--input)] ", source)
+
+    def test_explicit_build_configuration_fails_closed_and_retains_login_copy(self):
+        prepare = runpy.run_path(str(ROOT / "deploy/prepare-web.py"))
+        config = {key: os.environ.get(key, "Fixture") or "Fixture" for key in prepare["REQUIRED"]}
+        config["MULTICA_BRAND_NAME"] = "Fixture title"
+        path = self.target / "build-config.json"
+        path.write_text(json.dumps(config))
+        self.assertEqual(prepare["load_config"](path), config)
+        for key in prepare["REQUIRED"]:
+            missing = {**config, key: ""}
+            path.write_text(json.dumps(missing))
+            with self.assertRaisesRegex(ValueError, key):
+                prepare["load_config"](path)
+        self.apply()
+        prepare["verify_output"](self.target, config)
+        login = self.target / "packages/views/auth/login-page.tsx"
+        login.write_text(login.read_text().replace("$.verify.title_link", "$.verify.title"))
+        with self.assertRaisesRegex(ValueError, "lost verification"):
+            prepare["verify_output"](self.target, config)
+
     def test_runtime_ownership_overlay_keeps_existing_page_features(self):
         rel = "packages/views/runtimes/components/runtimes-page.tsx"
         (self.target / rel).write_text((ROOT / "overlays/web-direct" / rel).read_text())

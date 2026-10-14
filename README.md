@@ -159,6 +159,12 @@ cp infoflow-bridge/config.overlay.example.json infoflow-bridge/config.local.json
 真实主机地址、端口、数据库名、登录域名与品牌文案只写在机器本地的 `deploy/host.env`
 （以及 `infoflow-bridge/config.local.json`），这些文件都不入库。
 
+生产前端建议把所有页面构建配置集中到机器本地的 JSON 文件，通过
+`MULTICA_WEB_BUILD_CONFIG=/absolute/path/to/config/web-build.json` 指定。
+`deploy/prepare-web.py` 会在修改独立构建目录前校验必填配置，并在生成后检查
+登录说明、验证码机器人入口和侧栏链接；缺少配置会失败，不会静默生成默认页面。
+该文件只允许脚本列出的页面配置字段，不接收密钥；实际配置文件不入库。
+
 ## 1. 端口与地址
 
 | 服务 | 端口 | 地址 | 说明 |

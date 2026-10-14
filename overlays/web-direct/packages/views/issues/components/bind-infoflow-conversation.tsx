@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Loader2, MessageSquare } from "lucide-react";
 import { useAuthStore } from "@multica/core/auth";
 import {
-  infoFlowConversationURL, isInfoFlowConversationsUnavailable, parseInfoFlowGroupTarget,
+  infoFlowConversationURL, infoFlowGroupLabel, isInfoFlowConversationsUnavailable, parseInfoFlowGroupTarget,
   useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest,
   type InfoFlowConversationsStatus,
 } from "@multica/core/issues/infoflow-conversations";
@@ -35,7 +35,7 @@ export function BindInfoFlowConversation({ workspaceId, issueId }: { workspaceId
   const privates = status?.private.bindings.filter((binding) => binding.state === "active" && binding.robotChatId) || [];
   if (!open && !canManage && !group && !privates.length) return null;
   return <>
-    {group && <a href={infoFlowConversationURL(group.groupId, "group")} className={buttonVariants({ variant: "outline", size: "sm" })}>
+    {group && <a href={infoFlowConversationURL(group.groupId, "group")} title={infoFlowGroupLabel(group.groupId, group.name)} className={buttonVariants({ variant: "outline", size: "sm" })}>
       <MessageSquare aria-hidden="true" />{t(($) => $.infoflow_groups.open)}
     </a>}
     {privates.map((binding) => <a key={binding.bindingId} href={infoFlowConversationURL(binding.robotChatId, "private")}
@@ -158,7 +158,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
         <TabsContent value="group" className="grid gap-3 pt-2">
           <p className="text-caption text-muted-foreground">{t(($) => $.infoflow_groups.warning)}</p>
           {group?.binding && <div className="grid gap-2">
-            <p>{t(($) => $.infoflow_groups.target)}：{group.binding.groupId}</p>
+            <p className="break-words">{t(($) => $.infoflow_groups.target)}：{infoFlowGroupLabel(group.binding.groupId, group.binding.name)}</p>
             {groupActive ? <p role="status">{t(($) => $.infoflow_groups.success)}</p> :
               <p className="text-caption">{t(($) => $.infoflow_conversations.group_pending)}</p>}
             {groupCanManage && group.binding.bindingId && <Button type="button" variant="outline" disabled={busy || refreshing}
@@ -175,10 +175,10 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
               </label>
               {mode === "existing" && <div className="grid gap-2 text-caption">
                 <label htmlFor={`${inputId}-existing`}>{t(($) => $.infoflow_groups.choose)}</label>
-                <select className="w-full min-w-0 rounded-lg border border-input bg-background p-2 text-body text-foreground"
+                <select className="w-full min-w-0 rounded-lg border border-[color:var(--input)] bg-background p-2 text-body text-foreground"
                   id={`${inputId}-existing`} value={availableSelection} onChange={(event) => { setSelected(event.target.value); setError(""); }}>
                   <option value="">{t(($) => $.infoflow_groups.choose)}</option>
-                  {group.groups.map((item) => <option key={item.groupId} value={item.groupId}>{item.name ? `${item.name} · ${item.groupId}` : item.groupId}</option>)}
+                  {group.groups.map((item) => <option key={item.groupId} value={item.groupId}>{infoFlowGroupLabel(item.groupId, item.name)}</option>)}
                 </select>
                 {!group.groups.length && <span className="text-muted-foreground">{t(($) => $.infoflow_groups.empty)}</span>}
               </div>}

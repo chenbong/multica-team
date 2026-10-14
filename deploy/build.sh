@@ -37,6 +37,9 @@ mkdir -p "$WEB_TREE"
 rsync -a --delete --exclude '.git' --exclude 'node_modules' --exclude '.next' \
   "$INSTANCE_DIR/multica/" "$WEB_TREE/"
 
+if [ -n "${MULTICA_WEB_BUILD_CONFIG:-}" ]; then
+  python3 "$INSTANCE_DIR/deploy/prepare-web.py" "$WEB_TREE" --config "$MULTICA_WEB_BUILD_CONFIG"
+else
 while IFS= read -r rel; do
   target="$WEB_TREE/$rel"
   mkdir -p "$(dirname "$target")"
@@ -47,6 +50,7 @@ rm -rf "$WEB_TREE/.overlay-backup"
 MULTICA_WEB_TARGET="$WEB_TREE" \
 MULTICA_WEB_BACKUP="$WEB_TREE/.overlay-backup" \
   python3 "$INSTANCE_DIR/overlays/web-patch.py" apply
+fi
 
 if [ ! -x "$WEB_TREE/apps/web/node_modules/.bin/next" ]; then
   # Reuse a warm store when available; a fresh host may need the configured
