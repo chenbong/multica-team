@@ -133,6 +133,8 @@ export MULTICA_SKILL_IMPORT_PROXY='http://proxy.example.com:8080'
 `codeload.github.com`、`github.com` 的请求，`skills.sh` 导入中的 GitHub 下载也适用。
 内网与其他主机继续使用原 HTTP client 的代理策略；专用变量未设置或为空时，沿用原配置，
 包括原有的 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 行为。TLS 证书与主机名校验保持启用。
+精简运行镜像必须安装系统 CA 证书；也可通过标准 `SSL_CERT_FILE` 指定部署机上已验证的
+可信根证书 PEM 文件。不要以关闭证书校验来解决 HTTPS 下载错误。
 
 `GITHUB_TOKEN` 仍是可选的 GitHub 认证变量，可在 API 的私有环境配置中导出，供私有仓库或提高
 API 配额使用。它只发送给原有的 API/raw 两个主机，不发送给代理认证端点、其他下载主机或
