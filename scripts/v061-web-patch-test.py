@@ -100,6 +100,9 @@ class FrontendPatches(unittest.TestCase):
             self.assertIn(" border-[color:var(--input)] ", source)
 
     def test_explicit_build_configuration_fails_closed_and_retains_login_copy(self):
+        with patch.dict(os.environ, {"MULTICA_VERIFICATION_BOT_URL": ""}):
+            with self.assertRaisesRegex(SystemExit, "configuration is incomplete"):
+                runpy.run_path(str(ROOT / "overlays/web-patch.py"))
         prepare = runpy.run_path(str(ROOT / "deploy/prepare-web.py"))
         config = {key: os.environ.get(key, "Fixture") or "Fixture" for key in prepare["REQUIRED"]}
         config["MULTICA_BRAND_NAME"] = "Fixture title"

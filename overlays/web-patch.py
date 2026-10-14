@@ -124,6 +124,8 @@ LOGIN_DESCRIPTION = os.environ.get("MULTICA_LOGIN_DESCRIPTION", "").strip()
 EMAIL_PLACEHOLDER = os.environ.get("MULTICA_EMAIL_PLACEHOLDER", "").strip()
 BOT_NAME = os.environ.get("MULTICA_VERIFICATION_BOT_NAME", "").strip()
 BOT_URL = os.environ.get("MULTICA_VERIFICATION_BOT_URL", "").strip()
+if bool(BOT_NAME) != bool(BOT_URL):
+    raise SystemExit("Verification robot configuration is incomplete: set both MULTICA_VERIFICATION_BOT_NAME and MULTICA_VERIFICATION_BOT_URL.")
 BOT_CONFIGURED = bool(BOT_NAME and BOT_URL)
 # Where the "add a computer" dialog tells people to get the CLI. Points at this
 # repository's own installer by default in a deployment, and at upstream's when
