@@ -33,7 +33,7 @@ export class Bridge {
   // Enough id history to cover a redelivery burst without growing the state file.
   static SEEN_MESSAGE_LIMIT = 200;
 
-  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null } = {}) {
+  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null } = {}) {
     this.config = config;
     this.sender = sender;
     this.logger = logger;
@@ -49,6 +49,7 @@ export class Bridge {
     this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
       stageImages: (images) => stageInboundImages(images, this.logger, this.getImageAccessToken),
       groups: issueGroups,
+      getPrivateRobotInfo,
     });
     this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message, skipIssueRelay: true, handoff });
   }

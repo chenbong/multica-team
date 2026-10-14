@@ -176,3 +176,12 @@ Backend tests use only the explicitly provided disposable DATABASE_URL. Migratio
 uses `deploy/migrate-team.sh` to avoid recreating retired group uniqueness after
 the issue-unique index is valid. No upstream
 source writes, production writes, real model invocations, or service restarts.
+
+Explicit private IM `bind` / `create` requests may include `robot_name` and
+`robot_chat_id`, reduced from the same robot client's SDK metadata. These are
+optional public display fields only; the server validates them and never uses
+them as sender, recipient, agent or binding authority. They are frozen in the
+prepared request for retries. Missing metadata preserves existing verified
+fields, and ordinary messages, lookups, unbinds and group requests cannot write
+them. This keeps IM-originated bindings consistent with web bindings without
+adding a daemon protocol or migration.

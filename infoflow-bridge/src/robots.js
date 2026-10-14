@@ -189,6 +189,7 @@ export class RobotRuntime {
     const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger, {
       getImageAccessToken: () => client.getAccessToken(),
       issueGroups: this.issueGroups,
+      getPrivateRobotInfo: () => client.robot.getInfo(),
     });
     const instance = {
       robot,

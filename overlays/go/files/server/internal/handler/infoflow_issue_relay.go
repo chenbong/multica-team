@@ -54,6 +54,8 @@ type infoFlowRelayRequest struct {
 	Attachments        []infoFlowAttachment `json:"attachments,omitempty"`
 	ExpectedBindingID  string               `json:"expected_binding_id,omitempty"`
 	ExpectedGeneration string               `json:"expected_generation,omitempty"`
+	RobotChatID        string               `json:"robot_chat_id,omitempty"`
+	RobotName          string               `json:"robot_name,omitempty"`
 }
 
 type infoFlowBindingView struct {
@@ -139,6 +141,18 @@ func (h *Handler) infoFlowPrivateView(ctx context.Context, b infoFlowBinding, ws
 
 var infoFlowUsername = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var infoFlowDomain = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$`)
+
+func infoFlowValidPrivateRobotMetadata(chatID, name string) bool {
+	if !infoFlowValidGroupID(chatID) || strings.TrimSpace(name) == "" || len(name) > 256 {
+		return false
+	}
+	for _, r := range name {
+		if r < 32 || r == 127 {
+			return false
+		}
+	}
+	return true
+}
 
 // This is deliberately independent of ordinary Auth and its identity headers.
 func infoFlowAuthenticate(w http.ResponseWriter, r *http.Request) bool {
@@ -384,6 +398,14 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	default:
 		infoFlowError(w, 400, "invalid operation")
 		return
+	}
+	if req.RobotChatID != "" || req.RobotName != "" {
+		// Only the trusted Bridge may attach SDK-confirmed public metadata to
+		// an explicit private bind/create. It never changes sender or routing.
+		if req.Conversation.Kind != "private" || (req.Operation != "bind" && req.Operation != "create") || !infoFlowValidPrivateRobotMetadata(req.RobotChatID, req.RobotName) {
+			infoFlowError(w, 400, "private robot metadata")
+			return
+		}
 	}
 	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {
@@ -1023,7 +1045,10 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END,assignment_version=$5 WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation, b.AssignmentVersion)
+		if req.Conversation.Kind == "private" && (req.Operation == "bind" || req.Operation == "create") && req.RobotChatID != "" {
+			b.RobotChatID, b.RobotName = req.RobotChatID, strings.TrimSpace(req.RobotName)
+		}
+		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END,assignment_version=$5,robot_chat_id=$6,robot_name=$7 WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation, b.AssignmentVersion, b.RobotChatID, b.RobotName)
 		if err != nil {
 			infoFlowError(w, 500, "binding update")
 			return

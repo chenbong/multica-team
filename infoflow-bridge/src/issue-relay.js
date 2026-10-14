@@ -6,14 +6,14 @@ import { issueRequest } from "./chat.js";
 import { messageIdString } from "./conversation-context.js";
 import { withReplyMode, noticeReplyMode } from "./reply-format.js";
 import { pollWebGroupJobs } from "./web-group-bindings.js";
-import { pollWebPrivateJobs } from "./web-private-bindings.js";
+import { pollWebPrivateJobs, privateRobotMetadata } from "./web-private-bindings.js";
 
 const DEFERRED_BINDING = Symbol("deferred-binding");
 
 // The service credential only authorizes the trusted inbound bridge. Never put
 // it in agent prompts, CLI profiles, robot admin responses, or daemon requests.
 export class IssueRelay {
-  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null } = {}) {
+  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null, getPrivateRobotInfo = null, privateRobotInfoTimeoutMs = 10000 } = {}) {
     this.config = config;
     this.multica = multica;
     this.send = send;
@@ -22,6 +22,8 @@ export class IssueRelay {
     this.token = token;
     this.stageImages = stageImages;
     this.groups = groups;
+    this.getPrivateRobotInfo = getPrivateRobotInfo;
+    this.privateRobotInfoTimeoutMs = privateRobotInfoTimeoutMs;
     this.enabled = config.issueRelay?.enabled === true;
     this.queues = new Map();
     this.stopped = false;
@@ -120,6 +122,25 @@ export class IssueRelay {
     const result = await response.json();
     if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("invalid issue relay response");
     return result;
+  }
+
+  async privateBindingMetadata() {
+    if (typeof this.getPrivateRobotInfo !== "function") return {};
+    let timer;
+    try {
+      const info = await Promise.race([
+        Promise.resolve().then(() => this.getPrivateRobotInfo()),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("metadata timeout")), this.privateRobotInfoTimeoutMs); }),
+      ]);
+      const metadata = privateRobotMetadata(info);
+      if (metadata.reason) return {};
+      return { robot_chat_id: metadata.robot_chat_id, robot_name: metadata.robot_name };
+    } catch {
+      // Public display metadata is optional; a failed read must not lose an IM
+      // bind or expose SDK errors/credentials. A later explicit bind can retry.
+      this.logger.warn("private robot display metadata unavailable");
+      return {};
+    } finally { clearTimeout(timer); }
   }
 
   async handle(message) {
@@ -377,6 +398,10 @@ export class IssueRelay {
           }
           if (staged.failed.length) body.content += "\n\n图片附件处理失败：\n" + staged.failed.join("\n");
           record.mediaPrepared = true;
+        }
+        if (!wasPrepared && conversation.kind === "private" && ["bind", "create"].includes(parsed.operation)) {
+          Object.assign(body, await this.privateBindingMetadata());
+          if (this.stopped) throw new Error("relay stopped before private binding");
         }
         record.preparedBody = body;
         this.saveInbox();

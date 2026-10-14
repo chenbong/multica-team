@@ -108,6 +108,9 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 	pat := "mul_" + uuid.NewString()
 	patHash := sha256.Sum256([]byte(pat))
 	f.Insert(t, "personal_access_token", testutil.Cols{"user_id": owner, "name": "isolated-infoflow-http-test", "token_hash": hex.EncodeToString(patHash[:]), "token_prefix": pat[:12]})
+	actorPAT := "mul_" + uuid.NewString()
+	actorPATHash := sha256.Sum256([]byte(actorPAT))
+	f.Insert(t, "personal_access_token", testutil.Cols{"user_id": actor, "name": "isolated-infoflow-actor-test", "token_hash": hex.EncodeToString(actorPATHash[:]), "token_prefix": actorPAT[:12]})
 	hub := realtime.NewHub()
 	go hub.Run()
 	server := httptest.NewServer(NewRouter(pool, hub, events.New(), analytics.NoopClient{}, nil))
@@ -369,9 +372,33 @@ func TestInfoFlowIssueAuthenticatedHTTP(t *testing.T) {
 				"sender":       actorSender, "message_id": kind + "-bind-" + suffix,
 				"operation": "bind", "issue_ref": issue,
 			}
+			if kind == "private" {
+				body["robot_chat_id"], body["robot_name"] = "9007199254740993", "HTTP public robot"
+			}
 			bound := decode(t, call(t, http.MethodPost, relayPath, body, trustedHeaders, http.StatusOK))
 			if !bound.Handled || bound.Binding == nil || bound.Binding.IssueID != issue || bound.Binding.Generation == "" || bound.Binding.WorkspaceSlug == "" || bound.Binding.Identifier == "" {
 				t.Fatalf("service-authenticated binding was not accepted: %+v", bound)
+			}
+			if kind == "private" {
+				path := "/api/issues/" + issue + "/infoflow-conversations"
+				data := call(t, http.MethodGet, path, nil, map[string]string{"Authorization": "Bearer " + actorPAT, "X-Workspace-ID": workspace}, 200)
+				var page struct {
+					Private struct {
+						Bindings []struct {
+							RobotName   string `json:"robot_name"`
+							RobotChatID string `json:"robot_chat_id"`
+						} `json:"bindings"`
+					} `json:"private"`
+				}
+				if json.Unmarshal(data, &page) != nil || len(page.Private.Bindings) != 1 || page.Private.Bindings[0].RobotName != "HTTP public robot" || page.Private.Bindings[0].RobotChatID != "9007199254740993" {
+					t.Fatalf("IM display metadata missing from authenticated browser response: %s", data)
+				}
+				other := call(t, http.MethodGet, path, nil, map[string]string{"Authorization": "Bearer " + pat, "X-Workspace-ID": workspace}, 200)
+				if strings.Contains(string(other), "HTTP public robot") || strings.Contains(string(other), "9007199254740993") {
+					t.Fatal("workspace owner could see another user's private robot metadata")
+				}
+				delete(body, "robot_chat_id")
+				delete(body, "robot_name")
 			}
 			if kind == "group" {
 				if bound.CanComment || bound.Binding.Group == nil || bound.Binding.Group.State != "pending" {

@@ -184,7 +184,7 @@ func (h *Handler) InfoFlowWebPrivateResult(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if req.Reason == "" && (req.TargetRobotID == "" || !infoFlowValidGroupID(req.RobotChatID) || strings.TrimSpace(req.RobotName) == "") {
+	if req.Reason == "" && (req.TargetRobotID == "" || !infoFlowValidPrivateRobotMetadata(req.RobotChatID, req.RobotName)) {
 		infoFlowError(w, 400, "metadata")
 		return
 	}
