@@ -16,6 +16,17 @@ export function messageIdString(value) {
   return integer > 0n && integer <= MAX_MESSAGE_ID ? id : null;
 }
 
+// The private SDK event uses Reply[].ReplyMsgId, not group REPLYDATA blocks.
+// Only protocol IDs determine routing; quoted previews are never task selectors.
+export function privateReplyMessageId(raw) {
+  if (!Array.isArray(raw?.Reply)) return null;
+  for (const reply of raw.Reply) {
+    const id = messageIdString(reply?.ReplyMsgId);
+    if (id) return id;
+  }
+  return null;
+}
+
 function textValue(value) {
   return typeof value === "string" ? value : "";
 }

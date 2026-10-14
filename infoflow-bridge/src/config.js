@@ -33,6 +33,7 @@ export function loadConfig() {
   // typed, and the loopback and public forms are the same server.
   const trimUrl = (value) => String(value ?? "").trim().replace(/\/+$/, "");
   multica.serverUrl = trimUrl(multica.serverUrl);
+  multica.issueWebUrl = trimUrl(process.env.INFOFLOW_ISSUE_WEB_URL ?? multica.issueWebUrl ?? "");
   multica.serverUrls = [...new Set([multica.serverUrl, ...(file.multica?.serverUrls ?? []).map(trimUrl)])].filter(Boolean);
   // The backend prints login codes here when no email backend is configured;
   // that is what the verification robot relays into InfoFlow.

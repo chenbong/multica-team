@@ -41,7 +41,7 @@ test("denied workspace user gets owner notice and issue footer, no receipt or Ch
   await f.send("运行任务", { acknowledge: () => { throw new Error("must not acknowledge"); } });
   assert.equal(f.sent.length, 1);
   assert.match(f.sent[0].content, /没有工作区权限/);
-  assert.match(f.sent[0].content, /完整任务对话：http:\/\/localhost:8004\/team\/issues\/TEST-1$/);
+  assert.match(f.sent[0].content, /完整任务对话\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1\)\*\*$/);
   assert.deepEqual(f.sent[0].options, {});
 });
 
@@ -166,7 +166,7 @@ test("ack failure and process restart do not re-send already checkpointed chunks
   await f.bridge.issueRelay.poll();
   const sentCount = f.sent.length;
   assert.ok(sentCount > 1);
-  assert.ok(f.sent.every(r => r.content.startsWith("[任务模式] TEST-1\n\n") && r.content.includes("完整任务对话：") && Buffer.byteLength(r.content) <= 1800 + Buffer.byteLength(withReplyMode("", "issue", binding.identifier))));
+  assert.ok(f.sent.every(r => r.content.startsWith("**[任务模式] TEST-1**\n\n") && r.content.includes("**[完整任务对话](") && Buffer.byteLength(r.content) <= 1810 + Buffer.byteLength(withReplyMode("", "issue", binding.identifier))));
   f.bridge.issueRelay.stop();
   const restored = new IssueRelay(f.config, {}, async () => { throw new Error("unexpected duplicate send"); }, { warn() {} });
   t.after(() => restored.stop());

@@ -44,7 +44,7 @@ jobs:
         run: >-
           node --test chat.test.js conversation-context.test.js
           issue-relay.test.js issue-relay-reliability.test.js issue-groups.test.js web-group-bindings.test.js issue-review-regressions.test.js issue-multigroup.test.js issue-private-multi.test.js web-private-bindings.test.js reply-mode.test.js
-          reactions.test.js review-notifications.test.js admin-form.test.js private-bind-metadata.test.js
+          reactions.test.js review-notifications.test.js admin-form.test.js private-bind-metadata.test.js issue-handlers.test.js receipt-handoff.test.js
       - name: Verify standalone restart credentials and private state exclusions
         run: |
           python3 -m unittest discover -s infoflow-bridge/test -p 'test_bridgectl.py' -v

@@ -155,11 +155,14 @@ export class IssueRelay {
         return true;
       }
       const input = { conversation: message.conversation, user: message.user, text: message.text, messageId: String(message.messageId),
-        replyToMessageId: message.replyToMessageId || null, images: message.images || [], context: message.context || null };
+        replyToMessageId: message.replyToMessageId || null, images: message.images || [], context: message.context || null,
+        ...(message.receipt ? { receipt: message.receipt } : {}) };
       this.inbox[id] = { key, input, createdAt: Date.now() };
       try { this.saveInbox(); }
       catch (error) { delete this.inbox[id]; this.logger.warn("issue relay inbox persistence failed"); return true; }
     }
+    // Functions stay in memory; JSON persistence retains only the receipt IDs.
+    if (typeof message.acknowledge === "function") this.inbox[id].acknowledge = message.acknowledge;
     return this.serial(key, () => this.drain(key, id));
   }
 
@@ -192,7 +195,7 @@ export class IssueRelay {
         // A recovered unbound Chat input cannot be dropped silently. The main
         // Bridge installs a fallback that reuses its normal Chat deduplication.
         if (!result && this.fallback) {
-          await this.fallback(record.input, {
+          await this.fallback({ ...record.input, ...(record.acknowledge ? { acknowledge: record.acknowledge } : {}) }, {
             beforeSubmit: () => { record.chatSubmitting = true; this.saveInbox(); },
             afterSubmit: () => { record.chatSubmitted = true; this.saveInbox(); },
           });
@@ -501,22 +504,37 @@ export class IssueRelay {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
     for (const part of this.replyParts(result.notice, result.binding)) {
       if (this.stopped) throw new Error("issue relay stopped before notice delivery");
-      await this.send(conversation, withReplyMode(part, noticeReplyMode(result), result.binding?.identifier), {});
+      await this.send(conversation, withReplyMode(this.presentReplyPart(part, result.binding), noticeReplyMode(result), result.binding?.identifier), {});
     }
   }
 
   replyParts(content, binding, maxBytes = 1800) {
     if (!binding) return splitMessage(content);
+    const footer = "\n\n完整任务对话：" + this.issueUrl(binding, this.config.multica.webUrl);
+    const parts = splitMessage(content, Math.max(200, maxBytes - Buffer.byteLength(footer)));
+    return parts.length ? parts.map(part => part + footer) : [footer.trimStart()];
+  }
+
+  issueUrl(binding, webUrl) {
     const ref = binding.identifier || binding.issue_id;
     const slug = binding.workspace_slug || this.config.multica.workspaceSlug;
     if (!ref || !slug) throw new Error("issue link metadata is missing");
-    const base = new URL(this.config.multica.webUrl);
-    if (!["http:", "https:"].includes(base.protocol)) throw new Error("invalid issue link URL");
+    const base = new URL(webUrl);
+    if (!["http:", "https:"].includes(base.protocol) || base.username || base.password) throw new Error("invalid issue link URL");
     base.pathname = base.pathname.replace(/\/$/, "") + `/${encodeURIComponent(slug)}/issues/${encodeURIComponent(ref)}`;
     base.search = ""; base.hash = "";
-    const footer = "\n\n完整任务对话：" + base.href;
-    const parts = splitMessage(content, Math.max(200, maxBytes - Buffer.byteLength(footer)));
-    return parts.length ? parts.map(part => part + footer) : [footer.trimStart()];
+    return base.href;
+  }
+
+  presentReplyPart(part, binding) {
+    if (!binding) return part;
+    // Keep the canonical parts/digest for in-flight checkpoints. Presentation is
+    // replaced only at send time, so a rollout cannot replay or block old parts.
+    const legacy = "完整任务对话：" + this.issueUrl(binding, this.config.multica.webUrl);
+    if (!part.endsWith(legacy)) throw new Error("issue reply footer is missing");
+    const target = this.issueUrl(binding, this.config.multica.issueWebUrl || this.config.multica.webUrl)
+      .replace(/[()]/g, c => c === "(" ? "%28" : "%29");
+    return part.slice(0, -legacy.length) + `**[完整任务对话](${target})**`;
   }
 
   save() {
@@ -589,7 +607,7 @@ export class IssueRelay {
             route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, route.pin);
           }
           const receipt = await (route?.send || this.send)(item.conversation,
-            withReplyMode((route?.pin.label || "") + parts[index], "issue", (item.binding || item).identifier), {});
+            withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], item.binding || item), "issue", (item.binding || item).identifier), {});
           const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId);
           const messageIds = [...(checkpoints[item.id]?.messageIds || [])];
           if (messageId) messageIds.push(messageId);

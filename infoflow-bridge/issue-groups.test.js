@@ -186,9 +186,9 @@ test("authorized pending bind invites and rereads before activation even can_com
   assert.deepEqual(f.state.invitations, [{ robot: "b", groupId: GROUP, appId: "101" }]);
   assert.ok(f.state.memberQueries.length >= 2);
   assert.equal(f.state.binding.group.state, "active");
-  assert.match(f.state.sent[0].content, /^\[任务模式\]/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]/);
   assert.match(f.state.sent[0].content, /绑定已启用/);
-  assert.match(f.state.sent[0].content, /完整任务对话：https:\/\/team.example.invalid\/team\/issues\/TEST-1$/);
+  assert.match(f.state.sent[0].content, /完整任务对话\]\(https:\/\/team.example.invalid\/team\/issues\/TEST-1\)\*\*$/);
 });
 
 test("single assignee requires only its own robot, not the invoking robot", async t => {
@@ -346,9 +346,9 @@ test("fallback label and mode/footer appear on every bounded UTF-8 part", async 
   await f.make().issueRelay.poll();
   assert.ok(f.state.sent.length > 1);
   for (const sent of f.state.sent) {
-    assert.match(sent.content, /^\[任务模式\] TEST-1\n\n【/);
+    assert.match(sent.content, /^\*\*\[任务模式\] TEST-1\*\*\n\n【/);
     assert.match(sent.content, /队长代发】/);
-    assert.match(sent.content, /完整任务对话：https:\/\/team.example.invalid\/team\/issues\/TEST-1$/);
+    assert.match(sent.content, /完整任务对话\]\(https:\/\/team.example.invalid\/team\/issues\/TEST-1\)\*\*$/);
     assert.ok(Buffer.byteLength(sent.content) <= 1800);
     assert.equal(sent.content.includes("\ufffd"), false);
   }
@@ -405,7 +405,7 @@ test("private deliveries bypass group sender routing and retain ordinary format"
   await f.make("b").issueRelay.poll();
   assert.equal(f.state.sent.length, 1); assert.equal(f.state.sent[0].robotId, "b");
   assert.doesNotMatch(f.state.sent[0].content, /代发/);
-  assert.match(f.state.sent[0].content, /^\[任务模式\]/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]/);
 });
 
 test("robot-origin metadata and cached IM sender IDs are ignored without content heuristics", async t => {

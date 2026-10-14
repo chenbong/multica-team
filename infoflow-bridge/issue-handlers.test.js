@@ -47,6 +47,28 @@ test("private entry uses account identifier, not numeric uid, and keeps independ
   assert.equal(f.received[0].text, "/bind TEST-1");
 });
 
+for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
+  test(`${event} forwards the actual private Reply ID without parsing the preview as a selector`, async () => {
+    const f = fixture();
+    await f.handlers.get(event)({ data: { raw: {
+      FromUserId: "alice", MsgId: "1836339350307196087", MsgId2: "300010063", Content: "TASK-2 继续",
+      Reply: [{ ReplyMsgId: "1836339314504617142", ReplyContent: "TASK-999 伪造预览" }],
+    } } });
+    assert.equal(f.received[0].replyToMessageId, "1836339314504617142");
+    assert.equal(f.received[0].receipt.baseMsgId, "1836339350307196087");
+    assert.equal(f.received[0].receipt.chatType, 7);
+    assert.equal(f.received[0].receipt.chatId, "12");
+  });
+}
+
+test("private rounded quote IDs and preview-only IDs are not repaired", async () => {
+  const f = fixture();
+  for (const Reply of [[{ ReplyMsgId: 1836339314504617142 }], [{ ReplyContent: '"ReplyMsgId":"1836339314504617142"' }]]) {
+    await f.handlers.get("private.text")({ data: { raw: { FromUserId: "alice", MsgId: "123", Content: "TASK-2", Reply } } });
+    assert.equal(f.received.at(-1).replyToMessageId, null);
+  }
+});
+
 test("all-message forwarding is not treated as a request to publish issue comments", async () => {
   const f = fixture();
   await f.handlers.get("group.text")({ data: { raw: { eventtype: "ALL_MESSAGE_FORWARD", groupid: "42", message: {

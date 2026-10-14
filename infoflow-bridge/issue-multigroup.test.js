@@ -108,7 +108,7 @@ test("A in overlapping squads asks using server notice only, with no invented ta
   assert.equal(f.state.requests.filter(r => r.path === "issue-relay").length, 1);
   assert.equal(f.state.comments.length, 0);
   assert.equal(f.state.sent.length, 1);
-  assert.match(f.state.sent[0].content, /^\[任务模式\]\n\n请指定任务：INFE-1、INFE-2/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]\*\*\n\n请指定任务：INFE-1、INFE-2/);
   assert.doesNotMatch(f.state.sent[0].content, /完整任务对话/);
   assert.deepEqual(f.state.sent[0].options, {});
   assert.equal(Object.keys(relay.inbox).length, 0);
@@ -123,7 +123,7 @@ test("failed ambiguity notice persists across restart and cannot become executab
   const restored = f.make(); await restored.poll();
   assert.equal(f.state.requests.filter(r => r.path === "issue-relay").length, 1);
   assert.equal(f.state.comments.length, 0);
-  assert.match(f.state.sent[0].content, /^\[任务模式\]\n\n请指定任务/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]\*\*\n\n请指定任务/);
   assert.doesNotMatch(f.state.sent[0].content, /完整任务对话/);
   assert.equal(Object.keys(restored.inbox).length, 0);
   assert.equal(readdirSync(restored.decisionsPath).length, 1);
@@ -224,13 +224,13 @@ for (const command of ["binding", "unbind"]) test(`/${command} without a target 
   const f = fixture(t), relay = f.make();
   await relay.handle(f.input(`/${command}`));
   assert.equal(f.state.plans.length, 2);
-  assert.match(f.state.sent[0].content, /^\[任务模式\]\n\n请指定任务/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]\*\*\n\n请指定任务/);
   await relay.handle(f.input(`/${command} INFE-2`, { replyToMessageId: QUOTE, messageId: "102" }));
   const calls = f.state.requests.filter(r => r.path === "issue-relay" && r.body.issue_ref).map(r => r.body);
   assert.ok(calls.length > 0);
   assert.ok(calls.every(body => body.issue_ref === "INFE-2" && body.reply_to_message_id === QUOTE));
   if (command === "binding") assert.ok(calls.every(body => body.command === "binding"));
-  assert.match(f.state.sent.at(-1).content, /^\[任务模式\] INFE-2\n\n/);
+  assert.match(f.state.sent.at(-1).content, /^\*\*\[任务模式\] INFE-2\*\*\n\n/);
   assert.equal(f.state.plans.length, command === "unbind" ? 1 : 2);
   assert.equal(f.state.comments.length, 0);
 });
@@ -268,7 +268,7 @@ test("unbound unbind preflight reports no-op without mutation or Chat", async t 
   await relay.handle(f.input("/unbind"));
   assert.equal(calls.length, 1); assert.equal(calls[0].body.operation, "binding");
   assert.equal(calls[0].body.command, "unbind");
-  assert.match(f.state.sent[0].content, /^\[聊天模式\]\n\n当前对话未绑定/);
+  assert.match(f.state.sent[0].content, /^\*\*\[聊天模式\]\*\*\n\n当前对话未绑定/);
 });
 
 test("committed unbind with a lost response retries identical mutation, not another preflight", async t => {
@@ -288,7 +288,7 @@ test("committed unbind with a lost response retries identical mutation, not anot
     return freshRequest(path, body);
   };
   await restored.poll();
-  assert.match(f.state.sent.at(-1).content, /^\[任务模式\] INFE-1\n\n已解除此任务绑定/);
+  assert.match(f.state.sent.at(-1).content, /^\*\*\[任务模式\] INFE-1\*\*\n\n已解除此任务绑定/);
   assert.deepEqual(f.state.plans.map(p => p.binding.identifier), ["INFE-2"]);
   assert.equal(Object.keys(restored.inbox).length, 0);
 });
@@ -304,7 +304,7 @@ test("private unbind pins the selected binding just like group unbind and preser
   assert.equal(calls[1].body.operation, "unbind");
   assert.equal(calls[1].body.expected_binding_id, binding(1).binding_id);
   assert.equal(calls[1].body.expected_generation, binding(1).generation);
-  assert.match(f.state.sent[0].content, /^\[聊天模式\]\n\n已解除任务绑定/);
+  assert.match(f.state.sent[0].content, /^\*\*\[聊天模式\]\*\*\n\n已解除任务绑定/);
 });
 
 test("prepared target survives restart and unknown submit outcome, with no fresh routing on retry", async t => {
@@ -368,8 +368,8 @@ test("member B sends issue1, absent D uses A for issue2, and each ack retains ac
   const f = fixture(t); const originals = [f.delivery(1, B), f.delivery(2, D)];
   await f.make().poll();
   assert.deepEqual(f.state.sent.map(s => s.robotId), ["b", "a"]);
-  assert.match(f.state.sent[0].content, /^\[任务模式\] INFE-1\n\n原始平台正文/);
-  assert.match(f.state.sent[1].content, /^\[任务模式\] INFE-2\n\n【D · 队长代发】/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\] INFE-1\*\*\n\n原始平台正文/);
+  assert.match(f.state.sent[1].content, /^\*\*\[任务模式\] INFE-2\*\*\n\n【D · 队长代发】/);
   assert.deepEqual(f.state.acks.map(a => a.message_ids), f.state.sent.map(s => [s.messageid]));
   assert.ok(originals.every(d => d.content === "原始平台正文"));
   assert.ok(f.state.sent.every(s => s.options.atUser === undefined));
@@ -386,8 +386,8 @@ test("every long part has its own task number and footer, with stable shared ret
   const item = f.delivery(2, D, content); f.state.failAck = true;
   const relay = f.make(); await relay.poll(); const firstCount = f.state.sent.length;
   assert.ok(firstCount > 2); assert.equal(item.content, content);
-  assert.ok(f.state.sent.every(s => s.content.startsWith("[任务模式] INFE-2\n\n【D · 队长代发】") &&
-    s.content.endsWith("完整任务对话：https://team.example.invalid/team/issues/INFE-2") && Buffer.byteLength(s.content) < 2000));
+  assert.ok(f.state.sent.every(s => s.content.startsWith("**[任务模式] INFE-2**\n\n【D · 队长代发】") &&
+    s.content.endsWith("**[完整任务对话](https://team.example.invalid/team/issues/INFE-2)**") && Buffer.byteLength(s.content) < 2000));
   f.state.failAck = false; await relay.poll();
   assert.equal(f.state.sent.length, firstCount); assert.equal(f.state.acks[0].message_ids.length, firstCount);
   assert.equal(f.groups.deliveries[item.id].acked, true);
@@ -401,7 +401,7 @@ for (const fault of ["status", "ownership", "offline member"]) test(`one issue $
   }; }
   if (fault === "offline member") f.entries[1].client = null;
   await f.make().poll();
-  assert.equal(f.state.sent.length, 1); assert.match(f.state.sent[0].content, /^\[任务模式\] INFE-2/);
+  assert.equal(f.state.sent.length, 1); assert.match(f.state.sent[0].content, /^\*\*\[任务模式\] INFE-2/);
   assert.deepEqual(f.state.acks.map(a => a.id), ["delivery-2"]);
 });
 
@@ -472,17 +472,17 @@ test("known foreign quote refusal is terminal even if the addressed agent has on
     notice: "引用消息不属于当前群任务，请重新指定任务" }; };
   await relay.handle(f.input("继续", { replyToMessageId: QUOTE }));
   assert.equal(calls.length, 1); assert.equal(calls[0].body.reply_to_message_id, QUOTE);
-  assert.match(f.state.sent[0].content, /^\[任务模式\]\n\n引用消息不属于当前群任务/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]\*\*\n\n引用消息不属于当前群任务/);
   assert.doesNotMatch(f.state.sent[0].content, /完整任务对话/); assert.equal(f.state.comments.length, 0);
 });
 
 test("task labels accept official digit-leading workspace prefixes and cannot inject lines", () => {
   for (const ref of ["INFE-1", "2026-1", "4A-1", "0123456789-999"]) {
-    assert.equal(withReplyMode("正文", "issue", ref), `[任务模式] ${ref}\n\n正文`);
+    assert.equal(withReplyMode("正文", "issue", ref), `**[任务模式] ${ref}**\n\n正文`);
   }
   for (const ref of ["INFE-1\n@all", "ABCDEFGHIJK-1", "[INFE-1]", "INFE_1"]) {
     assert.throws(() => withReplyMode("正文", "issue", ref), /invalid reply/);
   }
-  assert.equal(withReplyMode("正文", "chat", "INFE-1"), "[聊天模式]\n\n正文");
-  assert.equal(withReplyMode("请选择 INFE-1 或 INFE-2", "issue"), "[任务模式]\n\n请选择 INFE-1 或 INFE-2");
+  assert.equal(withReplyMode("正文", "chat", "INFE-1"), "**[聊天模式]**\n\n正文");
+  assert.equal(withReplyMode("请选择 INFE-1 或 INFE-2", "issue"), "**[任务模式]**\n\n请选择 INFE-1 或 INFE-2");
 });

@@ -1,8 +1,8 @@
 import { Bridge } from "./bridge.js";
 import { ReviewNotifications } from "./review-notifications.js";
-import { acknowledge } from "./reactions.js";
+import { acknowledge, acknowledgeReceipt, receiptOptions } from "./reactions.js";
 import { VerificationCodeRelay } from "./codes.js";
-import { parseConversationBlocks, messageIdString, conversationContext } from "./conversation-context.js";
+import { parseConversationBlocks, messageIdString, privateReplyMessageId, conversationContext } from "./conversation-context.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
 import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
 import { groupRobotEntries } from "./group-robot-entries.js";
@@ -190,6 +190,7 @@ export class RobotRuntime {
       getImageAccessToken: () => client.getAccessToken(),
       issueGroups: this.issueGroups,
       getPrivateRobotInfo: () => client.robot.getInfo(),
+      acknowledgeReceipt: options => acknowledgeReceipt(client, options, this.logger),
     });
     const instance = {
       robot,
@@ -426,6 +427,8 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
         text: body,
         images,
         messageId: messageIdString(raw.MsgId ?? raw.msgId),
+        replyToMessageId: privateReplyMessageId(raw),
+        receipt: receiptOptions(raw, "private", robot.appId),
         context: conversationContext({ conversation: { kind: "private", id: user }, sender: user }),
         acknowledge: () => acknowledge(client, raw, "private", robot.appId, logger),
       });
@@ -463,6 +466,7 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
         images: parsed.images,
         messageId: messageIdString(header.messageid ?? raw.messageid),
         replyToMessageId: parsed.replyToMessageId,
+        receipt: receiptOptions(raw, "group", robot.appId),
         context: conversationContext({ conversation: { kind: "group", id: groupId }, sender: user, mentions: parsed.mentions }),
         acknowledge: () => acknowledge(client, raw, "group", robot.appId, logger),
       });

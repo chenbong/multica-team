@@ -8,7 +8,7 @@ export function withReplyMode(content, mode, identifier = null) {
   if (ref && (!/^[A-Za-z0-9]{1,10}-\d+$/.test(ref) || ref.length > 100)) {
     throw new Error("invalid reply issue identifier");
   }
-  return `${mode === "issue" ? "[任务模式]" : "[聊天模式]"}${ref ? ` ${ref}` : ""}\n\n${content}`;
+  return `**${mode === "issue" ? "[任务模式]" : "[聊天模式]"}${ref ? ` ${ref}` : ""}**\n\n${content}`;
 }
 
 export function noticeReplyMode(result) {

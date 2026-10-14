@@ -93,7 +93,7 @@ test("private multiissue ambiguity asks once without Chat, comments or image sta
   const f = fixture(t), relay = f.make(), message = f.input("继续", { images: [{}] });
   await relay.handle(message); await relay.handle(message);
   assert.equal(f.state.requests.length, 1); assert.equal(f.state.comments.length, 0); assert.equal(f.state.chat.length, 0);
-  assert.match(f.state.sent[0].content, /^\[任务模式\]\n\n请指定任务：INFE-1、INFE-2/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]\*\*\n\n请指定任务：INFE-1、INFE-2/);
   assert.doesNotMatch(f.state.sent[0].content, /完整任务对话/);
 });
 
@@ -122,8 +122,8 @@ test("private bind adds one association instead of replacing the current task", 
   const f = fixture(t), relay = f.make(); await relay.handle(f.input("/bind INFE-3"));
   assert.deepEqual(f.state.bindings.map(entry => entry.binding.identifier), ["INFE-1", "INFE-2", "INFE-3"]);
   assert.equal(f.state.comments.length, 0); assert.equal(f.state.chat.length, 0);
-  assert.match(f.state.sent[0].content, /^\[任务模式\] INFE-3\n\n已添加任务绑定/);
-  assert.match(f.state.sent[0].content, /完整任务对话：https:\/\/team.example.invalid\/team\/issues\/INFE-3/);
+  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\] INFE-3\*\*\n\n已添加任务绑定/);
+  assert.match(f.state.sent[0].content, /完整任务对话\]\(https:\/\/team.example.invalid\/team\/issues\/INFE-3\)\*\*/);
 });
 
 for (const command of ["binding", "unbind"]) test(`private /${command} selects explicitly and asks on multiple candidates`, async t => {
@@ -131,7 +131,7 @@ for (const command of ["binding", "unbind"]) test(`private /${command} selects e
   assert.equal(f.state.bindings.length, 2); assert.match(f.state.sent[0].content, /请指定任务/);
   await relay.handle(f.input(`/${command} INFE-2`, { replyToMessageId: quote, messageId: "101" }));
   assert.equal(f.state.comments.length, 0); assert.equal(f.state.chat.length, 0);
-  assert.match(f.state.sent.at(-1).content, /^\[任务模式\] INFE-2\n\n/);
+  assert.match(f.state.sent.at(-1).content, /^\*\*\[任务模式\] INFE-2\*\*\n\n/);
   const selected = f.state.requests.filter(entry => entry.body.issue_ref);
   assert.ok(selected.every(entry => entry.body.issue_ref === "INFE-2" && entry.body.reply_to_message_id === quote));
   assert.equal(f.state.bindings.length, command === "unbind" ? 1 : 2);
@@ -140,9 +140,9 @@ for (const command of ["binding", "unbind"]) test(`private /${command} selects e
 
 test("private unbinding one task retains issue mode, removing last returns to Chat mode", async t => {
   const f = fixture(t), relay = f.make(); await relay.handle(f.input("/unbind INFE-1"));
-  assert.match(f.state.sent.at(-1).content, /^\[任务模式\] INFE-1\n\n已解除/);
+  assert.match(f.state.sent.at(-1).content, /^\*\*\[任务模式\] INFE-1\*\*\n\n已解除/);
   await relay.handle(f.input("/unbind INFE-2", { messageId: "101" }));
-  assert.match(f.state.sent.at(-1).content, /^\[聊天模式\]\n\n已解除/);
+  assert.match(f.state.sent.at(-1).content, /^\*\*\[聊天模式\]\*\*\n\n已解除/);
   await relay.handle(f.input("新的普通聊天", { messageId: "102" }));
   assert.equal(f.state.chat.length, 1);
 });

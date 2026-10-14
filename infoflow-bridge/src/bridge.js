@@ -33,7 +33,7 @@ export class Bridge {
   // Enough id history to cover a redelivery burst without growing the state file.
   static SEEN_MESSAGE_LIMIT = 200;
 
-  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null } = {}) {
+  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null, acknowledgeReceipt = null } = {}) {
     this.config = config;
     this.sender = sender;
     this.logger = logger;
@@ -51,7 +51,9 @@ export class Bridge {
       groups: issueGroups,
       getPrivateRobotInfo,
     });
-    this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message, skipIssueRelay: true, handoff });
+    this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message,
+      acknowledge: message.acknowledge || (message.receipt && acknowledgeReceipt ? () => acknowledgeReceipt(message.receipt) : null),
+      skipIssueRelay: true, handoff });
   }
 
   stop() { this.chat.stop(); this.issueRelay.stop(); }
@@ -75,7 +77,7 @@ export class Bridge {
     return pending.finally(() => { if (this.inboundQueues.get(key) === pending) this.inboundQueues.delete(key); });
   }
 
-  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null }) {
+  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
@@ -93,7 +95,7 @@ export class Bridge {
     }
     // The relay has persistent, server-side deduplication and authenticates the
     // real sender before any receipt, owner-profile command, or chat fallback.
-    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context })) return;
+    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt })) return;
 
     if (!this.#allowed(user, conversation)) {
       this.logger.warn(`rejected ${conversation.kind} message from ${user}: not in allowUsers`);

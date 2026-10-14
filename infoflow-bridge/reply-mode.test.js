@@ -10,7 +10,7 @@ import { withReplyMode, noticeReplyMode } from "./src/reply-format.js";
 const agent = "00000000-0000-4000-8000-000000000001";
 const binding = { binding_id: "binding", generation: "generation", issue_id: "issue", identifier: "TASK-1", workspace_slug: "team" };
 const answer = "已完成分析。\n\n**结论**：需要调整批量大小。";
-const footer = "\n\n完整任务对话：https://team.example.test/team/issues/TASK-1";
+const footer = "\n\n**[完整任务对话](https://team.example.test/team/issues/TASK-1)**";
 
 function fixture(t, kind, mode) {
   const dir = mkdtempSync(join(tmpdir(), "reply-mode-test-"));
@@ -52,7 +52,7 @@ for (const kind of ["private", "group"]) {
       else await f.bridge.issueRelay.poll();
       const expected = withReplyMode(answer + (mode === "issue" ? footer : ""), mode, binding.identifier);
       assert.ok(f.sent.some(message => message.content === expected));
-      assert.ok(f.sent.every(message => message.content.startsWith(mode === "chat" ? "[聊天模式]\n\n" : "[任务模式] TASK-1\n\n")));
+      assert.ok(f.sent.every(message => message.content.startsWith(mode === "chat" ? "**[聊天模式]**\n\n" : "**[任务模式] TASK-1**\n\n")));
       assert.ok(f.sent.every(message => message.options.atUser === undefined));
       assert.deepEqual(f.apiInputs, ["请分析问题"]);
       assert.equal(f.delivery.content, answer);
@@ -61,7 +61,7 @@ for (const kind of ["private", "group"]) {
 }
 
 test("mode comes from route metadata, not model-written labels", () => {
-  assert.equal(withReplyMode("[聊天模式]\n原始引用", "issue"), "[任务模式]\n\n[聊天模式]\n原始引用");
+  assert.equal(withReplyMode("[聊天模式]\n原始引用", "issue"), "**[任务模式]**\n\n[聊天模式]\n原始引用");
   assert.throws(() => withReplyMode("text", "unknown"), /unknown/);
   assert.equal(noticeReplyMode({}), "chat");
   assert.equal(noticeReplyMode({ binding }), "issue");
@@ -88,7 +88,7 @@ test("label is added to every long reply part without invalidating an older send
   assert.ok(rawParts.length > 2);
   f.bridge.issueRelay.sentParts.d1 = { next: 1, digest: createHash("sha256").update(rawParts.join("")).digest("hex"), messageIds: ["123"] };
   await f.bridge.issueRelay.poll();
-  assert.deepEqual(f.sent.map(message => message.content), rawParts.slice(1).map(part => withReplyMode(part, "issue", binding.identifier)));
+  assert.deepEqual(f.sent.map(message => message.content), rawParts.slice(1).map(part => withReplyMode(f.bridge.issueRelay.presentReplyPart(part, binding), "issue", binding.identifier)));
   assert.ok(f.sent.every(message => Buffer.byteLength(message.content) <= 1900));
   assert.deepEqual(f.bridge.issueRelay.sentParts, {});
 });
@@ -99,4 +99,20 @@ test("delayed Chat replies keep Chat mode after the conversation is bound", asyn
   await f.bridge.issueRelay.sendNotice(f.conversation, { notice: "已绑定任务", binding, conversation_mode: "issue" });
   await f.bridge.chat.poll();
   assert.equal(f.sent.at(-1).content, withReplyMode(answer, "chat"));
+});
+
+test("configured task entry uses a bold clickable IP link and preserves legacy checkpoint digests", async t => {
+  const f = fixture(t, "private", "issue");
+  f.bridge.config.multica.issueWebUrl = "http://192.0.2.17:8004/";
+  f.delivery.content = "中文🙂".repeat(500);
+  const raw = f.bridge.issueRelay.replyParts(f.delivery.content, binding);
+  const digest = createHash("sha256").update(raw.join("")).digest("hex");
+  f.bridge.issueRelay.sentParts.d1 = { next: 1, digest, messageIds: ["123"] };
+  await f.bridge.issueRelay.poll();
+  assert.equal(f.sent.length, raw.length - 1);
+  assert.ok(f.sent.every(s => s.content.startsWith("**[任务模式] TASK-1**\n\n") &&
+    s.content.endsWith("**[完整任务对话](http://192.0.2.17:8004/team/issues/TASK-1)**")));
+  assert.deepEqual(f.bridge.issueRelay.sentParts, {});
+  assert.ok(raw.every(p => p.endsWith("完整任务对话：https://team.example.test/team/issues/TASK-1")));
+  assert.equal(f.delivery.content, "中文🙂".repeat(500));
 });
