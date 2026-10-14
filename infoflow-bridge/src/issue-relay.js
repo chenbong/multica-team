@@ -616,7 +616,10 @@ export class IssueRelay {
           }
           const receipt = await (route?.send || this.send)(item.conversation,
             withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], item.binding || item), "issue", (item.binding || item).identifier), {});
-          const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId);
+          // Private sendToUser returns msgkey, whereas the group send API uses
+          // messageid. Both are the exact original ID quoted by the IM client.
+          const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId ??
+            (item.conversation.kind === "private" ? receipt?.msgkey : null));
           const messageIds = [...(checkpoints[item.id]?.messageIds || [])];
           if (messageId) messageIds.push(messageId);
           checkpoints[item.id] = { next: index + 1, digest, messageIds, ...(route ? { route: route.pin } : {}) };

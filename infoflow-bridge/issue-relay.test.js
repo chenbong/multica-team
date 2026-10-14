@@ -184,6 +184,22 @@ test("UTF-8 chunks reconstruct original content without splitting surrogate pair
   assert.ok(parts.every(part => Buffer.byteLength(part) <= 1800 && !part.includes("�")));
 });
 
+test("private SDK msgkey is retained for quote routing, including every output chunk", async t => {
+  const f = fixture(t), acknowledgements = [];
+  const item = { id: "delivery", content: "中文🙂".repeat(500), conversation: { kind: "private", id: "alice" }, binding };
+  const ids = ["1836339350307196087", "1836339350307196088", "1836339350307196089", "1836339350307196090"];
+  let next = 0;
+  f.bridge.issueRelay.send = async () => ({ msgkey: ids[next++] });
+  f.bridge.issueRelay.request = async (path, body) => {
+    if (path.endsWith("/ack")) { acknowledgements.push(body); return {}; }
+    return { deliveries: [item] };
+  };
+  await f.bridge.issueRelay.poll();
+  assert.ok(next > 1);
+  assert.deepEqual(acknowledgements[0].message_ids, ids.slice(0, next));
+  assert.equal(acknowledgements[0].message_id, ids[next - 1]);
+});
+
 test("empty reply still delivers the task link instead of silently acknowledging nothing", t => {
   const f = fixture(t);
   assert.deepEqual(f.bridge.issueRelay.replyParts("", binding), ["完整任务对话：http://localhost:8004/team/issues/TEST-1"]);
