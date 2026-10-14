@@ -534,7 +534,15 @@ export class IssueRelay {
     if (!part.endsWith(legacy)) throw new Error("issue reply footer is missing");
     const target = this.issueUrl(binding, this.config.multica.issueWebUrl || this.config.multica.webUrl)
       .replace(/[()]/g, c => c === "(" ? "%28" : "%29");
-    return part.slice(0, -legacy.length) + `**[完整任务对话](${target})**`;
+    const presented = part.slice(0, -legacy.length) + `**[完整任务对话](${target})**`;
+    // Canonical checkpoints cannot be re-split during an upgrade. Allow only a
+    // small Markdown overhead; an unusually long configured URL keeps the old
+    // direct-link footer rather than exceeding the established send budget.
+    if (Buffer.byteLength(presented) > Buffer.byteLength(part) + 16) {
+      this.logger.warn("configured task link exceeds reply budget; using direct link");
+      return part;
+    }
+    return presented;
   }
 
   save() {

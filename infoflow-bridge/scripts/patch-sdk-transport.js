@@ -27,12 +27,13 @@ export function patchSdkTransport(source, version) {
 // The SDK normally preserves it but its nested Encrypt envelope used JSON.parse.
 export function patchSdkMessageIds(source, version) {
   if (version !== "2026.8.28") throw new Error("Unsupported InfoFlow SDK version; review message ID patch before upgrading");
-  const marker = "// bridge-exact-message-ids-v1";
+  const marker = "// bridge-exact-message-ids-v2";
   if (source.includes(marker)) return source;
-  const edits = [
+  const edits = source.includes("// bridge-exact-message-ids-v1") ? [] : [
     ["const inner = JSON.parse(rawPayload.Encrypt);", "const inner = safeJsonParse(rawPayload.Encrypt);"],
     ["    'msgId',\n    'clientmsgid',", "    'msgId',\n    'MsgId',\n    'MsgId2',\n    'msgId2',\n    'clientmsgid',"],
   ];
+  edits.push(["    'msgId2',\n    'clientmsgid',", "    'msgId2',\n    'ReplyMsgId',\n    'clientmsgid',"]);
   for (const [before, after] of edits) {
     if (source.split(before).length !== 2) throw new Error("InfoFlow SDK message ID patch anchor changed; refusing partial patch");
     source = source.replace(before, after);

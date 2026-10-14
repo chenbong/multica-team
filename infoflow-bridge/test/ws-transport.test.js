@@ -33,13 +33,22 @@ test("SDK preserves private and group IDs through nested Encrypt without network
   const client = createWSClient({ ...options, autoAck: false }, "");
   let received;
   client.frameCodec.decode = () => ({ method: 1, headers: [], seqId: 1 });
-  client.frameCodec.parsePayload = () => ({ Encrypt: '{"MsgId":1836339350307196087,"message":{"header":{"messageid":1836339350307196088},"body":[{"type":"replyData","sBasemsgId":1836339350307196089}]}}' });
+  client.frameCodec.parsePayload = () => ({ Encrypt: '{"MsgId":1836339350307196087,"Reply":[{"ReplyMsgId":1836339350307196090}],"message":{"header":{"messageid":1836339350307196088},"body":[{"type":"replyData","sBasemsgId":1836339350307196089}]}}' });
   client.eventDispatcher.dispatchFrame = async payload => { received = payload; };
   await client.handleMessage(Buffer.from("fixture"));
   client.disconnect();
   assert.equal(received.MsgId, "1836339350307196087");
   assert.equal(received.message.header.messageid, "1836339350307196088");
   assert.equal(received.message.body[0].sBasemsgId, "1836339350307196089");
+  assert.equal(received.Reply[0].ReplyMsgId, "1836339350307196090");
+});
+
+test("message-ID patch upgrades an existing v1 installation and stays idempotent", () => {
+  const source = readFileSync(createRequire(import.meta.url).resolve("@baidu/infoflow-sdk-nodejs"), "utf8");
+  const v1 = source.replace("    'ReplyMsgId',\n", "").replace("// bridge-exact-message-ids-v2", "// bridge-exact-message-ids-v1");
+  const upgraded = patchSdkMessageIds(v1, "2026.8.28");
+  assert.match(upgraded, /'ReplyMsgId'/);
+  assert.equal(patchSdkMessageIds(upgraded, "2026.8.28"), upgraded);
 });
 
 test("both endpoint and WebSocket use only the client proxy; internal HTTP stays direct", async () => {

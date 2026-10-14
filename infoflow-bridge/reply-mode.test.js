@@ -116,3 +116,12 @@ test("configured task entry uses a bold clickable IP link and preserves legacy c
   assert.ok(raw.every(p => p.endsWith("完整任务对话：https://team.example.test/team/issues/TASK-1")));
   assert.equal(f.delivery.content, "中文🙂".repeat(500));
 });
+
+test("oversized link configuration keeps the canonical direct URL without changing checkpoint or content", t => {
+  const f = fixture(t, "private", "issue");
+  f.bridge.config.multica.issueWebUrl = "https://web.example.test/" + "long-path".repeat(80);
+  const part = f.bridge.issueRelay.replyParts("正文", binding)[0];
+  assert.equal(f.bridge.issueRelay.presentReplyPart(part, binding), part);
+  f.bridge.config.multica.issueWebUrl = "https://user:password@web.example.test";
+  assert.throws(() => f.bridge.issueRelay.presentReplyPart(part, binding), /invalid issue link URL/);
+});
