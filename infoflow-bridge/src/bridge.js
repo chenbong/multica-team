@@ -299,14 +299,6 @@ export class Bridge {
       await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}`, "issue", false, { binding: issue });
       return;
     }
-    // The review watcher sends the binder a single cross-entry notification.
-    // Retain replies to groups/other users and runs that do not enter review.
-    if (this.config.reviewNotifications && conversation.kind === "private") {
-      try {
-        const [current, me] = await Promise.all([this.multica.getIssue(issue.id), this.multica.request("/api/me")]);
-        if ((current.status_category || current.status) === "in_review" && me.email?.split("@")[0] === user) return;
-      } catch (error) { this.logger.warn("review handoff check failed: " + error.message); }
-    }
     await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}`, "issue", false, { binding: issue, commentId: outcome.commentId });
   }
 

@@ -1,5 +1,4 @@
 import { Bridge } from "./bridge.js";
-import { ReviewNotifications } from "./review-notifications.js";
 import { acknowledge, acknowledgeReceipt, receiptOptions } from "./reactions.js";
 import { VerificationCodeRelay } from "./codes.js";
 import { parseConversationBlocks, messageIdString, privateReplyMessageId, conversationContext } from "./conversation-context.js";
@@ -27,7 +26,6 @@ export class RobotRuntime {
         .map(robot => robot.id),
     }) : null;
     this.relay = null;
-    this.reviewNotifications = new ReviewNotifications(this);
   }
 
   async sync(config = this.config) {
@@ -44,7 +42,6 @@ export class RobotRuntime {
       if (!this.instances.has(id)) await this.#start(robot);
     }
     await this.#syncRelay();
-    await this.reviewNotifications.poll();
   }
 
   status() {
@@ -127,7 +124,6 @@ export class RobotRuntime {
   }
 
   async stopAll() {
-    this.reviewNotifications.stop();
     for (const id of [...this.instances.keys()]) await this.#stop(id);
     this.relay?.stop();
     this.relay = null;
@@ -375,7 +371,6 @@ function fingerprint(robot) {
 function robotConfig(base, robot) {
   return {
     robotId: robot.id,
-    reviewNotifications: true,
     issueRelay: base.issueRelay,
     multica: {
       ...base.multica,

@@ -481,7 +481,6 @@ test("runtime candidates are enabled business robot IDs scoped dynamically witho
     { id: "other", enabled: true, workspaceId: "another-workspace" },
   ] };
   const runtime = new RobotRuntime(config, quiet);
-  runtime.reviewNotifications.stop();
   assert.deepEqual(runtime.issueGroups.candidateRobotIds("workspace"), ["a", "b"]);
   assert.deepEqual(runtime.issueGroups.candidateRobotIds("another-workspace"), ["other"]);
   runtime.config = { ...config, robots: [{ id: "new", enabled: true }] };

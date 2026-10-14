@@ -106,13 +106,13 @@ test("runtime maps participant configs across Bridge callbacks without workspace
     { id: "other", agent: a, appId: "404", workspaceId: "another-ws", enabled: true },
   ], multica: { workspaceId: "ws", cli: join(dir, "missing-test-cli") } };
   const logger = { log() {}, warn() {}, error() {} };
-  const runtime = new RobotRuntime(config, logger); runtime.reviewNotifications.stop();
+  const runtime = new RobotRuntime(config, logger);
   const bridge = new Bridge({ robotId: "a", statePath, issueRelay: { enabled: true }, pollIntervalMs: 3600000,
     multica: { cli: join(dir, "missing-test-cli"), workspaceId: "ws", defaultAgent: a, serverUrl: "https://api.example.invalid", webUrl: "https://web.example.invalid" } },
     async () => { throw new Error("unexpected send"); }, logger, { issueGroups: runtime.issueGroups });
   bridge.multica.listAgents = async () => [{ id: a, name: "leader" }, { id: b, name: "member-name" }];
   runtime.instances.set("a", { robot: config.robots[0], bridge, client: { marker: "fake" }, send: async () => {} });
-  t.after(() => { bridge.stop(); runtime.reviewNotifications.stop(); rmSync(dir, { recursive: true, force: true }); });
+  t.after(() => { bridge.stop(); rmSync(dir, { recursive: true, force: true }); });
   const entries = await runtime.groupRobotEntries("ws", [a, b]);
   assert.deepEqual(entries.map(entry => entry.robotId), ["a", "b"]);
   assert.equal(entries[1].agentId, b);
