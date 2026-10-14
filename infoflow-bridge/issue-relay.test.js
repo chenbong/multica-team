@@ -34,11 +34,13 @@ test("relay command parsing keeps explicit issue creation and fixed binding oper
   assert.equal(relayOperation("/agent private-agent").operation, "binding");
 });
 
-test("denied workspace user gets owner notice and issue footer, no receipt or Chat", async t => {
+test("denied workspace user gets received reaction and owner notice but never starts Chat", async t => {
   const f = fixture(t);
   f.bridge.issueRelay.request = async () => ({ handled: true, silent: false, binding,
     notice: "没有工作区权限，无法评论，请向 workspace-owner 申请工作区权限" });
-  await f.send("运行任务", { acknowledge: () => { throw new Error("must not acknowledge"); } });
+  let received = 0;
+  await f.send("运行任务", { acknowledge: async () => { received++; return true; } });
+  assert.equal(received, 1);
   assert.equal(f.sent.length, 1);
   assert.match(f.sent[0].content, /没有工作区权限/);
   assert.match(f.sent[0].content, /完整任务对话\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1\)\*\*$/);

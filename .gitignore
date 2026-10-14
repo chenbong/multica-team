@@ -12,6 +12,7 @@ infoflow-bridge/state.json
 infoflow-bridge/state.json.tmp
 # Issue relay inboxes contain message text/media; checkpoints are host state.
 **/*.issue-deliveries-*.json*
+**/*.received-*.json*
 **/*.issue-group-deliveries.json*
 **/*.issue-group-invites.json*
 infoflow-bridge/.infoflow-images-*/

@@ -9,11 +9,12 @@ import { pollWebGroupJobs } from "./web-group-bindings.js";
 import { pollWebPrivateJobs, privateRobotMetadata } from "./web-private-bindings.js";
 
 const DEFERRED_BINDING = Symbol("deferred-binding");
+const RECEIPT_ATTEMPTED = Symbol("receipt-attempted");
 
 // The service credential only authorizes the trusted inbound bridge. Never put
 // it in agent prompts, CLI profiles, robot admin responses, or daemon requests.
 export class IssueRelay {
-  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null, getPrivateRobotInfo = null, privateRobotInfoTimeoutMs = 10000 } = {}) {
+  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null, getPrivateRobotInfo = null, privateRobotInfoTimeoutMs = 10000, acknowledgeReceipt = null } = {}) {
     this.config = config;
     this.multica = multica;
     this.send = send;
@@ -24,6 +25,7 @@ export class IssueRelay {
     this.groups = groups;
     this.getPrivateRobotInfo = getPrivateRobotInfo;
     this.privateRobotInfoTimeoutMs = privateRobotInfoTimeoutMs;
+    this.acknowledgeReceipt = acknowledgeReceipt;
     this.enabled = config.issueRelay?.enabled === true;
     this.queues = new Map();
     this.stopped = false;
@@ -32,12 +34,18 @@ export class IssueRelay {
     this.inboxPath = this.path + ".inbox";
     this.quarantinePath = this.path + ".quarantine";
     this.decisionsPath = this.path + ".decisions";
+    // A receipt belongs to the physical robot/message, not the current agent.
+    this.receiptsPath = config.statePath + ".received-" + createHash("sha256")
+      .update(JSON.stringify([config.robotId])).digest("hex").slice(0, 16) + ".json";
+    this.receipts = {};
     this.sentParts = {};
     this.inbox = {};
     if (this.enabled) {
       try { this.sentParts = JSON.parse(readFileSync(this.path, "utf8")); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
       try { this.inbox = JSON.parse(readFileSync(this.inboxPath, "utf8")); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      try { this.receipts = JSON.parse(readFileSync(this.receiptsPath, "utf8")); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
       this.timer = setInterval(() => void this.poll(), config.pollIntervalMs || 5000);
       this.timer.unref?.();
@@ -173,6 +181,27 @@ export class IssueRelay {
     return pending.finally(() => { if (this.queues.get(key) === pending) this.queues.delete(key); });
   }
 
+  async confirmReceipt(id, record) {
+    if (this.receipts[id] || record.receiptAcknowledged === true) return true;
+    if (record[RECEIPT_ATTEMPTED]) return false;
+    const acknowledge = record.acknowledge || (record.input.receipt && this.acknowledgeReceipt
+      ? () => this.acknowledgeReceipt(record.input.receipt) : null);
+    if (!acknowledge) return false;
+    record[RECEIPT_ATTEMPTED] = true;
+    try { record.receiptAcknowledged = await acknowledge() === true; }
+    catch { record.receiptAcknowledged = false; this.logger.warn("receipt confirmation failed"); }
+    if (record.receiptAcknowledged) {
+      this.receipts[id] = true;
+      const keys = Object.keys(this.receipts);
+      for (const oldest of keys.slice(0, Math.max(0, keys.length - 200))) delete this.receipts[oldest];
+      try {
+        writeFileSync(this.receiptsPath + ".tmp", JSON.stringify(this.receipts), { mode: 0o600 });
+        renameSync(this.receiptsPath + ".tmp", this.receiptsPath);
+      } catch { this.logger.warn("receipt confirmation checkpoint unavailable"); }
+    }
+    return record.receiptAcknowledged;
+  }
+
   async drain(key, currentId = null) {
     let handled = true;
     const blockedBindings = new Set();
@@ -183,6 +212,9 @@ export class IssueRelay {
         // was committed. Do not resend its notice or reinterpret its target.
         if (existsSync(joinPath(this.decisionsPath, id))) { delete this.inbox[id]; this.saveInbox(); continue; }
         if (record.quarantined) { this.archiveQuarantined(id, record); continue; }
+        // Receipt means only "received", not authorization or execution. Apply
+        // it once to Chat, task inputs, commands and permission notices alike.
+        await this.confirmReceipt(id, record);
         if (record.chatSubmitted) { delete this.inbox[id]; this.saveInbox(); continue; }
         if (record.chatSubmitting) {
           const error = new Error("Chat submission outcome uncertain; inspect retained input before retrying");
@@ -195,7 +227,7 @@ export class IssueRelay {
         // A recovered unbound Chat input cannot be dropped silently. The main
         // Bridge installs a fallback that reuses its normal Chat deduplication.
         if (!result && this.fallback) {
-          await this.fallback({ ...record.input, ...(record.acknowledge ? { acknowledge: record.acknowledge } : {}) }, {
+          await this.fallback({ ...record.input, ...(record.acknowledge || record.input.receipt ? { acknowledge: () => this.confirmReceipt(id, record) } : {}) }, {
             beforeSubmit: () => { record.chatSubmitting = true; this.saveInbox(); },
             afterSubmit: () => { record.chatSubmitted = true; this.saveInbox(); },
           });

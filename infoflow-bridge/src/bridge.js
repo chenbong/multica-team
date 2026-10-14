@@ -50,10 +50,9 @@ export class Bridge {
       stageImages: (images) => stageInboundImages(images, this.logger, this.getImageAccessToken),
       groups: issueGroups,
       getPrivateRobotInfo,
+      acknowledgeReceipt,
     });
-    this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message,
-      acknowledge: message.acknowledge || (message.receipt && acknowledgeReceipt ? () => acknowledgeReceipt(message.receipt) : null),
-      skipIssueRelay: true, handoff });
+    this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message, skipIssueRelay: true, handoff });
   }
 
   stop() { this.chat.stop(); this.issueRelay.stop(); }
@@ -93,8 +92,15 @@ export class Bridge {
       this.logger.warn("Chat submission outcome uncertain; inspect retained Chat state before retrying");
       return;
     }
+    if (!this.issueRelay.enabled && acknowledge) {
+      let confirmed = false;
+      try { confirmed = await acknowledge() === true; }
+      catch { this.logger.warn("receipt confirmation failed"); }
+      acknowledge = async () => confirmed;
+    }
     // The relay has persistent, server-side deduplication and authenticates the
-    // real sender before any receipt, owner-profile command, or chat fallback.
+    // real sender before an owner-profile command or Chat fallback. A receipt
+    // only confirms the SDK message was received, never grants invocation.
     if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt })) return;
 
     if (!this.#allowed(user, conversation)) {

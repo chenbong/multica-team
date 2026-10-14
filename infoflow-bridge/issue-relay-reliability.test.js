@@ -227,7 +227,9 @@ test("failed or unauthorized relay inputs never reach Bridge owner-authority fal
       await relay.poll();
       assert.ok(f.inputRequests().length > 0, "the test must exercise relay requests");
       assert.deepEqual(fallback, []);
-      assert.deepEqual(receipts, []);
+      // Receipt confirms transport admission only; denied/offline requests must
+      // still never borrow the owner's identity or create a model invocation.
+      assert.deepEqual(receipts, ["普通消息", "/issue 不得使用绑定者身份创建"]);
       assert.equal(f.sent.length, 0);
     });
   }

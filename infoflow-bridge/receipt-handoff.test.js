@@ -59,13 +59,51 @@ for (const kind of ["private", "group"]) {
     assert.deepEqual(recovered.issueRelay.inbox, {});
   });
 
-  test(`${kind} denied admission never reacts or starts Chat`, async t => {
+  test(`${kind} denied admission confirms receipt but never starts Chat`, async t => {
     const f = fixture(t, kind);
     f.b.issueRelay.request = async () => ({ handled: true, silent: false, notice: "没有工作区权限" });
-    await f.b.handleMessage({ ...f.message, acknowledge: async () => { throw new Error("must not react"); } });
-    assert.equal(f.submissions.length, 0); assert.equal(f.calls.length, 0);
+    let received = 0;
+    await f.b.handleMessage({ ...f.message, acknowledge: async () => { received++; return true; } });
+    assert.equal(f.submissions.length, 0); assert.equal(f.calls.length, 0); assert.equal(received, 1);
   });
 }
+
+for (const kind of ["private", "group"]) {
+  for (const command of ["/help", "/bind TASK-1", "/binding", "/unbind TASK-1", "/issue 创建测试", "TASK-1 继续"]) {
+    test(`${kind} ${command}: one received reaction for task and command modes, including redelivery`, async t => {
+      const f = fixture(t, kind); let received = 0;
+      f.b.issueRelay.request = async () => ({ handled: true, silent: false, notice: "已处理命令", conversation_mode: "issue" });
+      const message = { ...f.message, text: command, acknowledge: async () => { received++; return true; } };
+      await f.b.handleMessage(message); await f.b.handleMessage(message);
+      assert.equal(received, 1);
+      assert.equal(f.submissions.length, 0);
+      assert.ok(f.replies.every(text => !text.includes("收到，正在回复")));
+      f.b.stop(); const restored = f.make();
+      restored.issueRelay.request = f.b.issueRelay.request;
+      await restored.handleMessage(message);
+      assert.equal(received, 1);
+      assert.equal(f.calls.length, 0);
+    });
+  }
+}
+
+test("actual unbound /help fallback receives one reaction without starting a model", async t => {
+  const f = fixture(t, "private"); let received = 0;
+  await f.b.handleMessage({ ...f.message, text: "/help", acknowledge: async () => { received++; return true; } });
+  assert.equal(received, 1); assert.equal(f.submissions.length, 0);
+  assert.ok(f.replies.some(s => s.includes("/bind")));
+});
+
+test("changing the robot's assigned agent does not confirm an old message twice", async t => {
+  const f = fixture(t, "private"); let received = 0;
+  f.b.issueRelay.request = async () => ({ handled: true, silent: true });
+  const message = { ...f.message, acknowledge: async () => { received++; return true; } };
+  await f.b.handleMessage(message); f.b.stop();
+  f.b.config.multica.defaultAgent = "another-agent";
+  const rebound = f.make(); rebound.issueRelay.request = f.b.issueRelay.request;
+  await rebound.handleMessage(message);
+  assert.equal(received, 1);
+});
 
 test("recovered receipt rebuilds only the fixed emoji operation and rejects invalid IDs", async () => {
   const sent = [];
