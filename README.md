@@ -107,6 +107,42 @@ Extra high、Max 五个思考选项，沿用 Claude/Codex 的值和标签；未�
 旧客户端需要在任务结束后升级并重启 daemon，服务端恢复选项本身不会替它们完成升级。
 目录存在及协议兼容不代表该模型实时健康、每个用户都有调用权限，或工具调用等能力均已验证。
 
+## 可选：侧栏快捷入口
+
+构建 Web 前可设置 `MULTICA_ONEAPI_TRACE_URL` 和 `MULTICA_QUICKSTART_URL`，分别显示
+模型质量检测和快速上手入口，位于侧栏“统计”上方。地址留在部署配置中，不提交真实内网
+链接到仓库；未配置的入口不显示，仅接受无用户名、密码的 HTTPS 地址，并在新标签页打开。
+
+8002 的新增机器人表单仅列出登录账号自己创建的智能体（`owner_id`），保存接口也进行
+同样校验。已有机器人绑定不自动删除或更改；编辑时若原绑定不在候选列表中，需要显式
+选择自己的智能体后再保存，不会因刷新或同名智能体自动改绑。
+
+## 可选：GitHub skill 导入专用代理
+
+API 服务无法直连 GitHub 时，在机器本地的 `deploy/host.env` 中设置并导出专用变量：
+
+```bash
+export MULTICA_SKILL_IMPORT_PROXY='http://proxy.example.com:8080'
+```
+
+示例域名和端口仅作占位，实际代理地址只保存在部署机私有配置中。支持带主机的绝对 HTTP/HTTPS
+代理 URL；如含代理凭据，放入私有的 `deploy/secrets.env`，同样使用 `export`。
+更新配置后重启 API 进程使环境变量生效，无需重新构建 Web、修改数据库 schema 或配置 daemon。
+
+专用代理仅用于 skill 导入及从来源更新时发往 `api.github.com`、`raw.githubusercontent.com`、
+`codeload.github.com`、`github.com` 的请求，`skills.sh` 导入中的 GitHub 下载也适用。
+内网与其他主机继续使用原 HTTP client 的代理策略；专用变量未设置或为空时，沿用原配置，
+包括原有的 `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 行为。TLS 证书与主机名校验保持启用。
+
+`GITHUB_TOKEN` 仍是可选的 GitHub 认证变量，可在 API 的私有环境配置中导出，供私有仓库或提高
+API 配额使用。它只发送给原有的 API/raw 两个主机，不发送给代理认证端点、其他下载主机或
+未获允许的重定向主机；代理认证使用代理 URL 中的独立凭据。代理 URL 与凭据不会出现在
+导入错误消息中。
+
+仅上游真实 HTTP 404 才提示 `SKILL.md not found`；网络故障、取消、GitHub 权限不足返回 502，
+超时返回 504，429 或带限流头的 403 返回 429，上游 5xx 返回可重试的 503，非法代理配置返回 500。
+每文件 1 MiB、支持文件合计 8 MiB / 256 个文件的原有导入上限及超限 413 保持不变。
+
 ## 快速开始
 
 ```bash

@@ -106,6 +106,8 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
     private_metadata_failed: t(($) => $.infoflow_conversations.private_metadata),
     assignment_changed: t(($) => $.infoflow_conversations.reassignment),
     private_requires_single_agent: t(($) => $.infoflow_conversations.private_restriction),
+    // The current service returns this assignment constraint as prose.
+    "私聊仅支持由单个智能体负责的任务；小队、人工负责人或未分配任务请使用群聊": t(($) => $.infoflow_conversations.private_restriction),
   };
   function reasonLabel(reason?: string, fallback = "") {
     return reason && Object.prototype.hasOwnProperty.call(reasonCopy, reason) ? reasonCopy[reason] : reason || fallback;
@@ -145,7 +147,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
     <form className="grid gap-4" onSubmit={(event) => void submit(event)}>
       <DialogHeader>
         <DialogTitle>{t(($) => $.infoflow_conversations.bind)}</DialogTitle>
-        <DialogDescription>{t(($) => $.infoflow_conversations.description)}</DialogDescription>
+        <DialogDescription>{kind === "private" ? t(($) => $.infoflow_conversations.private_restriction) : t(($) => $.infoflow_conversations.description)}</DialogDescription>
       </DialogHeader>
       {(readError || !status?.enabled) && <p role="alert">{t(($) => $.infoflow_groups.read_failed)}</p>}
       {!readError && status?.enabled && <Tabs value={kind} onValueChange={(value) => { if (!busy && (value === "group" || value === "private")) { setKind(value); setError(""); } }}>
@@ -201,11 +203,9 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
           {groupFailed && <p role="alert">{reasonLabel(group?.request?.reason, t(($) => $.infoflow_groups.failed))}</p>}
         </TabsContent>
         <TabsContent value="private" className="grid gap-3 pt-2">
-          <p>{t(($) => $.infoflow_conversations.my_private)}</p>
-          <p className="text-caption text-muted-foreground">{t(($) => $.infoflow_conversations.private_routing)}</p>
-          {!privateStatus?.eligible && <p role="status">{t(($) => $.infoflow_conversations.private_restriction)}</p>}
-          {privateStatus?.reason && <p className="text-caption">{reasonLabel(privateStatus.reason)}</p>}
-          {!privateCanManage && <p>{t(($) => $.infoflow_conversations.no_manage)}</p>}
+          {privateStatus?.reason && reasonLabel(privateStatus.reason) !== t(($) => $.infoflow_conversations.private_restriction) &&
+            <p className="text-caption">{reasonLabel(privateStatus.reason)}</p>}
+          {privateStatus?.eligible && !privateCanManage && <p>{t(($) => $.infoflow_conversations.no_manage)}</p>}
           {privateCanManage && privateStatus.bindings.map((binding) => <div key={binding.bindingId} className="grid gap-2 rounded-lg border p-3">
             <p className="break-all">{binding.robotName || binding.robotId}</p>
             <p role="status">{binding.state === "active" ? t(($) => $.infoflow_conversations.private_success) : t(($) => $.infoflow_conversations.needs_rebind)}</p>

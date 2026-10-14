@@ -39,12 +39,24 @@ Design notes worth knowing:
 
 ## Setup
 
-### 如流消息样式与任务链接
+### 如流消息样式与完整对话链接
 
 聊天和任务回复仅在如流发送时添加加粗模式标记，不改变平台评论或模型输入。
-任务回复使用加粗的「完整任务对话」文字链接。可通过
-`INFOFLOW_ISSUE_WEB_URL`（或 `multica.issueWebUrl`）单独指定链接入口，例如部署的
-IP 地址；未配置时沿用 `multica.webUrl`。不会改变管理页或 CLI 的平台地址。
+新的回复只发送一条消息，总预算为 1800 UTF-8 字节，包含模式标题、队长代发标签和
+加粗可点击的「完整对话链接」。短正文原样保留；超长正文按完整 Unicode 字符保留前段，
+并提示在链接查看全文。平台评论、聊天正文和附件不截断。
+新的任务回复使用原生任务路径并附 `#comment-<comment_id>`，identifier 优先，UUID 同样可用；
+聊天回复使用该次 pending 的 `sessionId`，链接为 `/<workspaceSlug>/chat?session=<sessionId>`。
+命令或权限通知没有评论或会话标识时使用任务页或聊天入口。
+可通过 `INFOFLOW_ISSUE_WEB_URL`（或 `multica.issueWebUrl`）为两类链接指定同一个入口；
+未配置时沿用 `multica.webUrl`，地址完全来自配置。
+
+新的任务投递在首次发送前记录 `summary-v1` 格式及发送路由，成功后记录消息编号；
+发送失败保持 pending，Ack 失败只重试 Ack。摘要校验包含完整原文，尾部改变也不能误 Ack。
+没有格式标记的旧投递 checkpoint 继续原有分片策略，保持 digest、messageIds 和路由 pin，
+只发送尚未投递的部分，全部成功后再 Ack；因此升级时已有的旧长回复可能仍发送多条。
+无法证明路由的旧群 checkpoint 仍保留待核查。新回复的 1800 字节预算不重新切分旧分片。
+
 聊天、任务和命令都使用「收到」表情确认。同一消息编号的近期成功确认在
 持久记录中去重；表情仅表示收到，不代表有执行权限或任务成功。
 接口拒绝或缺少消息标识时，聊天模式才回退文字确认。
@@ -138,6 +150,17 @@ profile 叫什么无所谓，配对靠的是这个 profile 登录进 Multica 的
    Afterwards `./start.sh` runs it detached and `./stop.sh` stops it.
 
 ## Rehearsal without 如流
+
+本地回归运行 `npm test` 和 `npm run check`。根目录的 `reply-markdown.check.mjs` 是
+显式非默认检查，不在 `npm test` 中自动执行。它复用本机已安装的 marked 模块，
+不改变 dependencies、不下载依赖，也不调用部署服务或 SDK：
+
+```bash
+node reply-markdown.check.mjs <marked-module-path>
+```
+
+该检查覆盖代码围栏、列表和引用内的代码、链接标签/地址/标题、行内代码和自动链接，
+同时验证两种模式标题与底部加粗链接实际渲染为超链接，完整消息仍在字节预算内。
 
 ## 登录验证码转发
 

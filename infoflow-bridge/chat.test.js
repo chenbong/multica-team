@@ -99,6 +99,29 @@ test("failed outbound reply stays pending for retry", async (t) => {
   assert.equal(Object.keys(f.bridge.chat.state.pending).length, 0);
 });
 
+for (const kind of ["private", "group"]) test(`${kind} long Chat send failure retains the original session and submits once`, async t => {
+  const f = fixture(t);
+  const conversation = { kind, id: kind === "private" ? "alice" : "g" };
+  const message = { conversation, user: "alice", text: "开始聊天", messageId: "long-reply", acknowledge: async () => true };
+  await f.bridge.handleMessage(message);
+  f.bridge.multica.chatMessages = async () => [{ role: "assistant", task_id: "t0", content: "长中文🙂".repeat(800) }];
+  let attempts = 0;
+  f.bridge.sender = async () => { attempts++; throw new Error("send failed"); };
+  await f.bridge.chat.poll();
+  assert.equal(attempts, 1);
+  assert.equal(f.bridge.chat.state.pending.t0.sessionId, "s0");
+  await f.bridge.handleMessage(message);
+  assert.equal(f.messages.length, 1);
+  f.bridge.sender = async (target, text, options) => {
+    attempts++; assert.deepEqual(target, conversation); assert.deepEqual(options, {});
+    assert.ok(Buffer.byteLength(text) <= 1800);
+    assert.ok(text.endsWith("**[完整对话链接](http://localhost/ws/chat?session=s0)**"));
+  };
+  await f.bridge.chat.poll();
+  assert.equal(attempts, 2);
+  assert.deepEqual(f.bridge.chat.state.pending, {});
+});
+
 test("images are uploaded and attached to chat without creating issues", async (t) => {
   const f = fixture(t);
   let cleaned = false;

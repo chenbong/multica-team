@@ -1377,6 +1377,10 @@ func fetchFromSkillsSh(ctx context.Context, httpClient *http.Client, rawURL stri
 	if err != nil {
 		return nil, err
 	}
+	if configured := skillImportHTTPClient(httpClient); configured != httpClient {
+		httpClient = configured
+		defer httpClient.CloseIdleConnections()
+	}
 
 	// A skills.sh URL maps onto a GitHub repository. Both skill-directory
 	// resolution and supporting-file enumeration are driven by a single
@@ -1401,7 +1405,7 @@ func fetchFromSkillsSh(ctx context.Context, httpClient *http.Client, rawURL stri
 		// with a retryable error instead so nothing incorrect is saved.
 		slog.Warn("skills.sh import: repository tree fetch failed",
 			"owner", owner, "repo", repo, "error", treeErr)
-		return nil, fmt.Errorf("%w: could not read the %s/%s repository tree (usually GitHub API rate limiting — set GITHUB_TOKEN on the server or retry): %v",
+		return nil, fmt.Errorf("%w: could not read the %s/%s repository tree: %w",
 			errImportSourceUnavailable, owner, repo, treeErr)
 	}
 
@@ -1536,7 +1540,7 @@ func fetchGitHubTree(ctx context.Context, httpClient *http.Client, owner, repo, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, false, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, false, skillImportHTTPStatusFailure(resp.StatusCode, resp.Header, true)
 	}
 	var tree githubTreeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tree); err != nil {
@@ -2006,11 +2010,22 @@ func doGitHubAPIGet(ctx context.Context, httpClient *http.Client, apiURL string)
 		return nil, err
 	}
 	addGitHubAuthHeader(req)
-	return httpClient.Do(req)
+	resp, err := httpClient.Do(req)
+	if isSkillImportGitHubHost(req.URL.Hostname()) {
+		if err != nil {
+			err = sanitizeSkillImportNetworkError(err)
+		}
+		if resp != nil && resp.Body != nil {
+			if _, wrapped := resp.Body.(skillImportHTTPBody); !wrapped {
+				resp.Body = skillImportHTTPBody{ReadCloser: resp.Body}
+			}
+		}
+	}
+	return resp, err
 }
 
 func addGitHubAuthHeader(req *http.Request) {
-	if req == nil {
+	if req == nil || req.URL == nil || !isSkillImportGitHubAuthHost(req.URL.Hostname()) {
 		return
 	}
 	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
@@ -2181,7 +2196,7 @@ func githubRefExists(ctx context.Context, httpClient *http.Client, owner, repo, 
 	addGitHubAuthHeader(req)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return false, err
+		return false, sanitizeSkillImportNetworkError(err)
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
@@ -2192,7 +2207,7 @@ func githubRefExists(ctx context.Context, httpClient *http.Client, owner, repo, 
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
 		return false, errGitHubAPIBlocked
 	default:
-		return false, fmt.Errorf("github API returned status %d for ref %q", resp.StatusCode, ref)
+		return false, fmt.Errorf("github API for ref %q: %w", ref, skillImportHTTPStatusFailure(resp.StatusCode, resp.Header, true))
 	}
 }
 
@@ -2200,6 +2215,10 @@ func fetchFromGitHub(ctx context.Context, httpClient *http.Client, rawURL string
 	spec, err := parseGitHubURL(rawURL)
 	if err != nil {
 		return nil, err
+	}
+	if configured := skillImportHTTPClient(httpClient); configured != httpClient {
+		httpClient = configured
+		defer httpClient.CloseIdleConnections()
 	}
 	if len(spec.refSegments) > 0 {
 		// Disambiguate slash-bearing refs (release/v2 etc.) against the API
@@ -2220,9 +2239,12 @@ func fetchFromGitHub(ctx context.Context, httpClient *http.Client, rawURL string
 	}
 	skillMdBody, err := fetchRawFile(ctx, httpClient, buildRawGitHubURL(rawPrefix, skillMdPath))
 	if err != nil {
+		if !isSkillImportNotFound(err) {
+			return nil, fmt.Errorf("could not fetch %s in %s/%s@%s: %w", skillMdPath, spec.owner, spec.repo, spec.ref, err)
+		}
 		if spec.skillDir == "" {
-			return nil, fmt.Errorf("SKILL.md not found at the root of %s/%s@%s. For multi-skill repositories, point to a specific directory using github.com/%s/%s/tree/%s/<skill-dir>",
-				spec.owner, spec.repo, spec.ref, spec.owner, spec.repo, spec.ref)
+			return nil, fmt.Errorf("SKILL.md not found at the root of %s/%s@%s. For multi-skill repositories, point to a specific directory using github.com/%s/%s/tree/%s/<skill-dir>: %w",
+				spec.owner, spec.repo, spec.ref, spec.owner, spec.repo, spec.ref, err)
 		}
 		return nil, fmt.Errorf("SKILL.md not found at %s in %s/%s@%s: %w",
 			skillMdPath, spec.owner, spec.repo, spec.ref, err)
@@ -2287,14 +2309,20 @@ func fetchRawFile(ctx context.Context, httpClient *http.Client, fileURL string) 
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		if isSkillImportGitHubHost(req.URL.Hostname()) {
+			err = sanitizeSkillImportNetworkError(err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return nil, skillImportHTTPStatusFailure(resp.StatusCode, resp.Header, isSkillImportGitHubHost(req.URL.Hostname()))
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxImportFileSize+1))
 	if err != nil {
+		if isSkillImportGitHubHost(req.URL.Hostname()) {
+			err = sanitizeSkillImportNetworkError(err)
+		}
 		return nil, err
 	}
 	if len(body) > maxImportFileSize {
@@ -2565,13 +2593,17 @@ const importFetchTimeout = 45 * time.Second
 // importFetchErrorResponse maps a fetch failure onto an HTTP status and message.
 // Cap violations become 413 (the skill is too large to import), an exhausted
 // deadline becomes 504, a transiently unavailable source becomes a retryable
-// 503, and everything else stays 502.
+// 503. GitHub rate limits become 429, invalid import proxy configuration becomes
+// 500, and other upstream failures stay 502 with a sanitized, actionable message.
 func importFetchErrorResponse(ctx context.Context, err error) (int, string) {
 	if isCapError(err) {
 		return http.StatusRequestEntityTooLarge, err.Error()
 	}
 	if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
 		return http.StatusGatewayTimeout, "skill import timed out fetching source files; the skill may be too large or the source too slow"
+	}
+	if status, msg, ok := skillImportHTTPErrorResponse(err); ok {
+		return status, msg
 	}
 	if errors.Is(err, errImportSourceUnavailable) {
 		return http.StatusServiceUnavailable, err.Error()

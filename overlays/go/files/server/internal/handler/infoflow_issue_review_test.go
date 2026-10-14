@@ -207,6 +207,7 @@ func TestInfoFlowSquadDispatchPreservesLeaderRole(t *testing.T) {
 		for _, target := range []string{"leader", "leader_no_invoke", "worker", "single"} {
 			t.Run(kind+"/"+target, func(t *testing.T) {
 				f := newInfoFlowFixture(t)
+				dbfx.Exec(t, `UPDATE agent SET name='GB-16-RSI' WHERE id=$1`, f.req.AgentID)
 				worker := dbfx.Agent(t, "Worker", f.runtime, testutil.Cols{"owner_id": f.owner})
 				squad := dbfx.Insert(t, "squad", testutil.Cols{"workspace_id": f.req.WorkspaceID, "name": "Execution squad", "leader_id": f.req.AgentID, "creator_id": f.owner})
 				dbfx.Insert(t, "squad_member", testutil.Cols{"squad_id": squad, "member_type": "agent", "member_id": worker, "role": "member"})
@@ -270,6 +271,13 @@ func TestInfoFlowSquadDispatchPreservesLeaderRole(t *testing.T) {
 				}
 				if len(mentions) != 1 || mentions[0].Type != wantType || mentions[0].ID != wantID {
 					t.Fatalf("incorrect dispatch mention: %+v", mentions)
+				}
+				wantName := "GB-16-RSI"
+				if target == "worker" {
+					wantName = "Worker"
+				}
+				if !strings.HasPrefix(content, "[@"+wantName+"](mention://"+wantType+"/"+wantID+")\n\n") {
+					t.Fatalf("display label is not the addressed agent: %q", content)
 				}
 				count := infoFlowCount(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1`, f.issue)
 				if target == "leader_no_invoke" {

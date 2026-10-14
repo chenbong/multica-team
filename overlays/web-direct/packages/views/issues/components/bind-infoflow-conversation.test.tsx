@@ -76,6 +76,37 @@ describe("unified InfoFlow dialog", () => {
     await user.click(screen.getByRole("button", { name: en.infoflow_groups.submit }));
     await waitFor(() => expect(state.post).toHaveBeenCalledWith("task", { kind: "group", group_id: "123" }));
   });
+  it.each([true, false])("shows one private binding constraint for eligible=%s without repeated onboarding copy", async (eligible) => {
+    const current = fresh();
+    current.private = { ...current.private, eligible, canManage: eligible,
+      reason: eligible ? "" : "私聊仅支持由单个智能体负责的任务；小队、人工负责人或未分配任务请使用群聊" };
+    state.get.mockResolvedValue(current);
+    const user = await open(); await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(en.infoflow_conversations.private_restriction);
+    expect(screen.getAllByText(en.infoflow_conversations.private_restriction)).toHaveLength(1);
+    for (const copy of [en.infoflow_conversations.my_private, en.infoflow_conversations.private_routing,
+      en.infoflow_conversations.description, en.infoflow_conversations.no_manage, current.private.reason]) {
+      if (copy) expect(screen.queryByText(copy)).not.toBeInTheDocument();
+    }
+    if (!eligible) expect(screen.queryByRole("button", { name: en.infoflow_groups.submit })).not.toBeInTheDocument();
+    expect(state.post).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.group }));
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(en.infoflow_conversations.description);
+  });
+  it("retains actual permission notices for eligible private tasks", async () => {
+    const current = fresh(); current.private.canManage = false;
+    state.get.mockResolvedValue(current); const user = await open();
+    await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.getByText(en.infoflow_conversations.no_manage)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: en.infoflow_groups.submit })).not.toBeInTheDocument();
+  });
+  it("retains unrelated service errors even before private eligibility is resolved", async () => {
+    const current = fresh(); current.private = { ...current.private, eligible: false, canManage: false, reason: "Unable to verify your InfoFlow account" };
+    state.get.mockResolvedValue(current); const user = await open();
+    await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.getByText(current.private.reason)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: en.infoflow_groups.submit })).not.toBeInTheDocument();
+  });
   it("keeps errors visible and does not retry failed mutations", async () => {
     state.post.mockRejectedValue(new ApiError("Assignment changed", 409, "Conflict"));
     const user = await open(); await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));

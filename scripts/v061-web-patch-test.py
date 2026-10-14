@@ -39,6 +39,8 @@ class FrontendPatches(unittest.TestCase):
             "MULTICA_CLI_INSTALL_URL": "https://example.test/install.sh",
             "MULTICA_DAEMON_RUNTIME_DEFAULTS": "ducc,codex",
             "MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS": "ducc",
+            "MULTICA_ONEAPI_TRACE_URL": "https://probe.example.test/",
+            "MULTICA_QUICKSTART_URL": "https://docs.example.test/quickstart",
         })
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -117,6 +119,23 @@ class FrontendPatches(unittest.TestCase):
         self.assertIn('platforms={["macosLinux"]}', dialog)
         installer = (self.target / "packages/views/common/cli-install-command.tsx").read_text()
         self.assertIn("platforms = PLATFORMS", installer)
+
+    def test_code_fonts_use_a_monospace_fallback_and_shortcuts_precede_statistics(self):
+        self.apply()
+        layout = (self.target / "apps/web/app/layout.tsx").read_text()
+        mono = layout[layout.index("const geistMono"):layout.index("export const metadata")]
+        self.assertIn("adjustFontFallback: false", mono)
+        self.assertIn('"Menlo"', mono)
+        self.assertIn('"monospace"', mono)
+        sidebar = (self.target / "packages/views/layout/app-sidebar.tsx").read_text()
+        footer = sidebar[sidebar.index("<SidebarFooter"):]
+        self.assertEqual(footer.count("<SidebarShortcutLinks "), 1)
+        self.assertLess(footer.index("<SidebarShortcutLinks "), footer.index("utilityNav.map"))
+        self.assertIn('modelTraceUrl={"https://probe.example.test/"}', footer)
+        self.assertIn('quickstartUrl={"https://docs.example.test/quickstart"}', footer)
+        for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
+            labels = json.loads((self.target / f"packages/views/locales/{locale}/layout.json").read_text())
+            self.assertEqual(set(labels["sidebar"]["quick_links"]), {"model_trace", "quickstart_wishlist"})
 
     def test_upstream_checkout_is_rejected(self):
         result = subprocess.run(

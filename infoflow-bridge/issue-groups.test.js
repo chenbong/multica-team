@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { IssueGroups, exactGroupId, groupMembers, inviteGroupLeader, sendGroupExact, botOrigin } from "./src/issue-groups.js";
 import { Bridge } from "./src/bridge.js";
 
@@ -107,6 +108,15 @@ function fixture(t) {
     input: (bridge, text = "/bind TEST-1", messageId = "message-1") => bridge.handleMessage({ conversation, user: "alice", text, messageId }) };
 }
 
+function legacyCheckpoint(f, bridge) {
+  const content = f.state.deliveries[0].content;
+  const parts = bridge.issueRelay.replyParts(content, f.state.binding, 1200);
+  f.groups.deliveries["delivery-1"] = { next: 0, digest: createHash("sha256").update(parts.join("")).digest("hex"), messageIds: [],
+    route: { robot_id: "a", agent_id: A, delegated: true, label: "【成员 B · 队长代发】\n" } };
+  f.groups.saveDeliveries();
+  return parts;
+}
+
 test("group member transport preserves exact numeric IDs and compares app IDs, not IM IDs", async () => {
   const calls = [];
   const client = { httpClient: { post: async (...args) => { calls.push(args); return { errcode: 0, data: {
@@ -188,7 +198,7 @@ test("authorized pending bind invites and rereads before activation even can_com
   assert.equal(f.state.binding.group.state, "active");
   assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]/);
   assert.match(f.state.sent[0].content, /绑定已启用/);
-  assert.match(f.state.sent[0].content, /完整任务对话\]\(https:\/\/team.example.invalid\/team\/issues\/TEST-1\)\*\*$/);
+  assert.match(f.state.sent[0].content, /完整对话链接\]\(https:\/\/team.example.invalid\/team\/issues\/TEST-1\)\*\*$/);
 });
 
 test("single assignee requires only its own robot, not the invoking robot", async t => {
@@ -308,8 +318,9 @@ test("in-group offline member and ambiguous member mapping pause, never delegate
   }
 });
 
-test("leader leaving pauses subsequent parts and next inbound message", async t => {
+test("legacy leader leaving pauses subsequent parts and next inbound message", async t => {
   const f = fixture(t); const bridge = f.make(); f.addDelivery(B, "正文".repeat(1000));
+  legacyCheckpoint(f, bridge);
   f.state.afterSend = () => { f.state.members = []; };
   await bridge.issueRelay.poll();
   assert.equal(f.state.sent.length, 1); assert.equal(f.state.acked.size, 0);
@@ -332,42 +343,68 @@ test("removing a squad member after poll prevents sending its stale delivery", a
   assert.equal(f.state.acked.size, 0);
 });
 
-test("removing a squad member between parts pauses its remaining output", async t => {
+test("legacy removal of a squad member between parts pauses its remaining output", async t => {
   const f = fixture(t); f.state.members.push("202"); f.addDelivery(B, "成员长回复".repeat(500));
+  const bridge = f.make(); legacyCheckpoint(f, bridge);
   f.state.afterSend = () => { f.state.binding.group.agent_ids = [A]; };
-  await f.make().issueRelay.poll();
+  await bridge.issueRelay.poll();
   assert.equal(f.state.sent.length, 1);
   assert.equal(f.state.acked.size, 0);
 });
 
-test("fallback label and mode/footer appear on every bounded UTF-8 part", async t => {
+test("fallback label with 120 Unicode characters fits the single UTF-8 summary and precise footer", async t => {
   const f = fixture(t); f.addDelivery(B, "性能提升🚀".repeat(500));
-  f.state.deliveries[0].author_name = "成🚀".repeat(100);
+  f.state.deliveries[0].author_name = "🚀".repeat(160);
+  f.state.deliveries[0].comment_id = "33333333-3333-4333-8333-333333333333";
   await f.make().issueRelay.poll();
-  assert.ok(f.state.sent.length > 1);
+  assert.equal(f.state.sent.length, 1);
   for (const sent of f.state.sent) {
     assert.match(sent.content, /^\*\*\[任务模式\] TEST-1\*\*\n\n【/);
     assert.match(sent.content, /队长代发】/);
-    assert.match(sent.content, /完整任务对话\]\(https:\/\/team.example.invalid\/team\/issues\/TEST-1\)\*\*$/);
+    assert.match(sent.content, /完整对话链接\]\(https:\/\/team.example.invalid\/team\/issues\/TEST-1#comment-33333333-3333-4333-8333-333333333333\)\*\*$/);
+    assert.ok(sent.content.includes(`【${"🚀".repeat(120)} · 队长代发】`));
+    assert.match(sent.content, /回复较长/);
     assert.ok(Buffer.byteLength(sent.content) <= 1800);
     assert.equal(sent.content.includes("\ufffd"), false);
   }
 });
 
-test("shared checkpoint pins fallback sender through restart and later member arrival", async t => {
+test("legacy shared checkpoint pins fallback sender through restart and later member arrival", async t => {
   const f = fixture(t); f.addDelivery(B, "长正文".repeat(500)); f.state.failPart = 2;
-  const first = f.make(); await first.issueRelay.poll(); first.stop();
+  const first = f.make(); const parts = legacyCheckpoint(f, first);
+  await first.issueRelay.poll(); first.stop();
   assert.equal(f.state.sent.length, 1);
   assert.equal(f.groups.deliveries["delivery-1"].route.robot_id, "a");
   f.state.members.push("202"); f.state.failPart = 0; f.restoreGroups();
   await f.make().issueRelay.poll();
-  assert.ok(f.state.sent.length > 1); assert.ok(f.state.sent.every(message => message.robotId === "a"));
+  assert.equal(f.state.sent.length, parts.length); assert.ok(f.state.sent.every(message => message.robotId === "a"));
+  assert.equal(f.groups.deliveries["delivery-1"].format, undefined);
+  const ack = f.state.requests.find(r => r.path.endsWith("/ack")).body;
+  assert.deepEqual(ack.message_ids, parts.map((_, index) => String(1859897297556590001n + BigInt(index))));
   assert.equal(f.state.acked.size, 1);
 });
 
-test("partial leader handoff retains checkpoint and pauses instead of replaying via new leader", async t => {
-  const f = fixture(t); f.addDelivery(B, "长正文".repeat(500)); f.state.failPart = 2;
+test("fresh failed summary pins the absent member's leader route across restart and member arrival", async t => {
+  const f = fixture(t); f.addDelivery(B, "中文🙂".repeat(800)); f.state.failPart = 1;
+  const first = f.make(); await first.issueRelay.poll(); first.stop();
+  assert.equal(f.state.sent.length, 0);
+  assert.equal(f.state.acked.size, 0);
+  const checkpoint = f.groups.deliveries["delivery-1"];
+  assert.equal(checkpoint.format, "summary-v1"); assert.equal(checkpoint.next, 0);
+  assert.equal(checkpoint.route.robot_id, "a");
+  f.state.members.push("202"); f.state.failPart = 0; f.restoreGroups();
   await f.make().issueRelay.poll();
+  assert.equal(f.state.sent.length, 1);
+  assert.equal(f.state.sent[0].robotId, "a");
+  assert.match(f.state.sent[0].content, /队长代发/);
+  assert.ok(Buffer.byteLength(f.state.sent[0].content) <= 1800);
+  assert.deepEqual(f.state.sent[0].options, {});
+  assert.equal(f.state.acked.size, 1);
+});
+
+test("legacy partial leader handoff retains checkpoint and pauses instead of replaying via new leader", async t => {
+  const f = fixture(t); f.addDelivery(B, "长正文".repeat(500)); f.state.failPart = 2;
+  const first = f.make(); legacyCheckpoint(f, first); await first.issueRelay.poll();
   f.state.binding.group.leader_agent_id = B; f.state.binding.group.leader_robot_id = "b"; f.state.members.push("202");
   f.state.failPart = 0;
   await f.make("b").issueRelay.poll();

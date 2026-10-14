@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { Bridge } from "./src/bridge.js";
 import { IssueRelay } from "./src/issue-relay.js";
 
@@ -256,7 +257,7 @@ test("one failed group delivery does not block another group or acknowledge the 
   assert.ok(f.acknowledged.has(bad.id));
 });
 
-test("stop during the first pending chunk prevents remaining chunks until a new instance resumes", async (t) => {
+test("legacy stop during the first pending chunk preserves all remaining data for restart", async (t) => {
   const f = fixture(t);
   const content = Array.from({ length: 400 }, (_, index) => `第 ${index} 行，结果🙂\n`).join("");
   const item = delivery("partial-delivery", "42", content);
@@ -265,6 +266,9 @@ test("stop during the first pending chunk prevents remaining chunks until a new 
   const firstId = "1859897297556590100";
   f.server.send = async () => { started.resolve(); return finishFirst.promise; };
   const first = f.make();
+  const parts = first.replyParts(content, item.binding);
+  first.sentParts[item.id] = { next: 0, digest: createHash("sha256").update(parts.join("")).digest("hex"), messageIds: [] };
+  first.save();
   const polling = first.poll();
   try {
     await Promise.race([started.promise, polling.then(() => assert.fail("poll finished without attempting the first chunk"))]);
@@ -292,14 +296,14 @@ test("stop during the first pending chunk prevents remaining chunks until a new 
   assert.ok(expectedIds.includes(ack.message_id));
 });
 
-test("ack retries retain all exact external message IDs across restart without sending again", async (t) => {
+test("fresh summary ack retries retain its exact external message ID across restart without sending again", async (t) => {
   const f = fixture(t);
   const item = delivery("ack-retry-delivery", "42", "不同片段的回复🙂\n".repeat(700));
   f.server.deliveries = [item];
   f.server.ack = async () => response({}, 503);
   const first = f.make();
   await first.poll();
-  assert.ok(f.sent.length > 1, "exercise multiple external message IDs");
+  assert.equal(f.sent.length, 1);
   const expectedIds = f.sent.map(({ result }) => result.messageid);
   assert.equal(new Set(expectedIds).size, expectedIds.length);
   assert.equal(f.ackRequests().length, 1);

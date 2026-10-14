@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { issueRequest } from "./chat.js";
 import { messageIdString } from "./conversation-context.js";
-import { withReplyMode, noticeReplyMode } from "./reply-format.js";
+import { formatReply, replyUrl, withReplyMode, noticeReplyMode } from "./reply-format.js";
 import { pollWebGroupJobs } from "./web-group-bindings.js";
 import { pollWebPrivateJobs, privateRobotMetadata } from "./web-private-bindings.js";
 
@@ -534,12 +534,13 @@ export class IssueRelay {
 
   async sendNotice(conversation, result) {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
-    for (const part of this.replyParts(result.notice, result.binding)) {
-      if (this.stopped) throw new Error("issue relay stopped before notice delivery");
-      await this.send(conversation, withReplyMode(this.presentReplyPart(part, result.binding), noticeReplyMode(result), result.binding?.identifier), {});
-    }
+    if (this.stopped) throw new Error("issue relay stopped before notice delivery");
+    await this.send(conversation, formatReply(result.notice, { mode: noticeReplyMode(result), identifier: result.binding?.identifier,
+      url: replyUrl(this.config.multica, { binding: result.binding, commentId: result.comment_id, sessionId: result.session_id }) }), {});
   }
 
+  // Unversioned checkpoints must reconstruct these exact canonical chunks and
+  // their digest. Only new deliveries use the single-message formatter.
   replyParts(content, binding, maxBytes = 1800) {
     if (!binding) return splitMessage(content);
     const footer = "\n\n完整任务对话：" + this.issueUrl(binding, this.config.multica.webUrl);
@@ -548,14 +549,7 @@ export class IssueRelay {
   }
 
   issueUrl(binding, webUrl) {
-    const ref = binding.identifier || binding.issue_id;
-    const slug = binding.workspace_slug || this.config.multica.workspaceSlug;
-    if (!ref || !slug) throw new Error("issue link metadata is missing");
-    const base = new URL(webUrl);
-    if (!["http:", "https:"].includes(base.protocol) || base.username || base.password) throw new Error("invalid issue link URL");
-    base.pathname = base.pathname.replace(/\/$/, "") + `/${encodeURIComponent(slug)}/issues/${encodeURIComponent(ref)}`;
-    base.search = ""; base.hash = "";
-    return base.href;
+    return replyUrl(this.config.multica, { binding }, webUrl);
   }
 
   presentReplyPart(part, binding) {
@@ -566,13 +560,14 @@ export class IssueRelay {
     if (!part.endsWith(legacy)) throw new Error("issue reply footer is missing");
     const target = this.issueUrl(binding, this.config.multica.issueWebUrl || this.config.multica.webUrl)
       .replace(/[()]/g, c => c === "(" ? "%28" : "%29");
-    const presented = part.slice(0, -legacy.length) + `**[完整任务对话](${target})**`;
+    const presented = part.slice(0, -legacy.length) + `**[完整对话链接](${target})**`;
     // Canonical checkpoints cannot be re-split during an upgrade. Allow only a
     // small Markdown overhead; an unusually long configured URL keeps the old
-    // direct-link footer rather than exceeding the established send budget.
+    // canonical target rather than exceeding the established send budget.
     if (Buffer.byteLength(presented) > Buffer.byteLength(part) + 16) {
-      this.logger.warn("configured task link exceeds reply budget; using direct link");
-      return part;
+      this.logger.warn("configured task link exceeds legacy reply budget; using canonical target");
+      const canonical = this.issueUrl(binding, this.config.multica.webUrl).replace(/[()]/g, c => c === "(" ? "%28" : "%29");
+      return part.slice(0, -legacy.length) + `**[完整对话链接](${canonical})**`;
     }
     return presented;
   }
@@ -606,18 +601,22 @@ export class IssueRelay {
             !["private", "group"].includes(item.conversation?.kind) || !item.conversation?.id) {
           throw new Error("invalid issue delivery");
         }
-        // New group checkpoints reserve attribution bytes (including 120
-        // Unicode author characters); private/legacy digests remain unchanged.
-        const parts = this.replyParts(item.content, item.binding || item,
-          this.groups && item.conversation.kind === "group" ? 1200 : 1800);
-        const digest = createHash("sha256").update(parts.join("")).digest("hex");
         const shared = this.groups && item.conversation.kind === "group";
         const checkpoints = shared ? this.groups.deliveries : this.sentParts;
         const save = () => shared ? this.groups.saveDeliveries() : this.save();
         const prior = checkpoints[item.id];
         if (prior?.acked) return;
         if (shared && !prior && this.sentParts[item.id]) throw new Error("legacy per-robot group checkpoint requires operator review");
+        if (prior?.format && prior.format !== "summary-v1") throw new Error("unknown issue delivery checkpoint format");
+        const legacy = Boolean(prior && !prior.format);
+        const binding = item.binding || item;
+        const parts = legacy ? this.replyParts(item.content, binding, shared ? 1200 : 1800) : [item.content];
+        // Hash the full content, not just the displayed prefix. A changed tail
+        // cannot be silently acknowledged as the already delivered response.
+        const digest = createHash("sha256").update(legacy ? parts.join("") :
+          JSON.stringify([item.content, this.issueUrl(binding, this.config.multica.webUrl), item.comment_id || null])).digest("hex");
         if (prior && prior.digest !== digest) throw new Error("issue delivery content changed during retry");
+        if (prior && (!Number.isInteger(prior.next) || prior.next < 0 || prior.next > parts.length)) throw new Error("invalid issue delivery checkpoint progress");
         let route = null;
         if (shared) {
           const plan = groupPlans?.get(item.binding?.binding_id);
@@ -631,11 +630,11 @@ export class IssueRelay {
           // A poll snapshot can outlive squad membership. Author admission must
           // use the freshly checked topology, not the original delivery view.
           if (!prior || prior.next < parts.length) route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, prior?.route);
-          if (!prior) {
-            checkpoints[item.id] = { next: 0, digest, messageIds: [], route: route.pin };
-            // Pin before the first external send; a retry must never switch bots.
-            save();
-          }
+        }
+        if (!prior) {
+          checkpoints[item.id] = { next: 0, digest, messageIds: [], format: "summary-v1", ...(route ? { route: route.pin } : {}) };
+          // Pin format and route before sending, including failed first sends.
+          save();
         }
         for (let index = prior?.next || 0; index < parts.length; index += 1) {
           if (this.stopped) return;
@@ -646,15 +645,18 @@ export class IssueRelay {
             if (checked.binding.group.state !== "active" || checked.binding.generation !== item.binding?.generation) throw new Error("group delivery paused after assignment change");
             route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, route.pin);
           }
-          const receipt = await (route?.send || this.send)(item.conversation,
-            withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], item.binding || item), "issue", (item.binding || item).identifier), {});
+          const content = legacy
+            ? withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], binding), "issue", binding.identifier)
+            : formatReply(parts[index], { mode: "issue", identifier: binding.identifier, label: route?.pin.label || "",
+              url: replyUrl(this.config.multica, { binding, commentId: item.comment_id }) });
+          const receipt = await (route?.send || this.send)(item.conversation, content, {});
           // Private sendToUser returns msgkey, whereas the group send API uses
           // messageid. Both are the exact original ID quoted by the IM client.
           const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId ??
             (item.conversation.kind === "private" ? receipt?.msgkey : null));
           const messageIds = [...(checkpoints[item.id]?.messageIds || [])];
           if (messageId) messageIds.push(messageId);
-          checkpoints[item.id] = { next: index + 1, digest, messageIds, ...(route ? { route: route.pin } : {}) };
+          checkpoints[item.id] = { ...checkpoints[item.id], next: index + 1, digest, messageIds, ...(route ? { route: route.pin } : {}) };
           save();
         }
         if (this.stopped) return;

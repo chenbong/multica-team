@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { Bridge } from "./src/bridge.js";
 import { IssueRelay, relayOperation, splitMessage } from "./src/issue-relay.js";
 import { withReplyMode } from "./src/reply-format.js";
@@ -43,7 +44,7 @@ test("denied workspace user gets received reaction and owner notice but never st
   assert.equal(received, 1);
   assert.equal(f.sent.length, 1);
   assert.match(f.sent[0].content, /没有工作区权限/);
-  assert.match(f.sent[0].content, /完整任务对话\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1\)\*\*$/);
+  assert.match(f.sent[0].content, /完整对话链接\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1\)\*\*$/);
   assert.deepEqual(f.sent[0].options, {});
 });
 
@@ -161,14 +162,15 @@ test("outbound replies preserve content, append footer, have no @ and ack only a
   assert.deepEqual(f.sent[0].options, {});
 });
 
-test("ack failure and process restart do not re-send already checkpointed chunks", async t => {
+test("ack failure and process restart do not resend a checkpointed single summary", async t => {
   const f = fixture(t);
   const item = { id: "delivery", content: "🙂中文".repeat(500), conversation: { kind: "private", id: "alice" }, binding };
   f.bridge.issueRelay.request = async path => { if (path.endsWith("/ack")) throw new Error("ack network failure"); return { deliveries: [item] }; };
   await f.bridge.issueRelay.poll();
   const sentCount = f.sent.length;
-  assert.ok(sentCount > 1);
-  assert.ok(f.sent.every(r => r.content.startsWith("**[任务模式] TEST-1**\n\n") && r.content.includes("**[完整任务对话](") && Buffer.byteLength(r.content) <= 1810 + Buffer.byteLength(withReplyMode("", "issue", binding.identifier))));
+  assert.equal(sentCount, 1);
+  assert.ok(f.sent.every(r => r.content.startsWith("**[任务模式] TEST-1**\n\n") && r.content.includes("**[完整对话链接](") && Buffer.byteLength(r.content) <= 1800));
+  assert.equal(f.bridge.issueRelay.sentParts.delivery.format, "summary-v1");
   f.bridge.issueRelay.stop();
   const restored = new IssueRelay(f.config, {}, async () => { throw new Error("unexpected duplicate send"); }, { warn() {} });
   t.after(() => restored.stop());
@@ -179,6 +181,93 @@ test("ack failure and process restart do not re-send already checkpointed chunks
   assert.deepEqual(restored.sentParts, {});
 });
 
+for (const kind of ["private", "group"]) test(`${kind} failed first summary send stays pending and restarts with one retry`, async t => {
+  const f = fixture(t), acknowledgements = [];
+  const item = { id: "delivery", content: "中文🙂".repeat(700), comment_id: "c1", binding,
+    conversation: { kind, id: kind === "private" ? "alice" : "42" } };
+  const request = async (path, body) => {
+    if (path.endsWith("/ack")) { acknowledgements.push(body); return {}; }
+    return { deliveries: [item] };
+  };
+  let attempts = 0;
+  f.bridge.issueRelay.request = request;
+  f.bridge.issueRelay.send = async () => { attempts++; throw new Error("send failed"); };
+  await f.bridge.issueRelay.poll();
+  assert.equal(attempts, 1);
+  assert.equal(acknowledgements.length, 0);
+  assert.equal(f.bridge.issueRelay.sentParts.delivery.next, 0);
+  assert.equal(f.bridge.issueRelay.sentParts.delivery.format, "summary-v1");
+  f.bridge.stop();
+  const restored = new IssueRelay(f.config, {}, async (_c, text, options) => {
+    attempts++; assert.ok(Buffer.byteLength(text) <= 1800); assert.deepEqual(options, {});
+    assert.ok(text.endsWith("**[完整对话链接](http://localhost:8004/team/issues/TEST-1#comment-c1)**"));
+    return kind === "private" ? { msgkey: "1836339350307196087" } : { messageid: "1836339350307196087" };
+  }, { warn() {} });
+  t.after(() => restored.stop()); restored.request = request;
+  await restored.poll();
+  assert.equal(attempts, 2);
+  assert.equal(acknowledgements.length, 1);
+  assert.deepEqual(acknowledgements[0].message_ids, ["1836339350307196087"]);
+  assert.deepEqual(restored.sentParts, {});
+});
+
+test("summary checkpoint hashes the undisplayed tail and never acknowledges changed content", async t => {
+  const f = fixture(t);
+  const original = "中文🙂".repeat(800);
+  const item = { id: "delivery", content: original, comment_id: "c1", binding, conversation: { kind: "private", id: "alice" } };
+  let acks = 0;
+  f.bridge.issueRelay.request = async path => {
+    if (path.endsWith("/ack")) { acks++; throw new Error("ack unavailable"); }
+    return { deliveries: [item] };
+  };
+  await f.bridge.issueRelay.poll();
+  const checkpoint = structuredClone(f.bridge.issueRelay.sentParts.delivery);
+  item.content += "未发尾部发生变化";
+  await f.bridge.issueRelay.poll();
+  assert.equal(f.sent.length, 1);
+  assert.equal(acks, 1);
+  assert.deepEqual(f.bridge.issueRelay.sentParts.delivery, checkpoint);
+  item.content = original;
+  await f.bridge.issueRelay.poll();
+  assert.equal(f.sent.length, 1);
+  assert.equal(acks, 2);
+});
+
+test("completed legacy checkpoint retries only Ack with every original exact message ID", async t => {
+  const f = fixture(t);
+  const item = { id: "delivery", content: "中文🙂".repeat(900), binding, conversation: { kind: "private", id: "alice" } };
+  const parts = f.bridge.issueRelay.replyParts(item.content, binding);
+  const ids = parts.map((_, index) => String(1836339350307196087n + BigInt(index)));
+  const checkpoint = { next: parts.length, digest: createHash("sha256").update(parts.join("")).digest("hex"), messageIds: ids };
+  f.bridge.issueRelay.sentParts.delivery = checkpoint; f.bridge.issueRelay.save();
+  f.bridge.stop();
+  const restored = new IssueRelay(f.config, {}, async () => assert.fail("completed legacy chunks must not resend"), { warn() {} });
+  t.after(() => restored.stop());
+  let ack;
+  restored.request = async (path, body) => {
+    if (path.endsWith("/ack")) { ack = body; throw new Error("ack failed"); }
+    return { deliveries: [item] };
+  };
+  await restored.poll();
+  assert.deepEqual(ack.message_ids, ids);
+  assert.equal(ack.message_id, ids.at(-1));
+  assert.deepEqual(restored.sentParts.delivery, checkpoint);
+});
+
+test("oversized fresh link never sends or acknowledges a reply that cannot fit its footer", async t => {
+  const f = fixture(t);
+  f.config.multica.issueWebUrl = "https://entry.example.test/" + "path".repeat(500);
+  const item = { id: "delivery", content: "正文", binding, conversation: { kind: "private", id: "alice" } };
+  let acks = 0;
+  f.bridge.issueRelay.request = async path => {
+    if (path.endsWith("/ack")) { acks++; return {}; }
+    return { deliveries: [item] };
+  };
+  await f.bridge.issueRelay.poll();
+  assert.deepEqual(f.sent, []); assert.equal(acks, 0);
+  assert.equal(f.bridge.issueRelay.sentParts.delivery.next, 0);
+});
+
 test("UTF-8 chunks reconstruct original content without splitting surrogate pairs", () => {
   const text = "# 标题\n🙂𝌆日本語\n".repeat(300);
   const parts = splitMessage(text);
@@ -186,7 +275,7 @@ test("UTF-8 chunks reconstruct original content without splitting surrogate pair
   assert.ok(parts.every(part => Buffer.byteLength(part) <= 1800 && !part.includes("�")));
 });
 
-test("private SDK msgkey is retained for quote routing, including every output chunk", async t => {
+test("private SDK msgkey is retained for quote routing of the single summary", async t => {
   const f = fixture(t), acknowledgements = [];
   const item = { id: "delivery", content: "中文🙂".repeat(500), conversation: { kind: "private", id: "alice" }, binding };
   const ids = ["1836339350307196087", "1836339350307196088", "1836339350307196089", "1836339350307196090"];
@@ -197,7 +286,7 @@ test("private SDK msgkey is retained for quote routing, including every output c
     return { deliveries: [item] };
   };
   await f.bridge.issueRelay.poll();
-  assert.ok(next > 1);
+  assert.equal(next, 1);
   assert.deepEqual(acknowledgements[0].message_ids, ids.slice(0, next));
   assert.equal(acknowledgements[0].message_id, ids[next - 1]);
 });

@@ -381,13 +381,13 @@ test("both present members send as themselves even with the same physical group 
   assert.ok(f.state.sent.every(s => !s.content.includes("队长代发")));
 });
 
-test("every long part has its own task number and footer, with stable shared retry checkpoints", async t => {
+test("one long summary has its task number and precise footer, with a stable shared retry checkpoint", async t => {
   const f = fixture(t); const content = "中文🙂原文".repeat(500);
-  const item = f.delivery(2, D, content); f.state.failAck = true;
+  const item = f.delivery(2, D, content); item.comment_id = "comment-2"; f.state.failAck = true;
   const relay = f.make(); await relay.poll(); const firstCount = f.state.sent.length;
-  assert.ok(firstCount > 2); assert.equal(item.content, content);
+  assert.equal(firstCount, 1); assert.equal(item.content, content);
   assert.ok(f.state.sent.every(s => s.content.startsWith("**[任务模式] INFE-2**\n\n【D · 队长代发】") &&
-    s.content.endsWith("**[完整任务对话](https://team.example.invalid/team/issues/INFE-2)**") && Buffer.byteLength(s.content) < 2000));
+    s.content.endsWith("**[完整对话链接](https://team.example.invalid/team/issues/INFE-2#comment-comment-2)**") && Buffer.byteLength(s.content) <= 1800));
   f.state.failAck = false; await relay.poll();
   assert.equal(f.state.sent.length, firstCount); assert.equal(f.state.acks[0].message_ids.length, firstCount);
   assert.equal(f.groups.deliveries[item.id].acked, true);

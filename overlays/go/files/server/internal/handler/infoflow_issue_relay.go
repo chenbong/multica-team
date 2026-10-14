@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -972,7 +971,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				infoFlowError(w, 409, "unknown or stale reply")
 				return
 			}
-			mention := fmt.Sprintf("[@Agent](mention://agent/%s)", req.AgentID)
+			mention := infoFlowNamedMention("agent", uuidToString(agent.ID), agent.Name)
 			// Preserve the issue's squad-leader dispatch semantics. Direct
 			// mentions of other members and single-agent assignments stay agent
 			// invocations. The issue is already locked above; lock the squad too
@@ -984,7 +983,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if squadID.Valid {
-				mention = fmt.Sprintf("[@Squad](mention://squad/%s)", uuidToString(squadID))
+				mention = infoFlowNamedMention("squad", uuidToString(squadID), agent.Name)
 			}
 			body := map[string]any{"content": mention + "\n\n" + content, "attachment_ids": attachmentIDs}
 			// A concurrent NEW grant must not change the already-returned

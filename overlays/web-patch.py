@@ -375,11 +375,18 @@ CHANGES = {
     SIDEBAR: [
         (
             'import { JoinDiscordCard } from "./join-discord-card";\n',
-            '',
+            'import { SidebarShortcutLinks } from "./sidebar-shortcut-links";\n',
         ),
         (
             SIDEBAR_DRAFT_DOT,
             SIDEBAR_DRAFT_DOT + "\n\n" + SIDEBAR_MOBILE_CONTROL,
+        ),
+        (
+            '          <SidebarMenu className="gap-0.5">\n            {utilityNav.map((item) => {',
+            '          <SidebarMenu className="gap-0.5">\n            <SidebarShortcutLinks '
+            'modelTraceUrl=' + '{' + json.dumps(os.environ.get("MULTICA_ONEAPI_TRACE_URL", "")) + '} '
+            'quickstartUrl=' + '{' + json.dumps(os.environ.get("MULTICA_QUICKSTART_URL", "")) + '} '
+            'className={NAV_ITEM_CLASS_NAME} />\n            {utilityNav.map((item) => {',
         ),
         (
             '          {/* Discord fills the strip while visible; once dismissed, help\n'
@@ -390,6 +397,27 @@ CHANGES = {
             '          <div className="flex min-w-0 items-center gap-1">\n'
             '            <MobileControlLink />\n',
         ),
+    ],
+    "apps/web/app/layout.tsx": [
+        (
+            '  variable: "--font-mono",\n  fallback:',
+            '  variable: "--font-mono",\n  // A proportional synthetic fallback must never replace code fonts.\n  adjustFontFallback: false,\n  fallback:',
+        ),
+    ],
+    "packages/views/locales/en/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI model quality probe", "quickstart_wishlist": "Quick start & wishlist" },\n'),
+    ],
+    "packages/views/locales/zh-Hans/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI 降智探测", "quickstart_wishlist": "快速上手 & 许愿板" },\n'),
+    ],
+    "packages/views/locales/ja/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI モデル品質チェック", "quickstart_wishlist": "クイックスタートと要望" },\n'),
+    ],
+    "packages/views/locales/ko/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI 모델 품질 검사", "quickstart_wishlist": "빠른 시작 및 요청" },\n'),
+    ],
+    "packages/views/locales/fr/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "Qualité des modèles oneAPI", "quickstart_wishlist": "Démarrage rapide et souhaits" },\n'),
     ],
     PROXY: [
         (

@@ -3,8 +3,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
 import { ChatRelay, issueRequest } from "./chat.js";
-import { IssueRelay, splitMessage } from "./issue-relay.js";
-import { withReplyMode } from "./reply-format.js";
+import { IssueRelay } from "./issue-relay.js";
+import { formatReply, replyUrl } from "./reply-format.js";
 
 const HELP = [
   "**Multica 机器人**",
@@ -42,8 +42,8 @@ export class Bridge {
     this.state = this.#loadState();
     this.inboundQueues = new Map();
     this.chat = new ChatRelay(config, this.multica,
-      async (conversation, user, content) => {
-        for (const part of splitMessage(content)) await this.sender(conversation, withReplyMode(part, "chat"), {});
+      async (conversation, user, content, metadata = {}) => {
+        await this.sender(conversation, formatReply(content, { mode: "chat", url: replyUrl(this.config.multica, metadata) }), {});
       },
       (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger);
     this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
@@ -159,9 +159,10 @@ export class Bridge {
     }
   }
 
-  async reply(conversation, user, content, mode = "chat", strict = false) {
+  async reply(conversation, user, content, mode = "chat", strict = false, metadata = {}) {
     try {
-      for (const part of splitMessage(content)) await this.sender(conversation, withReplyMode(part, mode), {});
+      await this.sender(conversation, formatReply(content, { mode, identifier: metadata.binding?.identifier,
+        url: replyUrl(this.config.multica, metadata) }), {});
     } catch (error) {
       this.logger.error(`sending to ${conversation.kind}:${conversation.id} failed: ${error.message}`);
       if (strict) throw error;
@@ -247,7 +248,7 @@ export class Bridge {
     }
     const issue = await this.multica.getIssue(reference || last.id);
     const run = latestRun(await this.multica.runs(issue.id));
-    await this.reply(conversation, user, `${issue.identifier} ${issue.title}\n执行状态：${run?.status || "尚无执行记录"}\n${this.multica.issueUrl(issue)}`);
+    await this.reply(conversation, user, `${issue.identifier} ${issue.title}\n执行状态：${run?.status || "尚无执行记录"}`, "issue", false, { binding: issue });
   }
 
   async #dispatch(conversation, user, body, images = []) {
@@ -256,8 +257,8 @@ export class Bridge {
       await this.reply(
         conversation,
         user,
-        `同样的内容一分钟内已经派过任务 **${repeat.identifier}**，这次没有重复派单。确实想再跑一遍就稍等一会儿再发，或者换个说法。\n${repeat.url}`,
-        "issue",
+        `同样的内容一分钟内已经派过任务 **${repeat.identifier}**，这次没有重复派单。确实想再跑一遍就稍等一会儿再发，或者换个说法。`,
+        "issue", false, { binding: { identifier: repeat.identifier } },
       );
       return;
     }
@@ -282,20 +283,20 @@ export class Bridge {
       lastIssue: { id: issue.id, identifier: issue.identifier, url },
       lastRequest: { body, identifier: issue.identifier, url, at: Date.now() },
     });
-    await this.reply(conversation, user, `已建任务 **${issue.identifier}**，派给「${assignee}」，跑完发回这里。\n${url}`, "issue");
+    await this.reply(conversation, user, `已建任务 **${issue.identifier}**，派给「${assignee}」，跑完发回这里。`, "issue", false, { binding: issue });
 
     const outcome = await this.#waitForRun(issue.id);
     if (outcome.kind === "timeout") {
       await this.reply(
         conversation,
         user,
-        `${issue.identifier} 还在跑（已经 ${Math.round(this.config.pollTimeoutMs / 60000)} 分钟），先不等了，用 \`/status\` 查进度。\n${url}`,
-        "issue",
+        `${issue.identifier} 还在跑（已经 ${Math.round(this.config.pollTimeoutMs / 60000)} 分钟），先不等了，用 \`/status\` 查进度。`,
+        "issue", false, { binding: issue },
       );
       return;
     }
     if (outcome.kind === "failed") {
-      await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}\n${url}`, "issue");
+      await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}`, "issue", false, { binding: issue });
       return;
     }
     // The review watcher sends the binder a single cross-entry notification.
@@ -306,7 +307,7 @@ export class Bridge {
         if ((current.status_category || current.status) === "in_review" && me.email?.split("@")[0] === user) return;
       } catch (error) { this.logger.warn("review handoff check failed: " + error.message); }
     }
-    await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}\n\n${url}`, "issue");
+    await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}`, "issue", false, { binding: issue, commentId: outcome.commentId });
   }
 
   // Polls until the newest run reaches a terminal status. The daemon reports the
@@ -323,12 +324,11 @@ export class Bridge {
         const comments = await this.multica.comments(issueId);
         const fromRun = comments
           .filter((comment) => comment.author_type === "agent" && comment.source_task_id === run.id)
-          .map((comment) => comment.content)
-          .filter(Boolean);
-        const detail = fromRun.length > 0 ? fromRun.join("\n\n") : (run.result?.output ?? "（agent 没有留下文字结果）");
-        return { kind: "completed", detail: truncate(detail, 3500) };
+          .filter((comment) => comment.content);
+        const detail = fromRun.length > 0 ? fromRun.map(comment => comment.content).join("\n\n") : (run.result?.output ?? "（agent 没有留下文字结果）");
+        return { kind: "completed", detail, commentId: fromRun.at(-1)?.id };
       }
-      return { kind: "failed", detail: truncate(run.error ?? run.result?.output ?? run.status, 1500) };
+      return { kind: "failed", detail: run.error ?? run.result?.output ?? run.status };
     }
     return { kind: "timeout" };
   }

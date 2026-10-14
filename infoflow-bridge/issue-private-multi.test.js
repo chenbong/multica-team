@@ -123,7 +123,7 @@ test("private bind adds one association instead of replacing the current task", 
   assert.deepEqual(f.state.bindings.map(entry => entry.binding.identifier), ["INFE-1", "INFE-2", "INFE-3"]);
   assert.equal(f.state.comments.length, 0); assert.equal(f.state.chat.length, 0);
   assert.match(f.state.sent[0].content, /^\*\*\[任务模式\] INFE-3\*\*\n\n已添加任务绑定/);
-  assert.match(f.state.sent[0].content, /完整任务对话\]\(https:\/\/team.example.invalid\/team\/issues\/INFE-3\)\*\*/);
+  assert.match(f.state.sent[0].content, /完整对话链接\]\(https:\/\/team.example.invalid\/team\/issues\/INFE-3\)\*\*/);
 });
 
 for (const command of ["binding", "unbind"]) test(`private /${command} selects explicitly and asks on multiple candidates`, async t => {
