@@ -25,17 +25,17 @@ const foreignStyle = ".border-input{border:none;width:28px;height:100%;padding:0
         const context = await browser.newContext({ viewport: { width, height: 812 }, colorScheme });
         try {
           const page = await context.newPage();
-          await context.addCookies([{ name: "locale", value: "zh-Hans", url: origin.origin }]);
+          await context.addCookies([{ name: "multica-locale", value: "zh-Hans", url: origin.origin }]);
           const errors = [], writes = [];
           page.on("pageerror", error => errors.push(error.message));
           await page.route("**/*", route => {
             const request = route.request(), url = new URL(request.url());
+            if (url.pathname.endsWith("/auth/send-code") && request.method() === "POST") {
+              assert.equal(JSON.parse(request.postData()).email, "fixture@baidu.com");
+              return route.fulfill({ status: 200, contentType: "application/json", body: '{}' });
+            }
             if (url.origin !== origin.origin) return route.abort();
             if (url.pathname.startsWith("/api/")) {
-              if (url.pathname === "/api/auth/send-code" && request.method() === "POST") {
-                assert.equal(JSON.parse(request.postData()).email, "fixture@baidu.com");
-                return route.fulfill({ status: 200, contentType: "application/json", body: '{}' });
-              }
               if (request.method() !== "GET") {
                 writes.push(request.method() + " " + url.pathname);
                 return route.abort();
@@ -67,7 +67,8 @@ const foreignStyle = ".border-input{border:none;width:28px;height:100%;padding:0
           assert((await page.locator("body").innerText()).includes("baidu"), "Missing company email guidance");
           await email.fill("fixture@baidu.com");
           await page.locator('button[type="submit"]').click();
-          await page.locator('[data-slot="input-otp-slot"]').first().waitFor({ state: "visible" });
+          try { await page.locator('[data-slot="input-otp-slot"]').first().waitFor({ state: "visible", timeout: 5000 }); }
+          catch (error) { console.error(JSON.stringify({ fixturePage: await page.locator("body").innerText(), errors, writes })); throw error; }
           assert.equal(await page.locator('[data-slot="input-otp-slot"]').count(), 6);
           await page.locator('a[href^="infoflow://"]').waitFor({ state: "visible" });
           const slots = await page.locator('[data-slot="input-otp-slot"]').evaluateAll(elements => elements.map(element => ({
