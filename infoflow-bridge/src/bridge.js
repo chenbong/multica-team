@@ -67,7 +67,7 @@ export class Bridge {
     return pending.finally(() => { if (this.inboundQueues.get(key) === pending) this.inboundQueues.delete(key); });
   }
 
-  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null, notifyUsers: recipients = [] }) {
+  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null, notifyUsers: recipients = [], displayText = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
@@ -92,7 +92,7 @@ export class Bridge {
     // The relay has persistent, server-side deduplication and authenticates the
     // real sender before an owner-profile command or Chat fallback. A receipt
     // only confirms the SDK message was received, never grants invocation.
-    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt, notifyUsers: recipients })) return;
+    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt, notifyUsers: recipients, displayText })) return;
 
     if (!this.#allowed(user, conversation)) {
       this.logger.warn(`rejected ${conversation.kind} message from ${user}: not in allowUsers`);
@@ -114,7 +114,7 @@ export class Bridge {
           complete();
           return;
         }
-        await this.#dispatch(conversation, user, issueBody, inboundImages, recipients);
+        await this.#dispatch(conversation, user, (displayText && issueRequest(displayText)) || displayText || issueBody, inboundImages, recipients);
         complete();
         return;
       }
@@ -141,7 +141,7 @@ export class Bridge {
         },
         afterSubmit: complete,
       };
-      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff, recipients);
+      await this.chat.send(conversation, user, displayText || body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff, recipients);
       complete();
     } catch (error) {
       if (handoff) throw error;

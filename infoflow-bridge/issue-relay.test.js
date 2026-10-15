@@ -46,6 +46,89 @@ test("group reply audiences are persisted with the original input and excluded f
   assert.equal(f.requests.find(x => x.path === "issue-relay").body.notify_users, undefined);
 });
 
+test("inline human labels reach comments while task selection uses canonical text and a pinned issue", async t => {
+  const f = fixture(t);
+  await f.send("请处理，然后通知", { displayText: "请处理，然后通知 @TEST-999", notifyUsers: ["bob"] });
+  assert.equal(f.requests[0].body.content, "请处理，然后通知");
+  assert.equal(f.requests[1].body.content, "请处理，然后通知 @TEST-999");
+  assert.equal(f.requests[1].body.operation, "message");
+  assert.equal(f.requests[1].body.issue_ref, binding.issue_id);
+  assert.equal(f.requests[1].body.expected_binding_id, binding.binding_id);
+  assert.deepEqual(f.requests[1].body.notify_users, ["alice", "bob"]);
+});
+
+test("human labels do not alter help or status commands or become notification identities", async t => {
+  const f = fixture(t);
+  for (const command of ["help", "status"]) {
+    await f.send("/" + command, { messageId: command, displayText: "/" + command + " @TEST-999" });
+    const request = f.requests.at(-1).body;
+    assert.equal(request.operation, "binding");
+    assert.equal(request.command, command);
+    assert.equal(request.issue_ref, undefined);
+    assert.equal(request.content, "");
+    assert.equal(request.notify_users, undefined);
+  }
+});
+
+test("human display labels cannot resolve an otherwise ambiguous task selection", async t => {
+  const f = fixture(t);
+  f.bridge.issueRelay.request = async (path, body) => {
+    f.requests.push({ path, body });
+    assert.equal(body.operation, "binding");
+    assert.equal(body.content, "继续");
+    return { handled: true, silent: false, notice: "请指定任务编号" };
+  };
+  await f.send("继续", { displayText: "继续 @TEST-2" });
+  assert.equal(f.requests.length, 1);
+  assert.match(f.sent[0].content, /请指定任务编号/);
+});
+
+test("new issue instructions keep inline mentions after stripping the actual creation command", async t => {
+  const f = fixture(t);
+  await f.send("/issue 检查，然后通知", { displayText: "/issue 检查，然后通知 @小明" });
+  assert.equal(f.requests.at(-1).body.operation, "create");
+  assert.equal(f.requests.at(-1).body.content, "检查，然后通知 @小明");
+});
+
+for (const legacy of [false, true]) test(`display text survives durable retry without rewriting ${legacy ? "legacy" : "new"} prepared content`, async t => {
+  const f = fixture(t);
+  const calls = [];
+  let failed = false;
+  f.bridge.issueRelay.request = async (_path, body) => {
+    calls.push(structuredClone(body));
+    if (body.operation === "message" && !failed) { failed = true; throw new Error("lost response"); }
+    return { handled: true, silent: false, can_comment: true, binding };
+  };
+  await f.send("通知", { displayText: "通知 @小明" });
+  const [id] = Object.keys(f.bridge.issueRelay.inbox);
+  const record = f.bridge.issueRelay.inbox[id];
+  assert.equal(record.input.displayText, "通知 @小明");
+  assert.equal(JSON.parse(readFileSync(f.bridge.issueRelay.inboxPath))[id].input.displayText, "通知 @小明");
+  if (legacy) {
+    record.preparedBody.content = "通知";
+    delete record.preparedBody.issue_ref;
+    f.bridge.issueRelay.saveInbox();
+  }
+  const prepared = structuredClone(record.preparedBody);
+  f.bridge.stop();
+  const restored = new IssueRelay(f.config, {}, async () => {}, { warn() {} });
+  t.after(() => restored.stop());
+  restored.request = f.bridge.issueRelay.request;
+  await restored.handle({ ...record.input, displayText: "不得覆盖原请求 @other" });
+  assert.deepEqual(calls.at(-1), prepared);
+  assert.deepEqual(restored.inbox, {});
+});
+
+test("unbound Chat fallback also retains inline human labels without changing its routing input", async t => {
+  const f = fixture(t), chat = [];
+  f.bridge.issueRelay.request = async () => ({ handled: false, silent: false });
+  f.bridge.chat.send = async (...args) => chat.push(args);
+  await f.send("请通知", { displayText: "请通知 @小明", notifyUsers: ["bob"] });
+  assert.equal(chat.length, 1);
+  assert.equal(chat[0][2], "请通知 @小明");
+  assert.deepEqual(chat[0][8], ["alice", "bob"]);
+});
+
 test("issue Markdown and AT reminder checkpoint independently across restart and failed ACK", async t => {
   const f = fixture(t), calls = [];
   const item = { id: "mention-delivery", content: "**Reply**\n\n- Original content", comment_id: "c1", conversation: { kind: "group", id: "42" }, binding, notify_users: ["alice", "bob"] };

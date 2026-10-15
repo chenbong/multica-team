@@ -205,6 +205,7 @@ export class IssueRelay {
         return true;
       }
       const input = { conversation: message.conversation, user: message.user, text: message.text, messageId: String(message.messageId),
+        ...(typeof message.displayText === "string" && message.displayText ? { displayText: message.displayText } : {}),
         replyToMessageId: message.replyToMessageId || null, images: message.images || [], context: message.context || null,
         ...(message.receipt ? { receipt: message.receipt } : {}),
         ...(message.conversation.kind === "group" ? { notifyUsers: notifyUsers(message.conversation, message.user, message.notifyUsers || []) } : {}) };
@@ -345,7 +346,7 @@ export class IssueRelay {
     renameSync(this.inboxPath + ".tmp", this.inboxPath);
   }
 
-  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [], notifyUsers: recipients = [] }, record = {}, blockedBindings = new Set()) {
+  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [], notifyUsers: recipients = [], displayText = null }, record = {}, blockedBindings = new Set()) {
       const notificationUsers = notifyUsers(conversation, user, recipients);
       const sendNotice = result => this.sendNotice(conversation, result);
       // Missing/rounded identifiers cannot provide safe retry deduplication.
@@ -361,6 +362,10 @@ export class IssueRelay {
       }
       const scope = await this.scope();
       const parsed = relayOperation(text);
+      const shown = typeof displayText === "string" && displayText ? relayOperation(displayText) : null;
+      const content = shown && ["message", "create"].includes(parsed.operation)
+        ? (shown.operation === parsed.operation && shown.issue_ref === parsed.issue_ref ? shown.content : displayText)
+        : parsed.content;
       const unbind = parsed.operation === "unbind";
       const versionedOperation = parsed.operation === "message" || unbind;
       const wasPrepared = Boolean(record.preparedBody);
@@ -370,7 +375,7 @@ export class IssueRelay {
         ...(parsed.command ? { command: parsed.command } : parsed.explicitBinding && parsed.operation === "binding" ? { command: "binding" } : {}),
         ...(parsed.statusPage ? { status_page: parsed.statusPage } : {}),
         ...(parsed.issue_ref ? { issue_ref: parsed.issue_ref } : {}),
-        content: parsed.content,
+        content,
         ...(notificationUsers.length > 1 ? { notify_users: notificationUsers } : {}),
         ...(replyToMessageId ? { reply_to_message_id: String(replyToMessageId) } : {}),
       };
@@ -389,7 +394,9 @@ export class IssueRelay {
             (this.groups && conversation.kind === "group" && parsed.operation === "binding" && !parsed.command)))) {
           // Routing is server-authoritative: preserve the text/task numbers and
           // exact quoted message ID, including when checking a pinned retry.
-          preflight = await this.request("issue-relay", { ...body, operation: "binding", ...(unbind ? { command: "unbind" } : {}) });
+          preflight = await this.request("issue-relay", { ...body,
+            ...(!wasPrepared && displayText && parsed.operation === "message" ? { content: parsed.content } : {}),
+            operation: "binding", ...(unbind ? { command: "unbind" } : {}) });
           this.validateDecision(preflight);
           if (body.expected_binding_id && (preflight.binding?.binding_id !== body.expected_binding_id ||
               preflight.binding?.generation !== body.expected_generation)) {
@@ -415,6 +422,13 @@ export class IssueRelay {
             if (!preflight.binding.binding_id || !preflight.binding.generation) throw new Error("binding version is missing from preflight");
             body.expected_binding_id = preflight.binding.binding_id;
             body.expected_generation = preflight.binding.generation;
+            if (displayText && parsed.operation === "message" && !wasPrepared) {
+              // Human labels can resemble task numbers. Select on canonical
+              // text, then pin the server-selected issue before adding labels.
+              // Never retrofit display text into a previously prepared request.
+              if (!preflight.binding.issue_id) throw new Error("selected issue is missing from preflight");
+              body.issue_ref = preflight.binding.issue_id;
+            }
             // Freeze the first observed destination before reconciliation,
             // notices or media work can fail and leave this input pending.
             record.preparedBody = structuredClone(body);

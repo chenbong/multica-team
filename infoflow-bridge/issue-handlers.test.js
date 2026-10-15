@@ -47,6 +47,23 @@ test("private entry uses account identifier, not numeric uid, and keeps independ
   assert.equal(f.received[0].text, "/bind TEST-1");
 });
 
+test("group entry keeps canonical routing text separate from inline human display and notification IDs", async () => {
+  const f = fixture();
+  await f.handlers.get("group.mixed")({ data: { raw: {
+    eventtype: "MESSAGE_RECEIVE", groupid: "42", message: {
+      header: { fromuserid: "alice", messageid: "123" }, body: [
+        { type: "AT", robotid: "12", name: "fixture" },
+        { type: "TEXT", content: "然后通知" },
+        { type: "AT", userid: "bob", name: "小明" },
+      ],
+    },
+  } } });
+  const input = f.received[0];
+  assert.equal(input.text, "然后通知");
+  assert.equal(input.displayText, "然后通知 @小明");
+  assert.deepEqual(input.notifyUsers, ["alice", "bob"]);
+});
+
 for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
   test(`${event} forwards the actual private Reply ID without parsing the preview as a selector`, async () => {
     const f = fixture();

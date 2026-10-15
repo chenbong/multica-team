@@ -459,6 +459,7 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
       const mentionsRobot = blocks.some((block) => String(block?.type ?? "").toUpperCase() === "AT" && (block.robotid !== undefined || block.name));
       const parsed = parseConversationBlocks(blocks);
       const text = parsed.text || (parsed.images.length > 0 ? "（图片消息，详见附件）" : "");
+      const displayText = parseConversationBlocks(blocks, { preserveHumanMentions: true }).text || text;
 
       if (!groupId || !user || text === "" || !mentionsRobot) return;
       logger.log(`[${robot.name}] <- ${user} (${event} group ${groupId}): ${text.slice(0, 200)}`);
@@ -466,6 +467,7 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
         conversation: { kind: "group", id: groupId },
         user,
         text,
+        ...(displayText !== text ? { displayText } : {}),
         images: parsed.images,
         messageId: messageIdString(header.messageid ?? raw.messageid),
         replyToMessageId: parsed.replyToMessageId,

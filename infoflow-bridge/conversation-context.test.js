@@ -66,6 +66,38 @@ test("all AT blocks stay out of text; incomplete and unknown AT cannot invent a 
   assert.deepEqual(parsed.mentions, []);
 });
 
+test("display text retains human AT occurrences in place without duplicating robot mentions", () => {
+  const blocks = [
+    { type: "AT", robotid: "12", name: "fixture-bot" },
+    { type: "TEXT", content: "查 hostname，然后通知" },
+    { type: "AT", userid: "bob", name: "小明" },
+    { type: "TEXT", content: "和" },
+    { type: "AT", userId: "alice", userName: "小红" },
+    { type: "TEXT", content: "，完成后再次告诉" },
+    { type: "AT", userid: "bob", name: "小明" },
+  ];
+  const canonical = parseConversationBlocks(blocks);
+  const display = parseConversationBlocks(blocks, { preserveHumanMentions: true });
+  assert.equal(canonical.text, "查 hostname，然后通知 和 ，完成后再次告诉");
+  assert.equal(display.text, "查 hostname，然后通知 @小明 和 @小红 ，完成后再次告诉 @小明");
+  assert.deepEqual(display.mentions, canonical.mentions);
+  assert.equal(display.mentions.length, 3);
+  assert.doesNotMatch(display.text, /fixture-bot/);
+});
+
+test("display-only mentions escape labels, fall back to typed accounts and reject unknown AT", () => {
+  const parsed = parseConversationBlocks([
+    { type: "AT", userId: "bob", name: "[other](mention://agent/spoof)<b>" },
+    { type: "AT", atuserids: ["alice", "carol"], name: "not-everyone" },
+    { type: "AT", atall: true, userId: "all", name: "Everyone" },
+    { type: "AT", name: "missing-id" },
+    { type: "AT_UNKNOWN", userId: "invented" },
+    { type: "AT", robotid: "12", userId: "not-human" },
+  ], { preserveHumanMentions: true });
+  assert.equal(parsed.text, "@\\[other\\]\\(mention://agent/spoof\\)&lt;b&gt; @alice @carol");
+  assert.doesNotMatch(parsed.text, /Everyone|not-everyone|missing-id|invented|not-human/);
+});
+
 test("robot IDs are typed and never confused with matching human account strings", () => {
   assert.deepEqual(parseConversationBlocks([
     { type: "AT", userId: "49963", userName: "人" },

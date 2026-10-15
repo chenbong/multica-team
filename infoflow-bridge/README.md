@@ -12,6 +12,13 @@ of the original sender and structured human mentions in that input, normalized
 and deduplicated. Private replies are unchanged. Help, status, binding confirmations
 and receipt fallbacks do not add another AT notification.
 
+Original structured human mentions remain readable as `@name` at their original
+positions in synced user comments and Chat instructions. Labels are escaped text,
+not invocation links or notification identities. Commands and task selection use
+the canonical input without those display labels; the selected issue is then
+pinned before adding them to comment content. Existing prepared requests are not
+rewritten, and robot mentions remain handled by the normal agent prefix.
+
 Notification metadata stays separate from prompts and issue reply bodies.
 Apply migration `521_infoflow_issue_notify_users.up.sql` before enabling the
 updated API and Bridge together. Old receipts and prepared requests remain
