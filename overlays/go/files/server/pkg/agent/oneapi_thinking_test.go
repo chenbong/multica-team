@@ -42,6 +42,8 @@ func TestOneAPIThinkingExecutionGate(t *testing.T) {
 		{"claude", "/fixture/shims/ducc", "Opus 5.5", "max", true},
 		{"codex", "ducx", "new-oneapi-model", "high", true},
 		{"claude", "ducc", "new-oneapi-model", "xhigh", true},
+		{"claude", "ducc", "DD", "high", true},
+		{"codex", "ducx", "DD", "max", true},
 		{"codex", "codex", "gpt-5.6-luna", "max", false},
 		{"claude", "claude", "Opus 5.5", "max", false},
 		{"codex", "not-ducx", "new-oneapi-model", "max", false},

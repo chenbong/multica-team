@@ -39,27 +39,19 @@ func oneAPITestCatalog(t *testing.T, handler http.HandlerFunc) *OneAPIModelCatal
 
 const oneAPIFixture = `{"data":[{"id":"messages-model"},{"id":"responses-model"},{"id":"dual-model"},{"id":"unknown-model"}]}`
 
-func TestOneAPICatalogFilter(t *testing.T) {
+func TestOneAPICatalogShowsEveryReturnedModel(t *testing.T) {
 	models := []oneAPIModel{{ID: "a"}, {ID: "b"}, {ID: "both"}, {ID: "unknown"}, {ID: "a"}}
-	policy := oneAPIProtocols{Messages: []string{"a", "both", "not-in-api"}, Responses: []string{"b", "both"}}
-	for protocol, want := range map[string][]string{"messages": {"a", "both"}, "responses": {"b", "both"}} {
-		got := filterOneAPIModels(models, policy, protocol)
+	for _, models := range [][]oneAPIModel{models, {{ID: "a", Endpoints: []string{"openai"}}, {ID: "b", Endpoints: []string{}}, {ID: "both", Endpoints: []string{"anthropic"}}, {ID: "unknown"}}} {
+		got := listOneAPIModels(models)
 		var ids []string
 		for _, m := range got {
 			ids = append(ids, m.ID)
-			if m.Default || m.Thinking != nil || m.Label != m.ID {
+			if m.Default || m.Thinking != nil || m.Label != m.ID || m.Provider != "OneAPI" {
 				t.Fatal("invented a model capability")
 			}
 		}
-		if !reflect.DeepEqual(ids, want) {
-			t.Fatalf("%s: %v", protocol, ids)
-		}
-	}
-	metadata := []oneAPIModel{{ID: "a", Endpoints: []string{"openai"}}, {ID: "b", Endpoints: []string{}}, {ID: "new", Endpoints: []string{"anthropic", "openai-response"}}}
-	for _, protocol := range []string{"messages", "responses"} {
-		got := filterOneAPIModels(metadata, policy, protocol)
-		if len(got) != 1 || got[0].ID != "new" {
-			t.Fatal("Chat-only or explicitly incompatible model included")
+		if !reflect.DeepEqual(ids, []string{"a", "b", "both", "unknown"}) {
+			t.Fatalf("models were filtered: %v", ids)
 		}
 	}
 }
@@ -106,15 +98,15 @@ func TestOneAPICatalogCacheRefreshAndFileRotation(t *testing.T) {
 	if calls.Load() != 4 || lastToken.Load() != "Bearer rotated-fixture-token" {
 		t.Fatal("token rotation reused the previous credential/catalog")
 	}
-	if err := os.WriteFile(c.protocolsFile, []byte(`{"messages":["messages-model"],"responses":[]}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(filepath.Dir(c.tokenFile), "protocols.json"), []byte(`{invalid-legacy-policy`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	got := get("messages", false)
-	if len(got.Models) != 1 || got.Models[0].ID != "messages-model" || calls.Load() != 4 {
-		t.Fatal("policy updates need a restart")
+	if len(got.Models) != 4 || got.Models[0].ID != "dual-model" || calls.Load() != 4 {
+		t.Fatal("obsolete protocol policy filtered discovery")
 	}
 	got.Models[0].ID = "changed-by-caller"
-	if get("messages", false).Models[0].ID != "messages-model" {
+	if get("messages", false).Models[0].ID != "dual-model" {
 		t.Fatal("caller mutated cache")
 	}
 }
@@ -170,7 +162,7 @@ func TestOneAPICatalogConfigurationSafety(t *testing.T) {
 	if NewOneAPIModelCatalog("", "", "", "") != nil {
 		t.Fatal("empty configuration must preserve upstream behavior")
 	}
-	for _, name := range []string{"http", "userinfo", "query", "token permissions", "token symlink", "empty token", "token newline", "invalid policy", "invalid protocol"} {
+	for _, name := range []string{"http", "userinfo", "query", "token permissions", "token symlink", "empty token", "token newline", "invalid protocol"} {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
 			c := oneAPITestCatalog(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); fmt.Fprint(w, oneAPIFixture) })
@@ -200,10 +192,6 @@ func TestOneAPICatalogConfigurationSafety(t *testing.T) {
 				if err := os.WriteFile(c.tokenFile, []byte("fixture\nheader"), 0600); err != nil {
 					t.Fatal(err)
 				}
-			case "invalid policy":
-				if err := os.WriteFile(c.protocolsFile, []byte("{bad"), 0600); err != nil {
-					t.Fatal(err)
-				}
 			case "invalid protocol":
 				protocol = "openai-chat"
 			}
@@ -216,11 +204,11 @@ func TestOneAPICatalogConfigurationSafety(t *testing.T) {
 
 func TestOneAPICatalogRejectsUntrustedTLSAndInvalidCA(t *testing.T) {
 	c := oneAPITestCatalog(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, oneAPIFixture) })
-	untrusted := NewOneAPIModelCatalog(c.endpoint, c.tokenFile, c.protocolsFile, "")
+	untrusted := NewOneAPIModelCatalog(c.endpoint, c.tokenFile, "", "")
 	if _, err := untrusted.Models(context.Background(), "messages", false); err != errOneAPIFetch {
 		t.Fatal("untrusted certificate accepted")
 	}
-	invalid := NewOneAPIModelCatalog(c.endpoint, c.tokenFile, c.protocolsFile, c.tokenFile)
+	invalid := NewOneAPIModelCatalog(c.endpoint, c.tokenFile, "", c.tokenFile)
 	if _, err := invalid.Models(context.Background(), "messages", false); err != errOneAPIConfig {
 		t.Fatal("invalid CA file accepted")
 	}
@@ -251,7 +239,7 @@ func TestOneAPICatalogConcurrentRefresh(t *testing.T) {
 			defer wg.Done()
 			<-start
 			got, err := c.Models(context.Background(), "messages", true)
-			if err != nil || len(got.Models) != 2 {
+			if err != nil || len(got.Models) != 4 {
 				t.Error("concurrent refresh failed")
 			}
 		}()
