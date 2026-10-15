@@ -35,6 +35,65 @@ func sharedChatRequest(t *testing.T, user, session, method string, body any) *ht
 	return withURLParam(r, "sessionId", session)
 }
 
+func TestSharedChatBuilderCreatorOnly(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("test database unavailable")
+	}
+	ctx := context.Background()
+	peer := dbfx.User(t, "Builder peer", fmt.Sprintf("builder-%s@multica.test", util.UUIDToString(dbid.NewV7())))
+	dbfx.Member(t, testWorkspaceID, peer, "admin")
+	runtime := dbfx.Runtime(t, "Builder fake runtime", testutil.Cols{"visibility": "public"})
+	agent := dbfx.Agent(t, ".multica-agent-builder-test", runtime, testutil.Cols{
+		"kind": "system", "system_key": agentBuilderSystemKeyPrefix + util.UUIDToString(dbid.NewV7()),
+	})
+	session := dbfx.ChatSession(t, agent, testutil.Cols{"explicitly_created_at": testutil.Raw("now()")})
+	for name, handler := range map[string]http.HandlerFunc{
+		"detail": testHandler.GetChatSession, "messages": testHandler.ListChatMessages,
+		"page": testHandler.ListChatMessagesPage, "pending": testHandler.GetPendingChatTask,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for user, want := range map[string]int{testUserID: 200, peer: 403} {
+				w := httptest.NewRecorder()
+				handler(w, sharedChatRequest(t, user, session, "GET", nil))
+				if w.Code != want {
+					t.Fatalf("read for user %s: got %d want %d: %s", user, w.Code, want, w.Body.String())
+				}
+			}
+		})
+	}
+	if !testHandler.CanReadChatSession(ctx, testUserID, testWorkspaceID, session) ||
+		testHandler.CanReadChatSession(ctx, peer, testWorkspaceID, session) {
+		t.Fatal("builder realtime access must be creator-only")
+	}
+	w := httptest.NewRecorder()
+	testHandler.SendChatMessage(w, sharedChatRequest(t, peer, session, "POST", map[string]any{"content": "denied"}))
+	if w.Code != 403 {
+		t.Fatalf("peer send = %d: %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	testHandler.SendChatMessage(w, sharedChatRequest(t, testUserID, session, "POST", map[string]any{"content": "Create a test agent"}))
+	if w.Code != 201 {
+		t.Fatalf("creator send = %d: %s", w.Code, w.Body.String())
+	}
+	var sent SendChatMessageResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &sent); err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Cleanup(t, `DELETE FROM agent_task_queue WHERE id=$1`, sent.TaskID)
+	dbfx.Cleanup(t, `DELETE FROM chat_message WHERE task_id=$1`, sent.TaskID)
+	// A different system carrier must not gain access through the builder case.
+	dbfx.Exec(t, `UPDATE agent SET system_key='other-system-carrier' WHERE id=$1`, agent)
+	if testHandler.CanReadChatSession(ctx, testUserID, testWorkspaceID, session) {
+		t.Fatal("non-builder system carrier became readable")
+	}
+	dbfx.Exec(t, `UPDATE agent SET system_key=$2 WHERE id=$1`, agent, agentBuilderSystemKeyPrefix+"test")
+	dbfx.Exec(t, `UPDATE chat_session SET creator_id=$2 WHERE id=$1`, session, peer)
+	if testHandler.CanReadChatSession(ctx, testUserID, testWorkspaceID, session) ||
+		testHandler.CanReadChatSession(ctx, peer, testWorkspaceID, session) {
+		t.Fatal("builder requires both creator and agent owner")
+	}
+}
+
 func TestSharedChatListReadSendAndAttribution(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("test database unavailable")

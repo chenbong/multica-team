@@ -6,6 +6,7 @@ import { ChatRelay, issueRequest } from "./chat.js";
 import { IssueRelay } from "./issue-relay.js";
 import { formatReply, replyUrl } from "./reply-format.js";
 import { HELP } from "./commands.js";
+import { notifyUsers, deliverReply, notificationText } from "./reply-mentions.js";
 
 const MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024;
 const INBOUND_IMAGE_TIMEOUT_MS = 30_000;
@@ -28,7 +29,11 @@ export class Bridge {
     this.inboundQueues = new Map();
     this.chat = new ChatRelay(config, this.multica,
       async (conversation, user, content, metadata = {}) => {
-        await this.sender(conversation, formatReply(content, { mode: "chat", url: replyUrl(this.config.multica, metadata) }), {});
+        const recipients = metadata.replyProgress ? notifyUsers(conversation, user, metadata.notifyUsers || []) : [];
+        const url = replyUrl(this.config.multica, metadata);
+        await deliverReply(this.sender, conversation, formatReply(content, { mode: "chat", url }), recipients,
+          notificationText(url), metadata.replyProgress, metadata.saveProgress,
+          `[回复提醒]\n回复已更新，请查看上一条消息。${url ? `\n完整对话链接：${url}` : ""}`);
       },
       (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger);
     this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
@@ -62,7 +67,7 @@ export class Bridge {
     return pending.finally(() => { if (this.inboundQueues.get(key) === pending) this.inboundQueues.delete(key); });
   }
 
-  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null }) {
+  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null, notifyUsers: recipients = [], displayText = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
@@ -87,7 +92,7 @@ export class Bridge {
     // The relay has persistent, server-side deduplication and authenticates the
     // real sender before an owner-profile command or Chat fallback. A receipt
     // only confirms the SDK message was received, never grants invocation.
-    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt })) return;
+    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt, notifyUsers: recipients, displayText })) return;
 
     if (!this.#allowed(user, conversation)) {
       this.logger.warn(`rejected ${conversation.kind} message from ${user}: not in allowUsers`);
@@ -109,7 +114,7 @@ export class Bridge {
           complete();
           return;
         }
-        await this.#dispatch(conversation, user, issueBody, inboundImages);
+        await this.#dispatch(conversation, user, (displayText && issueRequest(displayText)) || displayText || issueBody, inboundImages, recipients);
         complete();
         return;
       }
@@ -136,7 +141,7 @@ export class Bridge {
         },
         afterSubmit: complete,
       };
-      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff);
+      await this.chat.send(conversation, user, displayText || body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff, recipients);
       complete();
     } catch (error) {
       if (handoff) throw error;
@@ -147,8 +152,9 @@ export class Bridge {
 
   async reply(conversation, user, content, mode = "chat", strict = false, metadata = {}) {
     try {
-      await this.sender(conversation, formatReply(content, { mode, identifier: metadata.binding?.identifier,
-        url: metadata.omitLink ? null : replyUrl(this.config.multica, metadata) }), {});
+      const url = metadata.omitLink ? null : replyUrl(this.config.multica, metadata);
+      await deliverReply(this.sender, conversation, formatReply(content, { mode, identifier: metadata.binding?.identifier, url }),
+        metadata.notifyUsers ? notifyUsers(conversation, user, metadata.notifyUsers) : [], notificationText(url, metadata.binding?.identifier));
     } catch (error) {
       this.logger.error(`sending to ${conversation.kind}:${conversation.id} failed: ${error.message}`);
       if (strict) throw error;
@@ -237,7 +243,7 @@ export class Bridge {
     await this.reply(conversation, user, `${issue.identifier} ${issue.title}\n执行状态：${run?.status || "尚无执行记录"}`, "issue", false, { binding: issue });
   }
 
-  async #dispatch(conversation, user, body, images = []) {
+  async #dispatch(conversation, user, body, images = [], recipients = []) {
     const repeat = this.#thread(conversation, user).lastRequest;
     if (repeat && repeat.body === body && Date.now() - repeat.at < Bridge.REPEAT_WINDOW_MS) {
       await this.reply(
@@ -282,10 +288,10 @@ export class Bridge {
       return;
     }
     if (outcome.kind === "failed") {
-      await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}`, "issue", false, { binding: issue });
+      await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}`, "issue", false, { binding: issue, notifyUsers: recipients });
       return;
     }
-    await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}`, "issue", false, { binding: issue, commentId: outcome.commentId });
+    await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}`, "issue", false, { binding: issue, commentId: outcome.commentId, notifyUsers: recipients });
   }
 
   // Polls until the newest run reaches a terminal status. The daemon reports the

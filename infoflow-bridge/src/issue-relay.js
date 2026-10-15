@@ -11,6 +11,7 @@ import { pollConversationNotices } from "./conversation-notices.js";
 import { pollRobotDirectory } from "./robot-directory.js";
 import { groupUsername } from "./issue-groups.js";
 import { formatCommandNotice } from "./commands.js";
+import { notifyUsers, notificationText, MAX_NOTIFY_USERS } from "./reply-mentions.js";
 
 const DEFERRED_BINDING = Symbol("deferred-binding");
 const RECEIPT_ATTEMPTED = Symbol("receipt-attempted");
@@ -204,8 +205,10 @@ export class IssueRelay {
         return true;
       }
       const input = { conversation: message.conversation, user: message.user, text: message.text, messageId: String(message.messageId),
+        ...(typeof message.displayText === "string" && message.displayText ? { displayText: message.displayText } : {}),
         replyToMessageId: message.replyToMessageId || null, images: message.images || [], context: message.context || null,
-        ...(message.receipt ? { receipt: message.receipt } : {}) };
+        ...(message.receipt ? { receipt: message.receipt } : {}),
+        ...(message.conversation.kind === "group" ? { notifyUsers: notifyUsers(message.conversation, message.user, message.notifyUsers || []) } : {}) };
       this.inbox[id] = { key, input, createdAt: Date.now() };
       try { this.saveInbox(); }
       catch (error) { delete this.inbox[id]; this.logger.warn("issue relay inbox persistence failed"); return true; }
@@ -343,7 +346,9 @@ export class IssueRelay {
     renameSync(this.inboxPath + ".tmp", this.inboxPath);
   }
 
-  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [] }, record = {}, blockedBindings = new Set()) {
+  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [], notifyUsers: recipients = [], displayText = null }, record = {}, blockedBindings = new Set()) {
+      const notificationUsers = notifyUsers(conversation, user, recipients);
+      const sendNotice = result => this.sendNotice(conversation, result);
       // Missing/rounded identifiers cannot provide safe retry deduplication.
       if (!messageId || (typeof messageId === "number" && !Number.isSafeInteger(messageId))) return true;
       // Once preflight hands this input to Chat, later binds must never retarget
@@ -352,11 +357,15 @@ export class IssueRelay {
       if (record.routingNotice) {
         // A failed clarification send is not permission to reinterpret the
         // same message as executable when the group topology later changes.
-        await this.sendNotice(conversation, record.routingNotice);
+        await sendNotice(record.routingNotice);
         return true;
       }
       const scope = await this.scope();
       const parsed = relayOperation(text);
+      const shown = typeof displayText === "string" && displayText ? relayOperation(displayText) : null;
+      const content = shown && ["message", "create"].includes(parsed.operation)
+        ? (shown.operation === parsed.operation && shown.issue_ref === parsed.issue_ref ? shown.content : displayText)
+        : parsed.content;
       const unbind = parsed.operation === "unbind";
       const versionedOperation = parsed.operation === "message" || unbind;
       const wasPrepared = Boolean(record.preparedBody);
@@ -366,7 +375,8 @@ export class IssueRelay {
         ...(parsed.command ? { command: parsed.command } : parsed.explicitBinding && parsed.operation === "binding" ? { command: "binding" } : {}),
         ...(parsed.statusPage ? { status_page: parsed.statusPage } : {}),
         ...(parsed.issue_ref ? { issue_ref: parsed.issue_ref } : {}),
-        content: parsed.content,
+        content,
+        ...(notificationUsers.length > 1 ? { notify_users: notificationUsers } : {}),
         ...(replyToMessageId ? { reply_to_message_id: String(replyToMessageId) } : {}),
       };
       let staged;
@@ -384,7 +394,9 @@ export class IssueRelay {
             (this.groups && conversation.kind === "group" && parsed.operation === "binding" && !parsed.command)))) {
           // Routing is server-authoritative: preserve the text/task numbers and
           // exact quoted message ID, including when checking a pinned retry.
-          preflight = await this.request("issue-relay", { ...body, operation: "binding", ...(unbind ? { command: "unbind" } : {}) });
+          preflight = await this.request("issue-relay", { ...body,
+            ...(!wasPrepared && displayText && parsed.operation === "message" ? { content: parsed.content } : {}),
+            operation: "binding", ...(unbind ? { command: "unbind" } : {}) });
           this.validateDecision(preflight);
           if (body.expected_binding_id && (preflight.binding?.binding_id !== body.expected_binding_id ||
               preflight.binding?.generation !== body.expected_generation)) {
@@ -403,13 +415,20 @@ export class IssueRelay {
               conversation_mode: preflight.conversation_mode,
               notice_kind: preflight.notice_kind, task_choices: preflight.task_choices };
             this.saveInbox();
-            await this.sendNotice(conversation, record.routingNotice);
+            await sendNotice(record.routingNotice);
             return true;
           }
           if (versionedOperation && preflight.binding) {
             if (!preflight.binding.binding_id || !preflight.binding.generation) throw new Error("binding version is missing from preflight");
             body.expected_binding_id = preflight.binding.binding_id;
             body.expected_generation = preflight.binding.generation;
+            if (displayText && parsed.operation === "message" && !wasPrepared) {
+              // Human labels can resemble task numbers. Select on canonical
+              // text, then pin the server-selected issue before adding labels.
+              // Never retrofit display text into a previously prepared request.
+              if (!preflight.binding.issue_id) throw new Error("selected issue is missing from preflight");
+              body.issue_ref = preflight.binding.issue_id;
+            }
             // Freeze the first observed destination before reconciliation,
             // notices or media work can fail and leave this input pending.
             record.preparedBody = structuredClone(body);
@@ -419,7 +438,7 @@ export class IssueRelay {
             if (blockedBindings.has(body.expected_binding_id)) return DEFERRED_BINDING;
           }
           if (!unbind && conversation.kind === "private" && preflight.binding?.private?.state === "needs_rebind") {
-            await this.sendNotice(conversation, { ...preflight, silent: false,
+            await sendNotice({ ...preflight, silent: false,
               notice: preflight.notice || "任务负责人已变更，请使用 /bind <任务编号> 重新绑定。" });
             return true;
           }
@@ -432,12 +451,12 @@ export class IssueRelay {
               throw Object.assign(new Error("binding revalidated after input preparation"), { status: 409 });
             }
             if (checked.binding?.group?.state !== "active") {
-              await this.sendNotice(conversation, !preflight.can_comment && preflight.notice ? preflight : checked);
+              await sendNotice(!preflight.can_comment && preflight.notice ? preflight : checked);
               return true;
             }
           }
           if (!unbind && preflight.handled && !preflight.can_comment && (images.length || !(preflight.binding?.group && this.groups && conversation.kind === "group"))) {
-            await this.sendNotice(conversation, preflight);
+            await sendNotice(preflight);
             return true;
           }
           if (versionedOperation) {
@@ -453,11 +472,11 @@ export class IssueRelay {
             this.validateDecision(preflight);
           }
           if (preflight?.handled && !preflight.can_comment) {
-            await this.sendNotice(conversation, preflight);
+            await sendNotice(preflight);
             return true;
           }
           if (images.length > 5) {
-            await this.sendNotice(conversation, { ...preflight, notice: "一次最多发送 5 张图片，请分开发送。" });
+            await sendNotice({ ...preflight, notice: "一次最多发送 5 张图片，请分开发送。" });
             return true;
           }
           if (!this.stageImages) throw new Error("issue image staging is not configured");
@@ -468,7 +487,7 @@ export class IssueRelay {
             const bytes = await readFile(path);
             totalBytes += bytes.length;
             if (totalBytes > 20 * 1024 * 1024) {
-              await this.sendNotice(conversation, { ...preflight, notice: "图片合计超过 20MB，请分开发送。" });
+              await sendNotice({ ...preflight, notice: "图片合计超过 20MB，请分开发送。" });
               return true;
             }
             const content_type = ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" })[extname(path).toLowerCase()] || "application/octet-stream";
@@ -503,7 +522,7 @@ export class IssueRelay {
           throw Object.assign(new Error("bound input cannot fall back to Chat after binding change"), { status: 409 });
         }
         if (parsed.explicitBinding) {
-          await this.sendNotice(conversation, { notice: "当前会话未绑定任务。使用 /bind <任务编号> 绑定，或 /issue <内容> 新建并绑定。" });
+          await sendNotice({ notice: "当前会话未绑定任务。使用 /bind <任务编号> 绑定，或 /issue <内容> 新建并绑定。" });
           return true;
         }
         if (parsed.operation !== "message" && parsed.operation !== "binding") return true;
@@ -521,7 +540,7 @@ export class IssueRelay {
           (parsed.operation === "unbind" || (result.binding &&
             (!result.binding.group || result.binding.group.state === "active") &&
             (!result.binding.private || result.binding.private.state === "active"))))) {
-        await this.sendNotice(conversation, result);
+        await sendNotice(result);
       }
       return true;
   }
@@ -600,12 +619,12 @@ export class IssueRelay {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
     if (this.stopped) throw new Error("issue relay stopped before notice delivery");
     const options = { mode: noticeReplyMode(result), identifier: result.binding?.identifier };
+    const url = replyUrl(this.config.multica, { binding: result.binding, commentId: result.comment_id, sessionId: result.session_id });
     if (["help", "status", "task_choices"].includes(result.notice_kind)) {
       await this.send(conversation, formatCommandNotice(this.config.multica, result), {});
       return;
     }
-    await this.send(conversation, formatReply(result.notice, { ...options,
-      url: replyUrl(this.config.multica, { binding: result.binding, commentId: result.comment_id, sessionId: result.session_id }) }), {});
+    await this.send(conversation, formatReply(result.notice, { ...options, url }), {});
   }
 
   // Unversioned checkpoints must reconstruct these exact canonical chunks and
@@ -683,6 +702,13 @@ export class IssueRelay {
         const save = () => shared ? this.groups.saveDeliveries() : this.save();
         const prior = checkpoints[item.id];
         if (prior?.acked) return;
+        const incomingUsers = notifyUsers(item.conversation, null, item.notify_users || []);
+        if (prior?.notifyUsers && JSON.stringify(prior.notifyUsers) !== JSON.stringify(incomingUsers)) {
+          throw new Error("issue notification users changed during retry");
+        }
+        // Never add new mentions to an in-flight legacy delivery. New messages
+        // pin their audience before the first send, alongside the sender route.
+        const notificationUsers = prior ? (prior.notifyUsers || []) : incomingUsers;
         if (shared && !prior && this.sentParts[item.id]) throw new Error("legacy per-robot group checkpoint requires operator review");
         if (prior?.format && prior.format !== "summary-v1") throw new Error("unknown issue delivery checkpoint format");
         const legacy = Boolean(prior && !prior.format);
@@ -709,10 +735,10 @@ export class IssueRelay {
           if (checked.binding.group.state !== "active" || checked.binding.generation !== item.binding?.generation) throw new Error("group delivery paused until current assignment is confirmed");
           // A poll snapshot can outlive squad membership. Author admission must
           // use the freshly checked topology, not the original delivery view.
-          if (!prior || prior.next < parts.length) route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, prior?.route);
+          if (!prior || prior.next < parts.length || (notificationUsers.length && !prior.notified)) route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, prior?.route);
         }
         if (!prior) {
-          checkpoints[item.id] = { next: 0, digest, messageIds: [], format: "summary-v1", ...(route ? { route: route.pin } : {}) };
+          checkpoints[item.id] = { next: 0, digest, messageIds: [], format: "summary-v1", notifyUsers: notificationUsers, ...(route ? { route: route.pin } : {}) };
           // Pin format and route before sending, including failed first sends.
           save();
         }
@@ -740,6 +766,22 @@ export class IssueRelay {
           save();
         }
         if (this.stopped) return;
+        if (notificationUsers.length && !checkpoints[item.id].notified) {
+          const start = checkpoints[item.id].notificationNext || 0;
+          if (!Number.isInteger(start) || start < 0 || start > notificationUsers.length) throw new Error("invalid notification progress");
+          for (let next = start; next < notificationUsers.length; next += MAX_NOTIFY_USERS) {
+            if (this.stopped) return;
+            const receipt = await (route?.send || this.send)(item.conversation,
+              notificationText(replyUrl(this.config.multica, { binding, commentId: item.comment_id }), binding.identifier),
+              { atUsers: notificationUsers.slice(next, next + MAX_NOTIFY_USERS), notificationOnly: true });
+            const id = messageIdString(receipt?.messageid ?? receipt?.messageId);
+            if (id) checkpoints[item.id].messageIds = [...(checkpoints[item.id].messageIds || []), id];
+            checkpoints[item.id].notificationNext = Math.min(next + MAX_NOTIFY_USERS, notificationUsers.length);
+            save();
+          }
+          checkpoints[item.id].notified = true;
+          save();
+        }
         const ids = checkpoints[item.id]?.messageIds || [];
         await this.request(`issue-deliveries/${encodeURIComponent(item.id)}/ack`, {
           ...scope, ...(ids.length ? { message_id: ids.at(-1), message_ids: ids } : {}),

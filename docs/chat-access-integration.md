@@ -1,6 +1,6 @@
 # Shared agent chat integration
 
-This sidecar implements the final agent-permission policy, not the superseded visibility-toggle proposal. No visibility fields, switches, new routes, or migration 521 are required. Migration 520 now serves the separate, explicitly approved per-message sender requirement:
+This sidecar implements the final agent-permission policy, not the superseded visibility-toggle proposal. No visibility fields, switches or new routes are required. Migration 520 serves the separate per-message sender requirement; migration 521 records group-reply notification recipients and does not change visibility:
 
 ```sql
 ALTER TABLE chat_message ADD COLUMN IF NOT EXISTS author_user_id uuid;

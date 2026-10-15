@@ -1,3 +1,5 @@
+import { inlineMarkdown } from "./inline-markdown.js";
+
 const MAX_MESSAGE_ID = 18446744073709551615n;
 const REPLY_TYPES = new Set(["REPLYDATA", "REPLY", "QUOTE"]);
 
@@ -85,7 +87,7 @@ function linkText(block) {
 }
 
 /** Parse raw inbound blocks or SDK GroupMessageBlock values without I/O. */
-export function parseConversationBlocks(blocks) {
+export function parseConversationBlocks(blocks, { preserveHumanMentions = false } = {}) {
   const images = [];
   const parts = [];
   const mentions = [];
@@ -97,7 +99,15 @@ export function parseConversationBlocks(blocks) {
     const type = textValue(block.type).toUpperCase();
     if (type === "AT" || type.startsWith("AT_") || type.startsWith("AT-")) {
       // Unknown AT variants stay out of text but do not imply a known person.
-      for (const mention of type === "AT" ? mentionsIn(block) : []) {
+      const blockMentions = type === "AT" ? mentionsIn(block) : [];
+      if (preserveHumanMentions) {
+        // Display labels are text, never routing identities or platform mention
+        // links. Preserve each occurrence at its original position even when
+        // notification recipients are deduplicated below.
+        const people = blockMentions.filter(mention => mention.kind === "user");
+        if (people.length) parts.push(people.map(mention => "@" + inlineMarkdown(mention.name || mention.userId)).join(" "));
+      }
+      for (const mention of blockMentions) {
         const key = JSON.stringify([mention.kind, mention.userId, mention.robotId, mention.agentId]);
         if (seenMentions.has(key)) continue;
         seenMentions.add(key);

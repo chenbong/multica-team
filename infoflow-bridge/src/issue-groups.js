@@ -1,4 +1,6 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { notifyUsers, nativeAtBody, MAX_NOTIFY_USERS } from "./reply-mentions.js";
+import { infoflowMarkdown } from "./infoflow-markdown.js";
 
 let lastClientMessageId = 0;
 function clientMessageId() {
@@ -100,9 +102,12 @@ export async function inviteGroupLeader(client, groupId, appId) {
 export async function sendGroupExact(client, conversation, content, options = {}) {
   const id = exactGroupId(conversation.id);
   const body = [];
-  if (options.atUser) body.push({ type: "AT", atall: false, atuserids: [options.atUser] });
-  body.push({ type: "MD", content });
-  const header = `{"toid":${id},"totype":"GROUP","msgtype":"MD","clientmsgid":${clientMessageId()},"role":"robot"}`;
+  const recipients = notifyUsers(conversation, options.atUser, options.atUsers || []);
+  if (recipients.length > MAX_NOTIFY_USERS) throw new Error("AT batch exceeds group limit");
+  if (recipients.length && options.notificationOnly !== true) throw new Error("native AT requires a separate TEXT reminder");
+  if (recipients.length) body.push(...nativeAtBody(content, recipients));
+  else body.push({ type: "MD", content: infoflowMarkdown(content) });
+  const header = `{"toid":${id},"totype":"GROUP","msgtype":"${recipients.length ? "TEXT" : "MD"}","clientmsgid":${clientMessageId()},"role":"robot"}`;
   const result = apiEnvelope(await client.httpClient.post("/robot/msg/groupmsgsend",
     `{"message":{"header":${header},"body":${JSON.stringify(body)}}}`, { disableRetry: true }));
   if (result.code !== 0) throw new Error("group message was not accepted");

@@ -4,7 +4,9 @@ import { VerificationCodeRelay } from "./codes.js";
 import { parseConversationBlocks, messageIdString, privateReplyMessageId, conversationContext } from "./conversation-context.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
 import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
+import { mentionedReplyUsers, notifyUsers, nativeAtBody, MAX_NOTIFY_USERS } from "./reply-mentions.js";
 import { groupRobotEntries } from "./group-robot-entries.js";
+import { infoflowMarkdown } from "./infoflow-markdown.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5000;
 const MAX_INITIAL_RECONNECT_DELAY_MS = 120000;
@@ -169,18 +171,8 @@ export class RobotRuntime {
       baseUrl: robot.baseUrl,
     });
 
-    const send = async (conversation, content, options = {}) => {
-      if (conversation.kind === "group") {
-        if (this.config.issueRelay?.enabled) return sendGroupExact(client, conversation, content, options);
-        const body = [];
-        if (options.atUser) body.push({ type: "AT", atall: false, atuserids: [options.atUser] });
-        body.push({ type: "MD", content });
-        return client.im.message.sendToGroupWithOptions({ groupId: conversation.id, msgtype: "MD", body });
-      }
-      // Single-chat markdown is lowercase "md"; the uppercase spelling belongs to
-      // the group endpoint and is rejected here.
-      return client.im.message.sendToUser(conversation.id, content, "md");
-    };
+    const send = (conversation, content, options = {}) =>
+      sendRobotReply(client, conversation, content, options, this.config.issueRelay?.enabled === true);
 
     const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger, {
       getImageAccessToken: () => client.getAccessToken(),
@@ -343,6 +335,21 @@ export class RobotRuntime {
   }
 }
 
+export async function sendRobotReply(client, conversation, content, options = {}, exactGroups = false) {
+  if (conversation.kind === "group") {
+    if (exactGroups) return sendGroupExact(client, conversation, content, options);
+    const body = [];
+    const recipients = notifyUsers(conversation, options.atUser, options.atUsers || []);
+    if (recipients.length > MAX_NOTIFY_USERS) throw new Error("AT batch exceeds group limit");
+    if (recipients.length && options.notificationOnly !== true) throw new Error("native AT requires a separate TEXT reminder");
+    if (recipients.length) body.push(...nativeAtBody(content, recipients));
+    else body.push({ type: "MD", content: infoflowMarkdown(content) });
+    return client.im.message.sendToGroupWithOptions({ groupId: conversation.id, msgtype: recipients.length ? "TEXT" : "MD", body });
+  }
+  // Single-chat markdown is lowercase "md"; uppercase belongs to the group API.
+  return client.im.message.sendToUser(conversation.id, infoflowMarkdown(content), "md");
+}
+
 function connectionState(wsClient) {
   if (!wsClient) return "stopped";
   return typeof wsClient.getState === "function" ? wsClient.getState() : wsClient.state;
@@ -455,6 +462,7 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
       const mentionsRobot = blocks.some((block) => String(block?.type ?? "").toUpperCase() === "AT" && (block.robotid !== undefined || block.name));
       const parsed = parseConversationBlocks(blocks);
       const text = parsed.text || (parsed.images.length > 0 ? "（图片消息，详见附件）" : "");
+      const displayText = parseConversationBlocks(blocks, { preserveHumanMentions: true }).text || text;
 
       if (!groupId || !user || text === "" || !mentionsRobot) return;
       logger.log(`[${robot.name}] <- ${user} (${event} group ${groupId}): ${text.slice(0, 200)}`);
@@ -462,10 +470,12 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
         conversation: { kind: "group", id: groupId },
         user,
         text,
+        ...(displayText !== text ? { displayText } : {}),
         images: parsed.images,
         messageId: messageIdString(header.messageid ?? raw.messageid),
         replyToMessageId: parsed.replyToMessageId,
         receipt: receiptOptions(raw, "group", robot.appId),
+        notifyUsers: mentionedReplyUsers({ kind: "group" }, user, parsed.mentions),
         context: conversationContext({ conversation: { kind: "group", id: groupId }, sender: user, mentions: parsed.mentions }),
         acknowledge: () => acknowledge(client, raw, "group", robot.appId, logger),
       });

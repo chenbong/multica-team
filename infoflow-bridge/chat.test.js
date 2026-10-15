@@ -113,12 +113,14 @@ for (const kind of ["private", "group"]) test(`${kind} long Chat send failure re
   await f.bridge.handleMessage(message);
   assert.equal(f.messages.length, 1);
   f.bridge.sender = async (target, text, options) => {
-    attempts++; assert.deepEqual(target, conversation); assert.deepEqual(options, {});
+    attempts++; assert.deepEqual(target, conversation);
+    if (options.notificationOnly) { assert.deepEqual(options, { atUsers: ["alice"], notificationOnly: true }); return; }
+    assert.deepEqual(options, {});
     assert.ok(Buffer.byteLength(text) <= 1800);
     assert.ok(text.endsWith("**[完整对话链接](http://localhost/ws/chat?session=s0)**"));
   };
   await f.bridge.chat.poll();
-  assert.equal(attempts, 2);
+  assert.equal(attempts, kind === "group" ? 3 : 2);
   assert.deepEqual(f.bridge.chat.state.pending, {});
 });
 

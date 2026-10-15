@@ -3,6 +3,41 @@
 A standalone Node service that lets you work with Multica from a 如流 robot chat.
 Nothing inside the Multica checkout is modified.
 
+## Group reply notifications
+
+Group AI replies retain one Markdown summary and its full-conversation link,
+followed by a short native AT notification. The reminder does not repeat the
+full-conversation link, which stays in the Markdown body. Its audience consists
+of the original sender and structured human mentions in that input, normalized
+and deduplicated. Private replies are unchanged. Help, status, binding confirmations
+and receipt fallbacks do not add another AT notification.
+
+Outgoing Markdown converts internal `[@name](mention://member/id)` (and agent,
+squad or all mentions) into readable `@name` text. Ordinary links and Markdown
+formatting are retained; code examples are not rewritten. This is a transport
+presentation step only: source comments, task content, notification audiences and
+checkpoint digests remain unchanged. Real InfoFlow mentions still belong to the
+separate native AT reminder, never the Markdown body.
+
+Original structured human mentions remain readable as `@name` at their original
+positions in synced user comments and Chat instructions. Labels are escaped text,
+not invocation links or notification identities. Commands and task selection use
+the canonical input without those display labels; the selected issue is then
+pinned before adding them to comment content. Existing prepared requests are not
+rewritten, and robot mentions remain handled by the normal agent prefix.
+
+Notification metadata stays separate from prompts and issue reply bodies.
+Apply migration `521_infoflow_issue_notify_users.up.sql` before enabling the
+updated API and Bridge together. Old receipts and prepared requests remain
+compatible; old in-flight delivery checkpoints do not gain new notifications.
+Each input supports up to 50 notification accounts including its sender.
+Replies fed by multiple inputs retain their complete notification union; when
+it exceeds the API limit, only the short AT reminders are batched, up to 50
+people each. Each batch has its own checkpoint and receipt correlation.
+Markdown and notification sends checkpoint independently: after an AT failure,
+retry the reminder; after an ACK failure, retry only the ACK. A transport success
+followed by a crash before its checkpoint is saved can still duplicate that send.
+
 ## What it does today
 
 One direct message becomes one Multica issue assigned to an agent; when the run finishes,
