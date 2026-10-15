@@ -9,6 +9,7 @@ import os
 import runpy
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 REPO = Path(os.environ.get("MULTICA_WEB_TARGET", str(HERE.parent / "multica"))).resolve()
@@ -31,89 +32,6 @@ SKILL_PICKER = "packages/views/agents/components/skill-picker-list.tsx"
 SIDEBAR = "packages/views/layout/app-sidebar.tsx"
 PROXY = "apps/web/proxy.ts"
 
-SIDEBAR_DRAFT_DOT = '''function DraftDot() {
-  const hasDraft = useIssueDraftStore((s) => s.hasDraft());
-  if (!hasDraft) return null;
-  return <span className="absolute top-0 right-0 size-1.5 rounded-full bg-brand" />;
-}'''
-
-SIDEBAR_MOBILE_CONTROL = '''async function copyToClipboard(text: string): Promise<boolean> {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // HTTP pages may not expose the Clipboard API; use the legacy fallback.
-    }
-  }
-
-  const input = document.createElement("textarea");
-  input.value = text;
-  input.setAttribute("readonly", "");
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.appendChild(input);
-  input.focus();
-  input.select();
-  try {
-    return document.execCommand("copy");
-  } finally {
-    input.remove();
-  }
-}
-
-function MobileControlLink() {
-  const [url, setUrl] = useState<string>();
-  const [copied, setCopied] = useState(false);
-  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void fetch("/api/public-ip", { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`IP lookup failed: ${response.status}`);
-        const data = (await response.json()) as { ip?: string };
-        if (!data.ip) throw new Error("IP lookup returned no address");
-        return data.ip;
-      })
-      .then((ip) => {
-        if (!cancelled) setUrl(`http://${ip}:8004`);
-      })
-      .catch(() => {
-        // Keep the sidebar unobtrusive if DNS is temporarily unavailable.
-      });
-
-    return () => {
-      cancelled = true;
-      if (copiedTimer.current) clearTimeout(copiedTimer.current);
-    };
-  }, []);
-
-  const handleCopy = useCallback(async () => {
-    if (!url || !(await copyToClipboard(url))) return;
-    setCopied(true);
-    if (copiedTimer.current) clearTimeout(copiedTimer.current);
-    copiedTimer.current = setTimeout(() => setCopied(false), 1600);
-  }, [url]);
-
-  if (!url) return null;
-  return (
-    <SidebarMenuButton
-      size="sm"
-      type="button"
-      className="h-auto min-w-0 flex-1 flex-col items-start gap-0.5 py-1 text-muted-foreground hover:text-foreground group-data-[collapsible=icon]:hidden"
-      onClick={handleCopy}
-      title={url}
-      aria-live="polite"
-      aria-label={copied ? "已复制" : `手机控制：${url}`}
-    >
-      <span className="text-micro">手机控制</span>
-      <span className="w-full whitespace-normal! break-all text-left text-micro leading-tight">
-        {copied ? "已复制" : url}
-      </span>
-    </SidebarMenuButton>
-  );
-}'''
 
 # Login-page branding is deployment configuration, never a literal in this
 # repository: a public clone therefore builds a stock Multica login page, and a
@@ -306,6 +224,40 @@ def login_page_changes():
     ]
 
 
+def login_support_labels(locale):
+    labels = {
+        "en": {"quickstart": "Quick start", "community": "InfoFlow community"},
+        "zh-Hans": {"quickstart": "快速上手", "community": "如流交流群"},
+        "ja": {"quickstart": "クイックスタート", "community": "InfoFlow コミュニティ"},
+        "ko": {"quickstart": "빠른 시작", "community": "InfoFlow 커뮤니티"},
+        "fr": {"quickstart": "Démarrage rapide", "community": "Communauté InfoFlow"},
+    }
+    return [('  "common": {', '  "login_links": ' + json.dumps(labels[locale], ensure_ascii=False) + ',\n  "common": {')]
+
+
+def login_support_changes():
+    links = []
+    for key, label in (("MULTICA_QUICKSTART_URL", "quickstart"), ("MULTICA_INFOFLOW_USER_GROUP_URL", "community")):
+        url = os.environ.get(key, "").strip()
+        if not url:
+            continue
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise SystemExit(f"Invalid login support URL: {key}")
+        links.append(
+            '            <a href={' + json.dumps(url) + '} target="_blank" rel="noopener noreferrer" className="whitespace-nowrap text-primary underline underline-offset-4">\n'
+            '              {t(($) => $.login_links.' + label + ')}\n'
+            '            </a>\n'
+        )
+    if not links:
+        return []
+    anchor = '            {t(($) => $.signin.title)}\n          </CardTitle>\n'
+    replacement = (anchor +
+                   '          <div data-testid="login-support-links" className="flex flex-nowrap items-center justify-center gap-6 text-caption">\n'
+                   + ''.join(links) + '          </div>\n')
+    return [(anchor, replacement)]
+
+
 # Embedded visual editors can inject an unscoped .border-input control style.
 # Keep our semantic color token without sharing that foreign class name.
 FORM_BORDER_COMPONENTS = (
@@ -328,9 +280,10 @@ CHANGES = {
         ]
         for component in FORM_BORDER_COMPONENTS
     },
-    AUTH_ZH: auth_zh_changes(),
-    AUTH_EN: auth_en_changes(),
-    LOGIN_PAGE: login_page_changes(),
+    AUTH_ZH: auth_zh_changes() + login_support_labels("zh-Hans"),
+    AUTH_EN: auth_en_changes() + login_support_labels("en"),
+    **{f"packages/views/locales/{locale}/auth.json": login_support_labels(locale) for locale in ("ja", "ko", "fr")},
+    LOGIN_PAGE: login_page_changes() + login_support_changes(),
     "packages/views/auth/login-page.test.tsx": login_test_changes(),
     LOGIN_ROUTE: [
         # The web shell passes a "prefer the desktop app? download" slot into the
@@ -399,27 +352,33 @@ CHANGES = {
     SIDEBAR: [
         (
             'import { JoinDiscordCard } from "./join-discord-card";\n',
-            'import { SidebarShortcutLinks } from "./sidebar-shortcut-links";\n',
+            'import { SidebarShortcutLinks, SidebarCommunityLink } from "./sidebar-shortcut-links";\n',
         ),
         (
-            SIDEBAR_DRAFT_DOT,
-            SIDEBAR_DRAFT_DOT + "\n\n" + SIDEBAR_MOBILE_CONTROL,
-        ),
-        (
-            '          <SidebarMenu className="gap-0.5">\n            {utilityNav.map((item) => {',
-            '          <SidebarMenu className="gap-0.5">\n            <SidebarShortcutLinks '
-            'modelTraceUrl=' + '{' + json.dumps(os.environ.get("MULTICA_ONEAPI_TRACE_URL", "")) + '} '
-            'quickstartUrl=' + '{' + json.dumps(os.environ.get("MULTICA_QUICKSTART_URL", "")) + '} '
-            'className={NAV_ITEM_CLASS_NAME} />\n            {utilityNav.map((item) => {',
+            'import { HelpLauncher } from "./help-launcher";\n',
+            '',
         ),
         (
             '          {/* Discord fills the strip while visible; once dismissed, help\n'
             '              aligns with the navigation icons above. */}\n'
             '          <div className="flex items-center gap-1">\n'
             '            <JoinDiscordCard />\n',
-            '          {/* Keep mobile access alongside help below the utility links. */}\n'
-            '          <div className="flex min-w-0 items-center gap-1">\n'
-            '            <MobileControlLink />\n',
+            '',
+        ),
+        (
+            '            <HelpLauncher />\n          </div>\n',
+            '',
+        ),
+        (
+            '        <SidebarFooter className="p-2">\n',
+            '        <SidebarFooter className="p-2">\n'
+            '          <SidebarShortcutLinks '
+            'modelTraceUrl=' + '{' + json.dumps(os.environ.get("MULTICA_ONEAPI_TRACE_URL", "")) + '} '
+            'quickstartUrl=' + '{' + json.dumps(os.environ.get("MULTICA_QUICKSTART_URL", "")) + '} '
+            'className={NAV_ITEM_CLASS_NAME} />\n'
+            '          <SidebarCommunityLink '
+            'url=' + '{' + json.dumps(os.environ.get("MULTICA_INFOFLOW_USER_GROUP_URL", "")) + '} '
+            'className={NAV_ITEM_CLASS_NAME} />\n',
         ),
     ],
     "apps/web/app/layout.tsx": [
@@ -429,19 +388,19 @@ CHANGES = {
         ),
     ],
     "packages/views/locales/en/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI model quality probe", "quickstart_wishlist": "Quick start & wishlist" },\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"InfoFlow community",\n    "quick_links": {"title":"Common links","mobile_control":"Mobile control link","loading":"Loading...","unavailable":"Unavailable","copied":"Copied","copy_failed":"Copy failed, try again","model_trace":"OneAPI model quality probe","quickstart_wishlist":"Quick start & wishlist","official_docs":"Official documentation"},\n'),
     ],
     "packages/views/locales/zh-Hans/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI 降智探测", "quickstart_wishlist": "快速上手 & 许愿板" },\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"如流交流群",\n    "quick_links": {"title":"常用链接","mobile_control":"手机控制链接","loading":"加载中...","unavailable":"暂不可用","copied":"已复制","copy_failed":"复制失败，请重试","model_trace":"OneAPI降智探测","quickstart_wishlist":"快速上手 & 许愿板","official_docs":"官方文档"},\n'),
     ],
     "packages/views/locales/ja/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI モデル品質チェック", "quickstart_wishlist": "クイックスタートと要望" },\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"InfoFlow コミュニティ",\n    "quick_links": {"title":"よく使うリンク","mobile_control":"モバイル操作リンク","loading":"読み込み中...","unavailable":"利用できません","copied":"コピーしました","copy_failed":"コピーできませんでした","model_trace":"OneAPI モデル品質チェック","quickstart_wishlist":"クイックスタートと要望","official_docs":"公式ドキュメント"},\n'),
     ],
     "packages/views/locales/ko/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI 모델 품질 검사", "quickstart_wishlist": "빠른 시작 및 요청" },\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"InfoFlow 커뮤니티",\n    "quick_links": {"title":"자주 쓰는 링크","mobile_control":"모바일 제어 링크","loading":"불러오는 중...","unavailable":"사용할 수 없음","copied":"복사됨","copy_failed":"복사하지 못했습니다","model_trace":"OneAPI 모델 품질 검사","quickstart_wishlist":"빠른 시작 및 요청","official_docs":"공식 문서"},\n'),
     ],
     "packages/views/locales/fr/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "Qualité des modèles oneAPI", "quickstart_wishlist": "Démarrage rapide et souhaits" },\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"Communauté InfoFlow",\n    "quick_links": {"title":"Liens utiles","mobile_control":"Lien de contrôle mobile","loading":"Chargement...","unavailable":"Indisponible","copied":"Copié","copy_failed":"Échec de la copie, réessayez","model_trace":"Qualité des modèles OneAPI","quickstart_wishlist":"Démarrage rapide et souhaits","official_docs":"Documentation officielle"},\n'),
     ],
     PROXY: [
         (
@@ -922,6 +881,16 @@ CHANGES.setdefault("packages/views/common/cli-install-command.test.tsx", []).app
 
 runpy.run_path(str(HERE / "issue-transfer-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "infoflow-groups-patch.py"))["extend"](CHANGES)
+
+# Reuse the existing configured management destination; generic builds have no link.
+CHANGES.setdefault("packages/views/issues/components/issue-detail.tsx", []).append((
+    '<BindInfoFlowConversation key={`${issue.workspace_id}:${issue.id}`} workspaceId={issue.workspace_id} issueId={issue.id} />',
+    '<BindInfoFlowConversation key={`${issue.workspace_id}:${issue.id}`} workspaceId={issue.workspace_id} issueId={issue.id} '
+    f'managementURL={{{json.dumps(INFOFLOW_BRIDGE_URL)}}} />',
+))
+
+
+runpy.run_path(str(HERE / "chat-access-web-patch.py"))["extend"](CHANGES)
 
 
 def apply_patches():

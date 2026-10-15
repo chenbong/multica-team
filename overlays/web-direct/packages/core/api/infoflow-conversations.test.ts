@@ -29,7 +29,7 @@ describe("unified InfoFlow conversation API", () => {
     respond({});
     expect(await client().getIssueInfoFlowConversations("TEST-1")).toEqual({
       enabled: false, group: { canManage: false, binding: null, request: null, groups: [] },
-      private: { eligible: false, canManage: false, reason: "", bindings: [], request: null },
+      private: { eligible: false, canManage: false, reason: "", bindings: [], request: null, robot: { state: "unknown" } },
     });
     expect(InfoFlowConversationsSchema.parse({ enabled: true, private: { bindings: [] } }).private.eligible).toBe(false);
   });
@@ -38,6 +38,30 @@ describe("unified InfoFlow conversation API", () => {
     respond(wire); const result = await client().getIssueInfoFlowConversations("TEST-1");
     expect(result.group.binding?.state).toBe("active"); expect(result.group.groups).toEqual([]);
     expect(result.private.bindings).toEqual([]); expect(result.private.request).toBeNull();
+  });
+  it("preserves the assigned robot preview and exact private chat ID", async () => {
+    const wire = status(); respond({ ...wire, private: { ...wire.private,
+      robot: { state: "ready", robot_id: "robot-a", name: "Assigned robot", robot_chat_id: "9007199254740993" } } });
+    expect((await client().getIssueInfoFlowConversations("TEST-1")).private.robot).toEqual({
+      state: "ready", robotId: "robot-a", name: "Assigned robot", robotChatId: "9007199254740993",
+    });
+  });
+  it.each(["permission", "assignment", "disabled"])("hides preview on %s loss", async (loss) => {
+    const wire = status();
+    if (loss === "permission") wire.private.can_manage = false;
+    if (loss === "assignment") wire.private.eligible = false;
+    if (loss === "disabled") wire.enabled = false;
+    respond({ ...wire, private: { ...wire.private, robot: { state: "ready", robot_id: "secret", name: "Hidden robot", robot_chat_id: "123" } } });
+    expect((await client().getIssueInfoFlowConversations("TEST-1")).private.robot).toEqual({ state: "unknown" });
+  });
+  it("defaults absent and future preview states to unknown for older clients", async () => {
+    respond(status()); expect((await client().getIssueInfoFlowConversations("TEST-1")).private.robot).toEqual({ state: "unknown" });
+    const wire = status(); respond({ ...wire, private: { ...wire.private, robot: { state: "future" } } });
+    expect((await client().getIssueInfoFlowConversations("TEST-1")).private.robot?.state).toBe("unknown");
+  });
+  it.each([null, { state: "ready" }, { state: "ready", robot_id: "r", name: "Robot", robot_chat_id: "9223372036854775808" }])("rejects malformed robot preview %j", async (robot) => {
+    const wire = status(); respond({ ...wire, private: { ...wire.private, robot } });
+    await expect(client().getIssueInfoFlowConversations("TEST-1")).rejects.toThrow("Invalid InfoFlow conversation status");
   });
   it("does not expose a stale active private link after reassignment to a squad", async () => {
     const wire = status(); wire.private.eligible = false; wire.private.reason = "private_requires_single_agent";

@@ -117,6 +117,53 @@ function legacyCheckpoint(f, bridge) {
   return parts;
 }
 
+test("group user mirror uses coordinator without member delegation while agents still use their own robot", async t => {
+  const f = fixture(t), bridge = f.make();
+  f.state.members.push("202");
+  f.addDelivery(A, "网页用户评论", "user-mirror");
+  Object.assign(f.state.deliveries[0], { author_type: "user", author_name: "alice", comment_id: "comment1" });
+  f.addDelivery(B, "成员回复", "agent-reply");
+  await bridge.issueRelay.poll();
+  assert.equal(f.state.sent.length, 2);
+  assert.equal(f.state.sent[0].robotId, "a");
+  assert.match(f.state.sent[0].content, /\n\n@alice：网页用户评论/);
+  assert.doesNotMatch(f.state.sent[0].content, /队长代发/);
+  assert.match(f.state.sent[0].content, /#comment-comment1\)/);
+  assert.deepEqual(f.state.sent[0].options, {});
+  assert.equal(f.state.sent[1].robotId, "b");
+  assert.doesNotMatch(f.state.sent[1].content, /@alice|队长代发/);
+});
+
+test("group user mirrors cannot route as a squad member or reuse a delegated-member pin", async t => {
+  const f = fixture(t), bridge = f.make();
+  f.addDelivery(B, "user content");
+  Object.assign(f.state.deliveries[0], { author_type: "user", author_name: "alice" });
+  await bridge.issueRelay.poll();
+  assert.equal(f.state.sent.length, 0);
+  const leader = f.entries[0], member = f.entries[1];
+  const observation = { leader_present: true, leader, entries: [leader, member], members: [{ appId: "101" }, { appId: "202" }] };
+  const item = { ...f.state.deliveries[0], author_agent_id: A, binding: f.state.binding };
+  assert.throws(() => f.groups.selectSender(observation, item,
+    { robot_id: "b", agent_id: B, delegated: false, label: "" }), /coordinator changed/);
+  assert.throws(() => f.groups.selectSender(observation, item,
+    { robot_id: "a", agent_id: A, delegated: true, label: "delegated" }), /coordinator changed/);
+});
+
+test("group user mirror coordinator and username survive ACK failure and shared checkpoint restoration", async t => {
+  const f = fixture(t), bridge = f.make();
+  f.addDelivery(A, "user comment", "user-mirror");
+  Object.assign(f.state.deliveries[0], { author_type: "user", author_name: "alice", comment_id: "comment1" });
+  f.state.failAck = true;
+  await bridge.issueRelay.poll();
+  assert.equal(f.state.sent.length, 1);
+  assert.deepEqual(f.groups.deliveries["user-mirror"].route, { robot_id: "a", agent_id: A, delegated: false, label: "" });
+  bridge.stop(); f.restoreGroups();
+  f.state.failAck = false;
+  await f.make().issueRelay.poll();
+  assert.equal(f.state.sent.length, 1);
+  assert.equal(f.groups.deliveries["user-mirror"].acked, true);
+});
+
 test("group member transport preserves exact numeric IDs and compares app IDs, not IM IDs", async () => {
   const calls = [];
   const client = { httpClient: { post: async (...args) => { calls.push(args); return { errcode: 0, data: {

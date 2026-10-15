@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS infoflow_robot_directory_identity_idx;

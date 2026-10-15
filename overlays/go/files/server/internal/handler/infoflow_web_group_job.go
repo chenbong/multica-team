@@ -262,6 +262,16 @@ func (h *Handler) InfoFlowWebGroupResult(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		reason, state = "active", "active"
+		current, e := infoFlowLoadBindingID(r.Context(), tx, infoFlowScope{RobotID: req.LeaderRobotID, AgentID: t.LeaderAgentID, WorkspaceID: j.WorkspaceID}, infoFlowConversation{Kind: "group", ID: j.GroupID}, uuidToString(b.ID))
+		if e != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
+		current.BinderID = j.RequesterID
+		if e = infoFlowEnqueueNotice(r.Context(), tx, infoFlowScope{RobotID: req.LeaderRobotID, AgentID: t.LeaderAgentID, WorkspaceID: j.WorkspaceID}, infoFlowConversation{Kind: "group", ID: j.GroupID}, current, "bound"); e != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
 	}
 	_, err = tx.Exec(r.Context(), `UPDATE infoflow_web_group_request SET state=$2,reason=$3,lease_token=NULL,lease_robot_id=NULL,lease_agent_id=NULL,lease_until=NULL,next_at=clock_timestamp()+interval '5 seconds',updated_at=clock_timestamp() WHERE id=$1`, j.ID, state, reason)
 	if err != nil {

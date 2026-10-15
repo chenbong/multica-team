@@ -250,6 +250,21 @@ func (h *Handler) InfoFlowWebPrivateResult(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		state, reason = "active", "active"
+		var bindingID string
+		err = tx.QueryRow(r.Context(), `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND issue_id=$2 AND conversation_kind='private' AND robot_id=$3 AND agent_id=$4 AND conversation_id=$5`, j.Workspace, j.IssueID, req.TargetRobotID, j.AgentID, j.Sender).Scan(&bindingID)
+		if err != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
+		current, e := infoFlowLoadBindingID(r.Context(), tx, targetScope, infoFlowConversation{Kind: "private", ID: j.Sender}, bindingID)
+		if e != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
+		if e = infoFlowEnqueueNotice(r.Context(), tx, targetScope, infoFlowConversation{Kind: "private", ID: j.Sender}, current, "bound"); e != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
 	}
 	_, err = tx.Exec(r.Context(), `UPDATE infoflow_web_private_request SET state=$2,reason=$3,lease_token=NULL,lease_robot_id=NULL,lease_agent_id=NULL,lease_until=NULL,next_at=clock_timestamp()+interval '5 seconds',updated_at=clock_timestamp() WHERE id=$1`, id, state, reason)
 	if err != nil {

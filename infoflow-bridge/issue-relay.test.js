@@ -162,6 +162,71 @@ test("outbound replies preserve content, append footer, have no @ and ack only a
   assert.deepEqual(f.sent[0].options, {});
 });
 
+test("user mirror uses trusted username, original comment link and one 1800-byte summary without forced AT", async t => {
+  const f = fixture(t);
+  f.config.multica.issueWebUrl = "http://127.0.0.1:8004";
+  const item = { id: "user-mirror", author_type: "user", author_name: "alice", author_agent_id: agent,
+    content: "中文🙂".repeat(900), comment_id: "user-comment", binding, conversation: { kind: "private", id: "bob" } };
+  const acks = [];
+  f.bridge.issueRelay.request = async (path, body) => path.endsWith("/ack") ? (acks.push(body), {}) : { deliveries: [item] };
+  await f.bridge.issueRelay.poll();
+  assert.equal(f.sent.length, 1);
+  assert.ok(f.sent[0].content.startsWith("**[任务模式] TEST-1**\n\n@alice：中文"));
+  assert.ok(f.sent[0].content.endsWith("**[完整对话链接](http://127.0.0.1:8004/team/issues/TEST-1#comment-user-comment)**"));
+  assert.ok(Buffer.byteLength(f.sent[0].content) <= 1800);
+  assert.deepEqual(f.sent[0].options, {});
+  assert.equal(acks.length, 1);
+  assert.equal(item.content.startsWith("@"), false);
+});
+
+test("user mirror username is validated and pinned by digest across ACK retries", async t => {
+  const f = fixture(t);
+  const item = { id: "user-mirror", author_type: "user", author_name: "alice", content: "hello", binding,
+    conversation: { kind: "private", id: "bob" } };
+  let acks = 0;
+  f.bridge.issueRelay.request = async path => {
+    if (path.endsWith("/ack")) { acks++; throw new Error("fake ACK failure"); }
+    return { deliveries: [item] };
+  };
+  await f.bridge.issueRelay.poll();
+  item.author_name = "bob"; await f.bridge.issueRelay.poll();
+  item.author_name = "forged\nusername"; await f.bridge.issueRelay.poll();
+  item.author_type = "unknown"; await f.bridge.issueRelay.poll();
+  assert.equal(f.sent.length, 1);
+  assert.equal(acks, 1);
+});
+
+for (const [text, operation] of [["/bind TEST-1", "bind"], ["/issue Test", "create"], ["/unbind TEST-1", "unbind"]]) {
+  test(`explicit durable ${operation} success suppresses legacy IM notice only`, async t => {
+    const f = fixture(t);
+    let suppressed = true;
+    f.bridge.issueRelay.request = async (_path, body) => ({ handled: true, silent: false, can_comment: true, binding,
+      notice: body.operation === "binding" ? "" : "mutation succeeded", suppress_im_notice: suppressed });
+    await f.send(text, { conversation: { kind: "private", id: "alice" } });
+    assert.equal(f.sent.length, 0);
+    suppressed = false;
+    await f.send(text, { conversation: { kind: "private", id: "alice" }, messageId: "101" });
+    assert.equal(f.sent.length, 1);
+    assert.match(f.sent[0].content, /mutation succeeded/);
+  });
+}
+
+test("suppression never hides permission errors, pending admission or read-only binding status", async t => {
+  const f = fixture(t);
+  f.bridge.issueRelay.request = async () => ({ handled: true, silent: false, can_comment: false, binding,
+    notice: "permission denied", suppress_im_notice: true });
+  await f.send("/bind TEST-1");
+  assert.match(f.sent[0].content, /permission denied/);
+  f.bridge.issueRelay.request = async () => ({ handled: true, silent: false, can_comment: true,
+    binding: { ...binding, group: { state: "pending" } }, notice: "admission pending", suppress_im_notice: true });
+  await f.send("/bind TEST-1", { messageId: "101" });
+  assert.match(f.sent[1].content, /admission pending/);
+  f.bridge.issueRelay.request = async () => ({ handled: true, silent: false, can_comment: true, binding,
+    notice: "current task binding", suppress_im_notice: true });
+  await f.send("/binding", { messageId: "102" });
+  assert.match(f.sent[2].content, /current task binding/);
+});
+
 test("ack failure and process restart do not resend a checkpointed single summary", async t => {
   const f = fixture(t);
   const item = { id: "delivery", content: "🙂中文".repeat(500), conversation: { kind: "private", id: "alice" }, binding };

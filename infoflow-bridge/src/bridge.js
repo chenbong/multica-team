@@ -5,22 +5,7 @@ import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
 import { ChatRelay, issueRequest } from "./chat.js";
 import { IssueRelay } from "./issue-relay.js";
 import { formatReply, replyUrl } from "./reply-format.js";
-
-const HELP = [
-  "**Multica 机器人**",
-  "",
-  "普通消息是持续聊天；群里需要 @ 我。只有明确创建任务时才新建 issue。",
-  "",
-  "- `/agents` 列出可用 agent",
-  "- `/agent <名字>` 切换你自己的默认 agent（私聊和群里共用）",
-  "- `/issue <内容>` 创建任务，也可说「帮我创建一个任务：内容」",
-  "- `/bind <任务编号>` 给当前如流对话添加任务绑定；私聊仅支持由单个智能体负责的任务",
-  "- `/binding [任务编号]` 查看绑定；`/unbind [任务编号]` 解除指定绑定，不删除任务",
-  "- `/new` 开启新的聊天上下文",
-  "- `/status` 查询当前聊天状态（没有聊天时查询最近任务）",
-  "- `/status <任务编号>` 查询指定 issue；也可问「CBH-15 进展怎么样？」",
-  "- `/help` 这份说明",
-].join("\n");
+import { HELP } from "./commands.js";
 
 const MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024;
 const INBOUND_IMAGE_TIMEOUT_MS = 30_000;
@@ -33,7 +18,7 @@ export class Bridge {
   // Enough id history to cover a redelivery burst without growing the state file.
   static SEEN_MESSAGE_LIMIT = 200;
 
-  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null, acknowledgeReceipt = null } = {}) {
+  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null, getRobotAvailable = undefined, acknowledgeReceipt = null } = {}) {
     this.config = config;
     this.sender = sender;
     this.logger = logger;
@@ -50,6 +35,7 @@ export class Bridge {
       stageImages: (images) => stageInboundImages(images, this.logger, this.getImageAccessToken),
       groups: issueGroups,
       getPrivateRobotInfo,
+      getRobotAvailable,
       acknowledgeReceipt,
     });
     this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message, skipIssueRelay: true, handoff });
@@ -162,7 +148,7 @@ export class Bridge {
   async reply(conversation, user, content, mode = "chat", strict = false, metadata = {}) {
     try {
       await this.sender(conversation, formatReply(content, { mode, identifier: metadata.binding?.identifier,
-        url: replyUrl(this.config.multica, metadata) }), {});
+        url: metadata.omitLink ? null : replyUrl(this.config.multica, metadata) }), {});
     } catch (error) {
       this.logger.error(`sending to ${conversation.kind}:${conversation.id} failed: ${error.message}`);
       if (strict) throw error;
@@ -192,7 +178,7 @@ export class Bridge {
     }
 
     if (command === "/help") {
-      await reply(HELP);
+      await this.reply(conversation, user, HELP, "chat", true, { omitLink: true });
       return;
     }
     if (command === "/agents") {

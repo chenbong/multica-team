@@ -57,6 +57,14 @@ const ConversationGroupSchema = z.object({
   }
 });
 
+const PrivateRobotSchema = z.object({
+  state: z.enum(["unknown", "ready", "missing", "ambiguous", "unavailable"]).catch("unknown"),
+  robot_id: z.string().min(1).max(256).optional(),
+  name: z.string().max(256).optional(),
+  robot_chat_id: z.union([z.literal(""), InfoFlowGroupIdSchema]).optional(),
+}).refine((robot) => robot.state !== "ready" || !!(robot.robot_id && robot.name && robot.robot_chat_id), "Incomplete robot preview")
+  .default({ state: "unknown" });
+
 const ConversationPrivateSchema = z.object({
   eligible: z.boolean().default(false),
   can_manage: z.boolean().default(false),
@@ -70,6 +78,7 @@ const ConversationPrivateSchema = z.object({
     reason: z.string().max(256).default(""),
   })).max(100).default([]),
   request: PrivateRequestSchema,
+  robot: PrivateRobotSchema,
 }).superRefine((value, context) => {
   if (new Set(value.bindings.map((binding) => binding.binding_id)).size !== value.bindings.length) {
     context.addIssue({ code: "custom", message: "Ambiguous InfoFlow private metadata" });
@@ -79,7 +88,7 @@ const ConversationPrivateSchema = z.object({
 export const InfoFlowConversationsSchema = z.object({
   enabled: z.boolean().default(false),
   group: ConversationGroupSchema.default({ can_manage: false, binding: null, request: null, groups: [] }),
-  private: ConversationPrivateSchema.default({ eligible: false, can_manage: false, reason: "", bindings: [], request: null }),
+  private: ConversationPrivateSchema.default({ eligible: false, can_manage: false, reason: "", bindings: [], request: null, robot: { state: "unknown" } }),
 });
 export type InfoFlowConversationsWire = z.infer<typeof InfoFlowConversationsSchema>;
 export interface InfoFlowConversationsStatus {
@@ -96,6 +105,7 @@ export interface InfoFlowConversationsStatus {
     reason: string;
     bindings: { bindingId: string; robotId: string; robotName: string; robotChatId: string; state: "active" | "needs_rebind"; reason: string }[];
     request: { requestId: string; state: "queued" | "pending" | "failed"; reason: string; generation?: string; canCancel?: boolean } | null;
+    robot?: { state: "unknown" | "ready" | "missing" | "ambiguous" | "unavailable"; robotId?: string; name?: string; robotChatId?: string };
   };
 }
 
@@ -121,6 +131,12 @@ export function infoFlowConversationsStatus(value: InfoFlowConversationsWire): I
       eligible: value.enabled && value.private.eligible,
       canManage: privateCanManage,
       reason: value.enabled ? value.private.reason : "",
+      robot: privateCanManage && value.private.eligible ? {
+        state: value.private.robot.state,
+        ...(value.private.robot.robot_id ? { robotId: value.private.robot.robot_id } : {}),
+        ...(value.private.robot.name ? { name: value.private.robot.name } : {}),
+        ...(value.private.robot.robot_chat_id ? { robotChatId: value.private.robot.robot_chat_id } : {}),
+      } : { state: "unknown" },
       bindings: privateCanManage ? value.private.bindings.map((binding) => ({
         bindingId: binding.binding_id, robotId: binding.robot_id, robotName: binding.robot_name,
         robotChatId: binding.robot_chat_id,

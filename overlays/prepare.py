@@ -60,7 +60,9 @@ def main() -> None:
     # Small checked SQL-constant edits avoid vendoring thousands of unchanged
     # SQLc lines. They retain the same non-invasive build overlay boundary.
     guards = runpy.run_path(str(HERE / "issue-transfer-sql.py"))
-    for rel, text in guards["generated"](UPSTREAM, FILES):
+    chat = runpy.run_path(str(HERE / "chat-access-go-patch.py"))
+    generated = list(guards["generated"](UPSTREAM, FILES)) + list(chat["generated"](UPSTREAM, FILES))
+    for rel, text in generated:
         source = UPSTREAM / rel
         override = HERE / ".generated" / rel
         mapping[str(source)] = str(override)

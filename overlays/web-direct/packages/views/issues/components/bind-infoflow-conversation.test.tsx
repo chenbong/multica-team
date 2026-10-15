@@ -26,13 +26,47 @@ beforeEach(() => {
   state.legacy.mockReset().mockResolvedValue({ enabled: false, canManage: false, binding: null, request: null, groups: [] });
 });
 afterEach(() => { cleanup(); client.clear(); });
-function view() { return <QueryClientProvider client={client}><BindInfoFlowConversation workspaceId="ws" issueId="task" /></QueryClientProvider>; }
-async function open() {
-  render(view()); const user = userEvent.setup();
+function view(managementURL?: string) { return <QueryClientProvider client={client}><BindInfoFlowConversation workspaceId="ws" issueId="task" managementURL={managementURL} /></QueryClientProvider>; }
+async function open(managementURL?: string) {
+  render(view(managementURL)); const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: en.infoflow_conversations.bind })); return user;
 }
 
 describe("unified InfoFlow dialog", () => {
+  it("previews the assigned robot name before private binding", async () => {
+    const current = fresh(); current.private.robot = { state: "ready", robotId: "assigned", name: "My fixture robot", robotChatId: "123" };
+    state.get.mockResolvedValue(current); const user = await open();
+    await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.getByText(`${en.infoflow_conversations.private_robot}：My fixture robot`)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: en.infoflow_groups.submit })).toBeEnabled();
+    expect(state.post).not.toHaveBeenCalled();
+  });
+  it.each(["missing", "ambiguous", "unavailable"] as const)("blocks new private binding when robot is %s without removing an existing binding", async (robotState) => {
+    const current = fresh(); current.private.robot = { state: robotState };
+    state.get.mockResolvedValue(current); const user = await open("https://bridge.example.test");
+    await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.getByRole("button", { name: en.infoflow_groups.submit })).toBeDisabled();
+    if (robotState === "missing") expect(screen.getByRole("link", { name: en.infoflow_conversations.bind_robot_first })).toHaveAttribute("href", "https://bridge.example.test");
+    const active = { ...current, private: { ...current.private, bindings: [{ bindingId: id, robotId: "old", robotChatId: "123", robotName: "Existing robot", state: "active" as const, reason: "" }] } };
+    state.get.mockResolvedValue(active); await user.click(screen.getByRole("button", { name: en.infoflow_groups.refresh }));
+    const remove = await screen.findByRole("button", { name: `${en.infoflow_conversations.unbind_private} Existing robot` });
+    expect(screen.getAllByRole("link", { name: en.infoflow_conversations.open_private }).length).toBeGreaterThan(0);
+    await user.click(remove); await waitFor(() => expect(state.remove).toHaveBeenCalledWith("task", id));
+    expect(state.post).not.toHaveBeenCalled();
+  });
+  it("does not invent a management URL in an unconfigured checkout", async () => {
+    const current = fresh(); current.private.robot = { state: "missing" }; state.get.mockResolvedValue(current);
+    const user = await open(); await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.getByText(en.infoflow_conversations.bind_robot_first)).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+  it("ignores leaked preview metadata after management permission loss", async () => {
+    const current = fresh(); current.private.canManage = false;
+    current.private.robot = { state: "ready", name: "Hidden robot", robotId: "secret", robotChatId: "123" }; state.get.mockResolvedValue(current);
+    const user = await open(); await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.queryByText(/Hidden robot/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: en.infoflow_groups.submit })).not.toBeInTheDocument();
+  });
   it("shows the exact group number and name in choices and verified binding details", async () => {
     const user = await open();
     expect(screen.getByRole("option", { name: "123 · Existing group" })).toHaveValue("123");

@@ -41,6 +41,7 @@ class FrontendPatches(unittest.TestCase):
             "MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS": "ducc",
             "MULTICA_ONEAPI_TRACE_URL": "https://probe.example.test/",
             "MULTICA_QUICKSTART_URL": "https://docs.example.test/quickstart",
+            "MULTICA_INFOFLOW_USER_GROUP_URL": "https://community.example.test/join",
         })
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -133,6 +134,22 @@ class FrontendPatches(unittest.TestCase):
             labels = json.loads((self.target / f"packages/views/locales/{locale}/runtimes.json").read_text())
             self.assertTrue(labels["page"]["only_mine"])
 
+    def test_login_support_links_are_centered_and_preserve_the_form(self):
+        self.apply()
+        login = (self.target / "packages/views/auth/login-page.tsx").read_text()
+        self.assertEqual(login.count('data-testid="login-support-links"'), 1)
+        self.assertIn('flex flex-nowrap items-center justify-center gap-6', login)
+        self.assertIn('href={"https://docs.example.test/quickstart"} target="_blank" rel="noopener noreferrer"', login)
+        self.assertIn('href={"https://community.example.test/join"} target="_blank" rel="noopener noreferrer"', login)
+        self.assertLess(login.index('$.signin.title'), login.index('data-testid="login-support-links"'))
+        self.assertLess(login.index('data-testid="login-support-links"'), login.index('$.signin.description'))
+        self.assertLess(login.index('data-testid="login-support-links"'), login.index('<form id="login-form"'))
+        self.assertIn('onSubmit={handleSendCode}', login)
+        self.assertIn('$.verify.title_link', login)
+        for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
+            labels = json.loads((self.target / f"packages/views/locales/{locale}/auth.json").read_text())
+            self.assertEqual(set(labels["login_links"]), {"quickstart", "community"})
+
     def test_reapplication_does_not_clobber_changed_staging_files(self):
         self.apply()
         target = self.target / "apps/web/proxy.ts"
@@ -147,9 +164,12 @@ class FrontendPatches(unittest.TestCase):
         sidebar = (self.target / "packages/views/layout/app-sidebar.tsx").read_text()
         self.assertNotIn("JoinDiscordCard", sidebar)
         footer = sidebar[sidebar.index("<SidebarFooter"):]
-        self.assertIn("<MobileControlLink />", footer)
-        self.assertIn("<HelpLauncher />", footer)
-        self.assertEqual(sidebar.count("<MobileControlLink />"), 1)
+        self.assertNotIn("HelpLauncher", sidebar)
+        self.assertNotIn("MobileControlLink", sidebar)
+        self.assertNotIn("infoflowGroupUrl", sidebar)
+        labels = json.loads((self.target / "packages/views/locales/zh-Hans/layout.json").read_text())
+        self.assertEqual(labels["sidebar"]["quick_links"]["title"], "常用链接")
+        self.assertEqual(labels["sidebar"]["quick_links"]["official_docs"], "官方文档")
         dashboard = (self.target / "packages/views/layout/dashboard-layout.tsx").read_text()
         self.assertNotIn("SourceBackfillModal", dashboard)
         self.assertIn("<ModalRegistry />", dashboard)
@@ -158,7 +178,7 @@ class FrontendPatches(unittest.TestCase):
         installer = (self.target / "packages/views/common/cli-install-command.tsx").read_text()
         self.assertIn("platforms = PLATFORMS", installer)
 
-    def test_code_fonts_use_a_monospace_fallback_and_shortcuts_precede_statistics(self):
+    def test_code_fonts_use_a_monospace_fallback_and_common_links_precede_utilities(self):
         self.apply()
         layout = (self.target / "apps/web/app/layout.tsx").read_text()
         mono = layout[layout.index("const geistMono"):layout.index("export const metadata")]
@@ -169,11 +189,14 @@ class FrontendPatches(unittest.TestCase):
         footer = sidebar[sidebar.index("<SidebarFooter"):]
         self.assertEqual(footer.count("<SidebarShortcutLinks "), 1)
         self.assertLess(footer.index("<SidebarShortcutLinks "), footer.index("utilityNav.map"))
+        self.assertLess(footer.index("<SidebarShortcutLinks "), footer.index("<SidebarCommunityLink "))
+        self.assertLess(footer.index("<SidebarCommunityLink "), footer.index("utilityNav.map"))
+        self.assertIn('url={"https://community.example.test/join"}', footer)
         self.assertIn('modelTraceUrl={"https://probe.example.test/"}', footer)
         self.assertIn('quickstartUrl={"https://docs.example.test/quickstart"}', footer)
         for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
             labels = json.loads((self.target / f"packages/views/locales/{locale}/layout.json").read_text())
-            self.assertEqual(set(labels["sidebar"]["quick_links"]), {"model_trace", "quickstart_wishlist"})
+            self.assertEqual(set(labels["sidebar"]["quick_links"]), {"title", "mobile_control", "loading", "unavailable", "copied", "copy_failed", "model_trace", "quickstart_wishlist", "official_docs"})
 
     def test_upstream_checkout_is_rejected(self):
         result = subprocess.run(

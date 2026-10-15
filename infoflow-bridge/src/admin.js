@@ -2,11 +2,13 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { Accounts } from "./accounts.js";
-import { ownedAgents, resolveOwnedAgent } from "./admin-agents.js";
+import { ownedAgents, resolveOwnedAgent, agentBindingIds, assertBindingAvailable } from "./admin-agents.js";
 import { AdminAuth } from "./auth.js";
 import { DEFAULT_BASE_URL, ROOT, loadConfig, redactRobot, saveRobots } from "./config.js";
 import { fetchRobotLink, fetchRobotName } from "./infoflow.js";
 import { Multica } from "./multica.js";
+import { randomUUID } from "node:crypto";
+import { saveRobotBinding, deleteRobotBinding } from "./robot-binding-notice.js";
 
 const PAGE = resolve(ROOT, "public/index.html");
 const SESSION_COOKIE = "bridge_admin";
@@ -170,6 +172,18 @@ async function route(request, response, runtime, accounts, auth, logger) {
       return;
     }
 
+    try {
+      assertBindingAvailable(runtime.config.robots, {
+        id: previous.id ?? input.id,
+        workspaceId: binding.workspace.id,
+        agent: binding.agent.name,
+        appId: input.appId,
+      }, runtime.config.multica.workspaceId);
+    } catch (error) {
+      send(response, 409, { error: error.message });
+      return;
+    }
+
     // An empty secret field means "keep what is stored" — the page never sees the
     // current value, so it cannot send it back.
     const appSecret = String(input.appSecret ?? "").trim() === "" ? (previous.appSecret ?? "") : String(input.appSecret);
@@ -202,7 +216,7 @@ async function route(request, response, runtime, accounts, auth, logger) {
 
     const merged = {
       ...previous,
-      id: input.id || previous.id,
+      id: input.id || previous.id || randomUUID(),
       name,
       purpose: "task",
       profile: account.profile,
@@ -226,12 +240,25 @@ async function route(request, response, runtime, accounts, auth, logger) {
       allowAllInGroups: input.allowAllInGroups === undefined ? true : input.allowAllInGroups === true,
       enabled: input.enabled !== false,
     };
-    if (index === -1) robots.push(merged);
-    else robots[index] = merged;
-    saveRobots(robots);
-    await runtime.sync(loadConfig());
+    // Re-read after the asynchronous ownership and credential checks so a
+    // concurrent save cannot reuse a now-bound agent or overwrite new entries.
+    const latest = [...runtime.config.robots];
+    const latestIndex = latest.findIndex(entry => entry.id === merged.id);
+    if ((index === -1 && latestIndex !== -1) || (index !== -1 && latest[latestIndex] !== previous)) {
+      send(response, 409, { error: "绑定已变化，请刷新页面后重试" });
+      return;
+    }
+    try {
+      assertBindingAvailable(latest, merged, runtime.config.multica.workspaceId);
+    } catch (error) {
+      send(response, 409, { error: error.message });
+      return;
+    }
+    if (latestIndex === -1) latest.push(merged);
+    else latest[latestIndex] = merged;
+    const bindingNotice = await saveRobotBinding({ runtime, robots: latest, previous, robot: merged, email: session.email, logger });
     logger.log(`admin saved robot ${merged.name}`);
-    send(response, 200, await snapshot(runtime, accounts, account.profile, session));
+    send(response, 200, { ...await snapshot(runtime, accounts, account.profile, session), bindingNotice });
     return;
   }
 
@@ -246,10 +273,9 @@ async function route(request, response, runtime, accounts, auth, logger) {
       send(response, 400, { error: "这个机器人绑在别人的 Multica 账号上，不能在这里删" });
       return;
     }
-    saveRobots(runtime.config.robots.filter((robot) => robot.id !== input.id));
-    await runtime.sync(loadConfig());
+    const unbindingNotice = await deleteRobotBinding({ runtime, robot: target, email: session.email, logger });
     logger.log(`admin deleted robot ${input.id}`);
-    send(response, 200, await snapshot(runtime, accounts, input.profile, session));
+    send(response, 200, { ...await snapshot(runtime, accounts, input.profile, session), unbindingNotice });
     return;
   }
 
@@ -352,6 +378,7 @@ async function snapshot(runtime, accounts, requestedProfile, session) {
             return {
               agents: ownedAgents(raw, active.userId).map((agent) => ({
                 name: agent.name,
+                bindingRobotIds: agentBindingIds(managed, workspace.id, agent.name, config.multica.workspaceId),
                 model: agent.model,
                 ownerId: agent.owner_id,
                 ownerEmail: active.email,

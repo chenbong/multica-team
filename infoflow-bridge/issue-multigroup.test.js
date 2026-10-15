@@ -63,6 +63,8 @@ function fixture(t) {
       state.acks.push({ id: path.split("/")[1], ...body }); return { handled: true, silent: true };
     }
     assert.equal(path, "issue-relay");
+    if (body.command === "status") return { handled: true, silent: false, notice_kind: "status", conversation_mode: "issue", notice: "当前群绑定的任务：",
+      task_choices: state.plans.map(p => ({ ...p.binding, status: "todo", binding_kinds: "group" })) };
     if (body.conversation.kind === "private") return { handled: false, silent: false, conversation_mode: "chat" };
     const selected = select(body);
     if (body.operation === "message") {
@@ -220,11 +222,11 @@ test("explicit text task number is resolved by backend, never stripped from cano
   assert.doesNotMatch(f.state.comments[0].content, /任务模式|完整任务对话/);
 });
 
-for (const command of ["binding", "unbind"]) test(`/${command} without a target asks; /${command} KEY preserves targeted command over quote`, async t => {
+for (const command of ["binding", "unbind"]) test(`/${command} without a target is read-only; /${command} KEY preserves targeted command over quote`, async t => {
   const f = fixture(t), relay = f.make();
   await relay.handle(f.input(`/${command}`));
   assert.equal(f.state.plans.length, 2);
-  assert.match(f.state.sent[0].content, /^\*\*\[任务模式\]\*\*\n\n请指定任务/);
+  assert.match(f.state.sent[0].content, command === "binding" ? /当前群绑定的任务/ : /^\*\*\[任务模式\]\*\*\n\n请指定任务/);
   await relay.handle(f.input(`/${command} INFE-2`, { replyToMessageId: QUOTE, messageId: "102" }));
   const calls = f.state.requests.filter(r => r.path === "issue-relay" && r.body.issue_ref).map(r => r.body);
   assert.ok(calls.length > 0);

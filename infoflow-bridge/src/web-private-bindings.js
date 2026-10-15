@@ -18,13 +18,15 @@ export function validateWebPrivateJob(job) {
 
 // SDK metadata is intentionally reduced to public fields before leaving this
 // worker. Never forward rawResponse, credentials, visibility lists or avatars.
-export function privateRobotMetadata(info) {
+export function privateRobotMetadata(info, { includeDisabled = false } = {}) {
   if (!info || typeof info !== "object" || Array.isArray(info)) throw new Error("invalid private robot metadata");
-  if (info.openChatDouble !== 1 && info.openChatDouble !== true) return { reason: "private_chat_disabled" };
+  const enabled = info.openChatDouble === 1 || info.openChatDouble === true;
+  if (!enabled && !includeDisabled) return { reason: "private_chat_disabled" };
+  if (includeDisabled && ![0, 1, false, true].includes(info.openChatDouble)) throw new Error("invalid private chat metadata");
   if (typeof info.name !== "string" || !info.name.trim() || info.name.length > 255 || /[\u0000-\u001f\u007f]/.test(info.name)) {
     throw new Error("invalid private robot name");
   }
-  return { robot_chat_id: exactGroupId(info.puid), robot_name: info.name.trim(), reason: "" };
+  return { robot_chat_id: exactGroupId(info.puid), robot_name: info.name.trim(), reason: enabled ? "" : "private_chat_disabled" };
 }
 
 export async function inspectWebPrivateJob(groups, scope, input, stopped = () => false,

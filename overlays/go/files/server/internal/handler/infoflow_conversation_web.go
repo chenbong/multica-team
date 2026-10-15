@@ -39,6 +39,7 @@ type infoFlowPrivateWebView struct {
 	Reason    string                         `json:"reason"`
 	Bindings  []infoFlowOwnPrivate           `json:"bindings"`
 	Request   *infoFlowPrivateWebRequestView `json:"request"`
+	Robot     *infoFlowPrivateRobotPreview   `json:"robot,omitempty"`
 }
 type infoFlowConversationsView struct {
 	Enabled bool `json:"enabled"`
@@ -153,6 +154,13 @@ func (h *Handler) infoFlowConversationView(ctx context.Context, tx pgx.Tx, ws st
 	}
 	out.Private.Eligible = t.AssigneeType == "agent" && t.LeaderAgentID != "" && slices.Contains(t.AgentIDs, t.LeaderAgentID)
 	out.Private.CanManage = out.Private.Eligible && manage || len(rows) > 0
+	if out.Private.Eligible && manage {
+		robot, err := infoFlowPrivateRobot(ctx, tx, ws, t.LeaderAgentID)
+		if err != nil {
+			return out, err
+		}
+		out.Private.Robot = &robot
+	}
 	if !out.Private.Eligible {
 		out.Private.Reason = "私聊仅支持由单个智能体负责的任务；小队、人工负责人或未分配任务请使用群聊"
 	}
@@ -337,6 +345,12 @@ func (h *Handler) DeleteIssueInfoFlowConversation(w http.ResponseWriter, r *http
 			writeError(w, 403, "Insufficient binding permissions")
 			return
 		}
+	}
+	noticeBinding := b
+	noticeBinding.BinderID = m.UserID
+	if err = infoFlowEnqueueNotice(r.Context(), tx, scope, c, noticeBinding, "unbound"); err != nil {
+		writeError(w, 500, "Failed to queue unbind notice")
+		return
 	}
 	_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=NULL,binder_id=NULL,generation=$2,group_state='pending',leader_verified_at=NULL WHERE id=$1`, id, dbid.NewV7())
 	if err != nil {

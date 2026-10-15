@@ -23,6 +23,34 @@ message in the group and would turn small talk into agent runs.
 Chat commands: `/help`, `/agents`, `/agent <名字>` (per-user default, shared between direct
 and group chats), `/status` (per conversation).
 
+With the authenticated issue relay enabled, `/help` and `/status` are read-only
+conversation commands, independent of quote/task selection:
+
+- `/help` returns static usage without task metadata or a conversation-link footer.
+- Group `/status` lists every issue bound to the current group that the sender can
+  access through workspace membership, including issues assigned to other agents.
+- Private `/status` lists the addressed agent's single-agent and squad issues in
+  its workspace, including group-bound, private-bound, and unbound issues. It does
+  not expose other users' private conversation identifiers.
+- Each status row includes the task status and a direct issue link. Long lists
+  use `/status 2`, `/status 3`, etc. rather than sending a burst of messages.
+  Rows also show the task title and current responsible agents (single agent,
+  or squad leader and members), excluding archived/cross-workspace agents.
+  Long display names/titles are safely shortened without breaking task links.
+- `/binding` without arguments is a compatibility alias for `/status`; `/unbind
+  <issue-key>` remains a task-specific mutation. `/status <issue-key>` reads one
+  task bound to the current conversation.
+- Ambiguous ordinary input still requires a quote or issue key. Its notice lists
+  only that agent's eligible bindings in that conversation, with individual issue
+  links instead of an unrelated `/chat` footer. No comment or run is created.
+
+Saving a new/changed agent binding on the robot admin page sends a confirmation
+from that robot to the signed-in operator's private chat after persistence and
+runtime synchronization. Unchanged saves and credential-only edits do not repeat
+the notice. Disabled robots send nothing; delivery failure preserves the saved
+binding and shows a clear warning instead of reporting a failed save. No group
+announcement, issue comment, or agent run is created by this confirmation.
+
 InfoFlow sometimes delivers the same message twice a few seconds apart, so messages are
 de-duplicated by `MsgId`, and identical text from the same person within a minute is
 answered with a pointer to the issue it already created.
@@ -40,6 +68,16 @@ Design notes worth knowing:
 ## Setup
 
 ### 如流消息样式与完整对话链接
+
+任务绑定、解绑成功后，在对应群聊或私聊发送任务模式提示及任务链接。
+提示使用事务内持久队列，失败重试会轮转；同一任务重新绑定后不重发旧解绑提示。
+网页新评论按真实用户名同步到已绑定对话，后续智能体回复同样同步。
+仅从绑定成功后的新评论开始，不补发历史内容；解绑后停止同步。
+如流输入不回显，私聊、群聊及跨任务来源不互相广播；不能证明来源的模型输出不转发。
+
+平台聊天按工作区成员资格与智能体调用权限共享，旧聊天也适用。
+有权限的成员可查看和继续对话，每条新消息独立记录真实作者；无权限的成员无法通过链接、
+工具日志或实时消息读取。删除、归档等会话管理操作仍由创建者控制。
 
 任务进入审核或阻塞时，不再额外私聊通知机器人绑定者，也不扫描历史状态事件。
 任务和聊天回复按对应的如流对话投递；群聊绑定不会额外产生绑定者私聊。

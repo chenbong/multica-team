@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS infoflow_conversation_notice (
+  id UUID NOT NULL,
+  binding_id UUID NOT NULL,
+  generation UUID NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('bound','unbound')),
+  workspace_id UUID NOT NULL,
+  issue_id UUID NOT NULL,
+  actor_id UUID NOT NULL,
+  robot_id TEXT NOT NULL,
+  agent_id UUID NOT NULL,
+  conversation_kind TEXT NOT NULL CHECK (conversation_kind IN ('private','group')),
+  conversation_id TEXT NOT NULL,
+  identifier TEXT NOT NULL,
+  workspace_slug TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  next_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  acked_at TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
+  external_message_ids TEXT[] NOT NULL DEFAULT '{}'
+);

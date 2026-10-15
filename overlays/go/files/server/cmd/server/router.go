@@ -449,6 +449,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	hub.SetAuthorizer(newChatScopeAuthorizer(queries, h.CanReadChatSession))
+	hub.SetDeliveryFilter(h.CanDeliverChatEvent)
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
 	invitationRateLimits.Actor.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_ACTOR_10M", invitationRateLimits.Actor.Limit)
 	invitationRateLimits.Workspace.Limit = envNonNegativeInt("RATE_LIMIT_INVITATION_WORKSPACE_24H", invitationRateLimits.Workspace.Limit)
@@ -1589,6 +1591,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Post("/api/integrations/infoflow/issue-group-status", h.InfoFlowIssueGroupStatus)
 	r.Post("/api/integrations/infoflow/issue-deliveries", h.InfoFlowIssueDeliveries)
 	r.Post("/api/integrations/infoflow/issue-deliveries/{id}/ack", h.InfoFlowIssueDeliveryAck)
+	r.Post("/api/integrations/infoflow/conversation-notices", h.InfoFlowConversationNotices)
+	r.Post("/api/integrations/infoflow/conversation-notices/{id}/ack", h.InfoFlowConversationNoticeAck)
+	r.Post("/api/integrations/infoflow/conversation-notices/{id}/check", h.InfoFlowConversationNoticeCheck)
+	r.Post("/api/integrations/infoflow/robot-directory", h.InfoFlowRobotDirectory)
 
 	// Daemon API routes (require daemon token or valid user token)
 	r.Route("/api/daemon", func(r chi.Router) {
