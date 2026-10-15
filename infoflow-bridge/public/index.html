@@ -329,7 +329,10 @@ function button(text, onClick, className) {
 function renderAgents() {
   const keep = agentSelect.value;
   const keepWorkspace = agentSelect.selectedOptions[0]?.dataset.workspaceId ?? "";
-  const visible = data.agents.filter((agent) => agent.mine);
+  const mine = data.agents.filter((agent) => agent.mine);
+  const editingId = form.id.value;
+  const visible = mine.filter((agent) => !(agent.bindingRobotIds || []).length ||
+    (editingId && agent.bindingRobotIds.includes(editingId)));
   // data.me is null when this machine holds no Multica profile for the address
   // that signed into the page, which is a different state from "logged in, no
   // agents yet". The server writes that profile when the account logs into
@@ -341,7 +344,7 @@ function renderAgents() {
   if (multicaMissing) {
     placeholder.textContent = "这台机器还没有登记你的 Team Mesh 账号，先在 Team Mesh 用同一个邮箱登录一次";
   } else if (visible.length === 0) {
-    placeholder.textContent = "当前用户暂未创建智能体";
+    placeholder.textContent = mine.length ? "当前智能体均已绑定如流机器人，请先解绑" : "当前用户暂未创建智能体";
   } else {
     placeholder.textContent = "选择一个智能体";
   }
@@ -494,6 +497,7 @@ async function post(path, payload) {
 
 async function edit(robot) {
   form.id.value = robot.id;
+  renderAgents();
   form.appId.value = robot.appId;
   form.appKey.value = robot.appKey;
   form.appSecret.value = "";
@@ -601,6 +605,7 @@ function resetForm() {
   // Named form controls (including the clear button) can shadow reset().
   HTMLFormElement.prototype.reset.call(form);
   form.id.value = "";
+  renderAgents();
   form.allowAllInGroups.checked = true;
   document.getElementById("form-title").textContent = "新增机器人";
   document.getElementById("secret-hint").textContent = "在如流开放平台的「凭证与能力」里获取。";

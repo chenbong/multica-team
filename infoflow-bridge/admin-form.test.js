@@ -18,6 +18,7 @@ test("admin reset uses the native prototype when a named control shadows reset",
   });
   const labels = new Map([['form-title', {textContent: '编辑临时机器人'}], ['secret-hint', {textContent: 'old'}]]);
   vm.runInNewContext(reset + '\nresetForm();', { form, HTMLFormElement: Form,
+    renderAgents() {},
     document: { getElementById: id => labels.get(id) } });
   assert.equal(form.nativeResetCalls, 1);
   assert.equal(form.id.value, "");
@@ -58,6 +59,7 @@ test("admin agent picker has no opt-out and never renders another creator's agen
   };
   vm.runInNewContext(renderAgents + "\nrenderAgents();", {
     data, agentSelect: select,
+    form: { id: { value: "" } },
     document: { createElement: () => ({ dataset: {} }), getElementById: () => hint },
   });
   assert.deepEqual(options.map((option) => option.value), ["", "Own"]);
@@ -65,9 +67,40 @@ test("admin agent picker has no opt-out and never renders another creator's agen
   data.agents = [];
   vm.runInNewContext(renderAgents + "\nrenderAgents();", {
     data, agentSelect: select,
+    form: { id: { value: "" } },
     document: { createElement: () => ({ dataset: {} }), getElementById: () => hint },
   });
   assert.equal(options[0].textContent, "当前用户暂未创建智能体");
+});
+
+test("new bindings hide bound agents; editing retains the current one and reset hides it again", () => {
+  const renderAgents = html.match(/function renderAgents\(\) \{[\s\S]*?\n\}/)?.[0];
+  const options = [];
+  const select = { value: "", selectedOptions: [], options,
+    set innerHTML(_value) { options.length = 0; }, append(option) { options.push(option); } };
+  const form = { id: { value: "" } };
+  const data = { me: { email: "alice@example.test" }, workspaces: [], agents: [
+    { name: "Bound", mine: true, workspaceId: "a", bindingRobotIds: ["robot-a"] },
+    { name: "Bound", mine: true, workspaceId: "b", bindingRobotIds: [] },
+    { name: "Free", mine: true, workspaceId: "a", bindingRobotIds: [] },
+    { name: "Foreign", mine: false, bindingRobotIds: [] },
+  ] };
+  const context = vm.createContext({ data, agentSelect: select, form,
+    document: { createElement: () => ({ dataset: {} }), getElementById: () => ({}) } });
+  vm.runInContext(renderAgents, context);
+  const render = () => vm.runInContext("renderAgents()", context);
+  render();
+  assert.deepEqual(options.slice(1).map(o => [o.value, o.dataset.workspaceId]), [["Bound", "b"], ["Free", "a"]]);
+  form.id.value = "robot-a"; render();
+  assert.equal(options.length, 4);
+  form.id.value = "different-robot"; render();
+  assert.equal(options.length, 3);
+  form.id.value = "";
+  data.agents = [data.agents[0]]; render();
+  assert.equal(options.length, 1);
+  assert.match(options[0].textContent, /均已绑定.*先解绑/);
+  data.agents[0].bindingRobotIds = []; render();
+  assert.equal(options.length, 2);
 });
 
 test("editing an old binding never silently selects a same-name agent in another workspace", () => {
