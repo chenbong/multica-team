@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { Bridge } from "./src/bridge.js";
 import { IssueRelay, relayOperation, splitMessage } from "./src/issue-relay.js";
 import { withReplyMode } from "./src/reply-format.js";
+import { sendGroupExact } from "./src/issue-groups.js";
 
 const agent = "00000000-0000-4000-8000-000000000001";
 const binding = { binding_id: "binding-1", issue_id: "issue", identifier: "TEST-1", workspace_slug: "team", generation: "generation-1" };
@@ -174,6 +175,37 @@ test("changed issue notification audiences pause retries instead of notifying a 
   await f.bridge.issueRelay.poll();
   item.notify_users = ["mallory"]; await f.bridge.issueRelay.poll();
   assert.equal(bodies, 1); assert.equal(notices, 1);
+});
+
+test("issue delivery strips only internal AT links on the wire and ACK retry never resends either message", async t => {
+  const f = fixture(t), wire = [];
+  const original = "**结果**\n\n- [@小明](mention://member/member-id)\n- [文档](https://example.test/docs)";
+  const item = { id: "plain-mention-delivery", content: original, comment_id: "c1", conversation: { kind: "group", id: "42" }, binding, notify_users: ["alice", "bob"] };
+  const client = { httpClient: { post: async (_path, data) => {
+    wire.push(JSON.parse(data).message);
+    return { errcode: 0, data: { messageid: String(100 + wire.length) } };
+  } } };
+  f.bridge.issueRelay.send = (...args) => sendGroupExact(client, ...args);
+  let failedAck = false, acked = false;
+  f.bridge.issueRelay.request = async path => {
+    if (path.endsWith("/ack")) {
+      if (!failedAck) { failedAck = true; throw Error("lost ACK response"); }
+      acked = true; return {};
+    }
+    return { deliveries: acked ? [] : [item] };
+  };
+  await f.bridge.issueRelay.poll();
+  assert.equal(wire.length, 2);
+  assert.equal(wire[0].header.msgtype, "MD");
+  assert.match(wire[0].body[0].content, /\*\*结果\*\*\n\n- @小明\n- \[文档\]\(https:\/\/example.test\/docs\)/);
+  assert.doesNotMatch(wire[0].body[0].content, /mention:\/\//);
+  assert.match(wire[0].body[0].content, /\[完整对话链接\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1#comment-c1\)/);
+  assert.deepEqual(wire[1].body[0], { type: "AT", atall: false, atuserids: ["alice", "bob"] });
+  assert.doesNotMatch(wire[1].body[1].content, /https?:|完整对话链接/);
+  assert.equal(item.content, original);
+  await f.bridge.issueRelay.poll();
+  assert.equal(acked, true);
+  assert.equal(wire.length, 2);
 });
 
 test("denied workspace user gets received reaction and owner notice but never starts Chat", async t => {

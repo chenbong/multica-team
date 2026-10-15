@@ -12,6 +12,13 @@ of the original sender and structured human mentions in that input, normalized
 and deduplicated. Private replies are unchanged. Help, status, binding confirmations
 and receipt fallbacks do not add another AT notification.
 
+Outgoing Markdown converts internal `[@name](mention://member/id)` (and agent,
+squad or all mentions) into readable `@name` text. Ordinary links and Markdown
+formatting are retained; code examples are not rewritten. This is a transport
+presentation step only: source comments, task content, notification audiences and
+checkpoint digests remain unchanged. Real InfoFlow mentions still belong to the
+separate native AT reminder, never the Markdown body.
+
 Original structured human mentions remain readable as `@name` at their original
 positions in synced user comments and Chat instructions. Labels are escaped text,
 not invocation links or notification identities. Commands and task selection use

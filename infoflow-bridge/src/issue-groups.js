@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { notifyUsers, nativeAtBody, MAX_NOTIFY_USERS } from "./reply-mentions.js";
+import { infoflowMarkdown } from "./infoflow-markdown.js";
 
 let lastClientMessageId = 0;
 function clientMessageId() {
@@ -105,7 +106,7 @@ export async function sendGroupExact(client, conversation, content, options = {}
   if (recipients.length > MAX_NOTIFY_USERS) throw new Error("AT batch exceeds group limit");
   if (recipients.length && options.notificationOnly !== true) throw new Error("native AT requires a separate TEXT reminder");
   if (recipients.length) body.push(...nativeAtBody(content, recipients));
-  else body.push({ type: "MD", content });
+  else body.push({ type: "MD", content: infoflowMarkdown(content) });
   const header = `{"toid":${id},"totype":"GROUP","msgtype":"${recipients.length ? "TEXT" : "MD"}","clientmsgid":${clientMessageId()},"role":"robot"}`;
   const result = apiEnvelope(await client.httpClient.post("/robot/msg/groupmsgsend",
     `{"message":{"header":${header},"body":${JSON.stringify(body)}}}`, { disableRetry: true }));

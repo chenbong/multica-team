@@ -6,6 +6,7 @@ import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "
 import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
 import { mentionedReplyUsers, notifyUsers, nativeAtBody, MAX_NOTIFY_USERS } from "./reply-mentions.js";
 import { groupRobotEntries } from "./group-robot-entries.js";
+import { infoflowMarkdown } from "./infoflow-markdown.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5000;
 const MAX_INITIAL_RECONNECT_DELAY_MS = 120000;
@@ -170,21 +171,8 @@ export class RobotRuntime {
       baseUrl: robot.baseUrl,
     });
 
-    const send = async (conversation, content, options = {}) => {
-      if (conversation.kind === "group") {
-        if (this.config.issueRelay?.enabled) return sendGroupExact(client, conversation, content, options);
-        const body = [];
-        const recipients = notifyUsers(conversation, options.atUser, options.atUsers || []);
-        if (recipients.length > MAX_NOTIFY_USERS) throw new Error("AT batch exceeds group limit");
-        if (recipients.length && options.notificationOnly !== true) throw new Error("native AT requires a separate TEXT reminder");
-        if (recipients.length) body.push(...nativeAtBody(content, recipients));
-        else body.push({ type: "MD", content });
-        return client.im.message.sendToGroupWithOptions({ groupId: conversation.id, msgtype: recipients.length ? "TEXT" : "MD", body });
-      }
-      // Single-chat markdown is lowercase "md"; the uppercase spelling belongs to
-      // the group endpoint and is rejected here.
-      return client.im.message.sendToUser(conversation.id, content, "md");
-    };
+    const send = (conversation, content, options = {}) =>
+      sendRobotReply(client, conversation, content, options, this.config.issueRelay?.enabled === true);
 
     const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger, {
       getImageAccessToken: () => client.getAccessToken(),
@@ -345,6 +333,21 @@ export class RobotRuntime {
       );
     }
   }
+}
+
+export async function sendRobotReply(client, conversation, content, options = {}, exactGroups = false) {
+  if (conversation.kind === "group") {
+    if (exactGroups) return sendGroupExact(client, conversation, content, options);
+    const body = [];
+    const recipients = notifyUsers(conversation, options.atUser, options.atUsers || []);
+    if (recipients.length > MAX_NOTIFY_USERS) throw new Error("AT batch exceeds group limit");
+    if (recipients.length && options.notificationOnly !== true) throw new Error("native AT requires a separate TEXT reminder");
+    if (recipients.length) body.push(...nativeAtBody(content, recipients));
+    else body.push({ type: "MD", content: infoflowMarkdown(content) });
+    return client.im.message.sendToGroupWithOptions({ groupId: conversation.id, msgtype: recipients.length ? "TEXT" : "MD", body });
+  }
+  // Single-chat markdown is lowercase "md"; uppercase belongs to the group API.
+  return client.im.message.sendToUser(conversation.id, infoflowMarkdown(content), "md");
 }
 
 function connectionState(wsClient) {
