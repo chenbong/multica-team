@@ -20,6 +20,9 @@ type infoFlowDeliveryRequest struct {
 	MessageIDs []string `json:"message_ids,omitempty"`
 }
 
+// One Markdown body plus up to 100 native AT batches for 5,000 group members.
+const infoFlowMaxDeliveryMessageIDs = 101
+
 type infoFlowDelivery struct {
 	AuthorAgentID    string               `json:"author_agent_id"`
 	AuthorName       string               `json:"author_name"`
@@ -31,6 +34,7 @@ type infoFlowDelivery struct {
 	CommentID        string               `json:"comment_id"`
 	ReplyToMessageID string               `json:"reply_to_message_id"`
 	Binding          *infoFlowBindingView `json:"binding"`
+	NotifyUsers      []string             `json:"notify_users"`
 }
 
 // Walk both exact reply ancestry and the authoring task's complete input set.
@@ -41,8 +45,7 @@ type infoFlowDelivery struct {
 // In particular a
 // coalesced run fed by a private and a group source can never leak its combined
 // answer into the group, even if the agent chose the group comment as parent.
-const infoFlowDeliveryCandidates = `
-SELECT c.id,c.content,origin.source_id FROM comment c
+const infoFlowDeliveryOrigin = `
 CROSS JOIN LATERAL (
  WITH RECURSIVE ancestry(kind,id) AS (
    SELECT 'comment'::text,c.id
@@ -57,7 +60,7 @@ CROSS JOIN LATERAL (
      UNION ALL SELECT 'task',unnest(ARRAY[t.parent_task_id,t.delegated_from_task_id,t.retry_of_task_id])
    ) next WHERE next.id IS NOT NULL
  ), origins AS (
-   SELECT DISTINCT s.id,s.binding_id,s.generation,s.created_at FROM ancestry a JOIN infoflow_issue_source s
+   SELECT DISTINCT s.id,s.binding_id,s.generation,s.created_at,s.sender,s.notify_users FROM ancestry a JOIN infoflow_issue_source s
    ON (a.kind='comment' AND s.comment_id=a.id) OR (a.kind='task' AND s.task_id=a.id)
  ), foreign_tasks AS (
    SELECT a.id FROM ancestry a LEFT JOIN agent_task_queue t ON t.id=a.id LEFT JOIN agent ta ON ta.id=t.agent_id
@@ -68,11 +71,18 @@ CROSS JOIN LATERAL (
    AND ac.type='comment' AND ac.created_at >= $6 AND ac.deleted_at IS NULL
    AND NOT EXISTS(SELECT 1 FROM infoflow_issue_source direct WHERE direct.comment_id=ac.id)
  )
- SELECT (array_agg(id ORDER BY created_at DESC,id DESC))[1] AS source_id
+ SELECT (array_agg(id ORDER BY created_at DESC,id DESC))[1] AS source_id,
+ COALESCE((SELECT array_agg(DISTINCT account ORDER BY account)
+   FROM origins o CROSS JOIN LATERAL unnest(o.notify_users || ARRAY[o.sender]) account),'{}'::text[]) AS notify_users
  FROM origins HAVING NOT EXISTS(SELECT 1 FROM foreign_tasks) AND
  ((count(*)=0 AND EXISTS(SELECT 1 FROM web_inputs)) OR (count(DISTINCT (binding_id,generation))=1
  AND bool_and(binding_id=$1 AND generation=$2)))
 ) origin
+`
+
+const infoFlowDeliveryCandidates = `
+SELECT c.id,c.content,origin.source_id,origin.notify_users FROM comment c
+` + infoFlowDeliveryOrigin + `
 LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
 WHERE c.issue_id=$3 AND c.workspace_id=$4 AND (
  (c.author_type='agent' AND c.author_id=ANY($5::uuid[])) OR
@@ -194,11 +204,12 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 	type candidate struct {
 		comment, source pgtype.UUID
 		content         string
+		notifyUsers     []string
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var v candidate
-		if err = rows.Scan(&v.comment, &v.content, &v.source); err != nil {
+		if err = rows.Scan(&v.comment, &v.content, &v.source, &v.notifyUsers); err != nil {
 			break
 		}
 		candidates = append(candidates, v)
@@ -211,23 +222,43 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 		return nil, err
 	}
 	for _, v := range candidates {
-		_, err = tx.Exec(ctx, `INSERT INTO infoflow_issue_delivery(id,binding_id,generation,source_id,comment_id,content) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(binding_id,generation,comment_id) DO NOTHING`, dbid.NewV7(), b.ID, b.Generation, v.source, v.comment, v.content)
+		notifyUsers := []string{}
+		if c.Kind == "group" {
+			notifyUsers = infoFlowNormalizeNotifyUsers("", v.notifyUsers, s.RobotID)
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO infoflow_issue_delivery(id,binding_id,generation,source_id,comment_id,content,notify_users) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(binding_id,generation,comment_id) DO NOTHING`, dbid.NewV7(), b.ID, b.Generation, v.source, v.comment, v.content, notifyUsers)
 		if err != nil {
 			return nil, err
 		}
 	}
-	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,COALESCE(s.message_id,''),CASE WHEN c.author_type='member' THEN $7 ELSE c.author_id::text END,CASE WHEN c.author_type='member' THEN split_part(lower(u.email),'@',1) ELSE COALESCE(a.name,'智能体') END,CASE WHEN c.author_type='member' THEN 'user' ELSE c.author_type END FROM infoflow_issue_delivery d LEFT JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON c.author_type='agent' AND a.id=c.author_id AND a.workspace_id=c.workspace_id LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
+	// Safety admission still follows live ancestry. The audience is immutable:
+	// later same-destination inputs must not change a reply awaiting ACK. Legacy
+	// NULL audiences are frozen on their first safe read, before returning them.
+	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,COALESCE(s.message_id,''),CASE WHEN c.author_type='member' THEN $8 ELSE c.author_id::text END,CASE WHEN c.author_type='member' THEN split_part(lower(u.email),'@',1) ELSE COALESCE(a.name,'智能体') END,CASE WHEN c.author_type='member' THEN 'user' ELSE c.author_type END,COALESCE(d.notify_users,origin.notify_users),d.notify_users IS NULL FROM infoflow_issue_delivery d LEFT JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON c.author_type='agent' AND a.id=c.author_id AND a.workspace_id=c.workspace_id LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
+		`+infoFlowDeliveryOrigin+`
 		WHERE d.binding_id=$1 AND d.generation=$2 AND d.acked_at IS NULL AND c.issue_id=$3 AND c.workspace_id=$4 AND c.deleted_at IS NULL
-		AND ((c.author_type='agent' AND c.author_id=ANY($6::uuid[])) OR (c.author_type='member' AND d.source_id IS NULL AND u.id IS NOT NULL))
-		ORDER BY d.created_at,d.id LIMIT $5`, b.ID, b.Generation, b.IssueID, s.WorkspaceID, limit, authors, s.AgentID)
+		AND ((c.author_type='agent' AND c.author_id=ANY($5::uuid[])) OR (c.author_type='member' AND d.source_id IS NULL AND u.id IS NOT NULL))
+		ORDER BY d.created_at,d.id LIMIT $7`, b.ID, b.Generation, b.IssueID, s.WorkspaceID, authors, b.BoundAt, limit, s.AgentID)
 	if err != nil {
 		return nil, err
 	}
 	var out []infoFlowDelivery
+	var legacy []infoFlowDelivery
 	for rows.Next() {
-		v := infoFlowDelivery{Conversation: c, IssueID: view.IssueID, Binding: view}
-		if err = rows.Scan(&v.ID, &v.CommentID, &v.Content, &v.ReplyToMessageID, &v.AuthorAgentID, &v.AuthorName, &v.AuthorType); err != nil {
+		v := infoFlowDelivery{Conversation: c, IssueID: view.IssueID, Binding: view, NotifyUsers: []string{}}
+		var notifyUsers []string
+		var needsSnapshot bool
+		if err = rows.Scan(&v.ID, &v.CommentID, &v.Content, &v.ReplyToMessageID, &v.AuthorAgentID, &v.AuthorName, &v.AuthorType, &notifyUsers, &needsSnapshot); err != nil {
 			break
+		}
+		if c.Kind == "group" && v.AuthorType != "user" {
+			v.NotifyUsers = notifyUsers
+			if needsSnapshot {
+				v.NotifyUsers = infoFlowNormalizeNotifyUsers("", notifyUsers, s.RobotID)
+			}
+		}
+		if needsSnapshot {
+			legacy = append(legacy, v)
 		}
 		out = append(out, v)
 	}
@@ -237,6 +268,11 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 	rows.Close()
 	if err != nil {
 		return nil, err
+	}
+	for _, v := range legacy {
+		if _, err = tx.Exec(ctx, `UPDATE infoflow_issue_delivery SET notify_users=$2 WHERE id=$1 AND binding_id=$3 AND generation=$4 AND notify_users IS NULL`, v.ID, v.NotifyUsers, b.ID, b.Generation); err != nil {
+			return nil, err
+		}
 	}
 	if _, err = tx.Exec(ctx, `UPDATE infoflow_issue_binding SET last_polled_at=clock_timestamp() WHERE id=$1`, b.ID); err != nil {
 		return nil, err
@@ -256,7 +292,7 @@ func (h *Handler) InfoFlowIssueDeliveryAck(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id, ok := parseUUIDOrBadRequest(&infoFlowCapture{}, chi.URLParam(r, "id"), "id")
-	if !ok || !req.infoFlowScope.valid() || len(req.MessageIDs) > 100 {
+	if !ok || !req.infoFlowScope.valid() || len(req.MessageIDs) > infoFlowMaxDeliveryMessageIDs {
 		infoFlowError(w, 400, "invalid ack")
 		return
 	}

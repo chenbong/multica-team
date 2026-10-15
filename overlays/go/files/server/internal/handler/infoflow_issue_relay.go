@@ -56,6 +56,7 @@ type infoFlowRelayRequest struct {
 	ExpectedGeneration string               `json:"expected_generation,omitempty"`
 	RobotChatID        string               `json:"robot_chat_id,omitempty"`
 	RobotName          string               `json:"robot_name,omitempty"`
+	NotifyUsers        []string             `json:"notify_users,omitempty"`
 }
 
 type infoFlowBindingView struct {
@@ -144,7 +145,42 @@ func (h *Handler) infoFlowPrivateView(ctx context.Context, b infoFlowBinding, ws
 }
 
 var infoFlowUsername = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var infoFlowAccountLetter = regexp.MustCompile(`[a-z]`)
 var infoFlowDomain = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$`)
+
+const infoFlowMaxNotifyUsers = 50
+
+// The authenticated bridge supplies human UUAP accounts, never display names,
+// numeric robot IDs, UUIDs, or broadcast tokens. This is not an identity lookup.
+func infoFlowHumanAccount(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !infoFlowUsername.MatchString(value) || !infoFlowAccountLetter.MatchString(value) {
+		return ""
+	}
+	switch value {
+	case "atall", "all", "robot", "bot":
+		return ""
+	}
+	if _, err := util.ParseUUID(value); err == nil {
+		return ""
+	}
+	return value
+}
+
+func infoFlowNormalizeNotifyUsers(sender string, users []string, robotID string) []string {
+	out := make([]string, 0, len(users)+1)
+	seen := make(map[string]bool, len(users)+1)
+	for _, value := range append([]string{sender}, users...) {
+		account := infoFlowHumanAccount(value)
+		if account == "" || strings.EqualFold(account, robotID) || seen[account] {
+			continue
+		}
+		seen[account] = true
+		out = append(out, account)
+	}
+	slices.Sort(out)
+	return out
+}
 
 func infoFlowValidPrivateRobotMetadata(chatID, name string) bool {
 	if !infoFlowValidGroupID(chatID) || strings.TrimSpace(name) == "" || len(name) > 256 {
@@ -391,6 +427,25 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	if req.Conversation.Kind == "group" && !infoFlowValidGroupID(req.Conversation.ID) {
 		infoFlowError(w, 400, "group id")
 		return
+	}
+	var notifyUsers = []string{}
+	if req.Conversation.Kind == "group" {
+		if len(req.NotifyUsers) > infoFlowMaxNotifyUsers || infoFlowHumanAccount(req.Sender) == "" || strings.EqualFold(req.Sender, req.RobotID) {
+			infoFlowError(w, 400, "invalid notification accounts")
+			return
+		}
+		notifyUsers = infoFlowNormalizeNotifyUsers(req.Sender, req.NotifyUsers, req.RobotID)
+		if len(notifyUsers) > infoFlowMaxNotifyUsers {
+			infoFlowError(w, 400, "too many notification accounts")
+			return
+		}
+		// Omitted/empty fields must remain omitted in the historical request
+		// hash. Explicit lists are canonicalized before hashing and storage.
+		if len(req.NotifyUsers) > 0 {
+			req.NotifyUsers = notifyUsers
+		}
+	} else {
+		req.NotifyUsers = nil
 	}
 	switch req.Operation {
 	case "message", "bind", "unbind", "create":
@@ -1149,7 +1204,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	encoded, _ := json.Marshal(resp)
-	_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_source(id,binding_id,generation,message_id,sender,user_id,request_hash,issue_id,comment_id,task_id,response) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, dbid.NewV7(), b.ID, b.Generation, req.MessageID, req.Sender, user.ID, fingerprint, b.IssueID, commentID, taskID, encoded)
+	_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_source(id,binding_id,generation,message_id,sender,user_id,request_hash,issue_id,comment_id,task_id,response,notify_users) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, dbid.NewV7(), b.ID, b.Generation, req.MessageID, req.Sender, user.ID, fingerprint, b.IssueID, commentID, taskID, encoded, notifyUsers)
 	if err != nil {
 		infoFlowError(w, 500, "source mapping")
 		return

@@ -21,7 +21,7 @@ function fixture(t, kind, mode) {
     multica: { cli: "/missing-fixture-cli", defaultAgent: agent, workspaceId: "workspace", workspaceSlug: "team", webUrl: "https://team.example.test", serverUrl: "https://api.example.test" } };
   const bridge = new Bridge(config, async (conversation, content, options) => { sent.push({ conversation, content, options }); return { messageid: "456" }; }, { log() {}, warn() {}, error() {} });
   const conversation = { kind, id: kind === "group" ? "42" : "alice" };
-  const delivery = { id: "d1", content: answer, comment_id: "c1", binding, conversation };
+  const delivery = { id: "d1", content: answer, comment_id: "c1", binding, conversation, notify_users: kind === "group" ? ["alice"] : [] };
   Object.assign(bridge.multica, {
     listAgents: async () => [{ id: agent, name: "fixture-agent" }],
     createChatSession: async () => ({ id: "chat", status: "active" }),
@@ -55,7 +55,7 @@ for (const kind of ["private", "group"]) {
       else await f.bridge.issueRelay.poll();
       const expected = withReplyMode(answer + (mode === "issue" ? footer.replace("TASK-1)", "TASK-1#comment-c1)") : chatFooter), mode, binding.identifier);
       assert.ok(f.sent.some(message => message.content === expected));
-      assert.ok(f.sent.every(message => message.content.startsWith(mode === "chat" ? "**[聊天模式]**\n\n" : "**[任务模式] TASK-1**\n\n")));
+      assert.ok(f.sent.filter(message => !message.options.notificationOnly).every(message => message.content.startsWith(mode === "chat" ? "**[聊天模式]**\n\n" : "**[任务模式] TASK-1**\n\n")));
       assert.ok(f.sent.every(message => message.options.atUser === undefined));
       assert.deepEqual(f.apiInputs, ["请分析问题"]);
       assert.equal(f.delivery.content, answer);
@@ -166,8 +166,8 @@ for (const kind of ["private", "group"]) {
       const before = f.sent.length;
       if (mode === "chat") await f.bridge.chat.poll();
       else await f.bridge.issueRelay.poll();
-      assert.equal(f.sent.length - before, 1);
-      const reply = f.sent.at(-1);
+      assert.equal(f.sent.length - before, kind === "group" ? 2 : 1);
+      const reply = f.sent.slice(before).find(message => !message.options.notificationOnly);
       assert.ok(reply.content.startsWith(withReplyMode("中文🙂🚀𝌆原文\n", mode, binding.identifier)));
       assert.match(reply.content, /回复较长，全文请在下方链接查看/);
       const target = mode === "chat" ? "team/chat?session=chat" : "team/issues/TASK-1#comment-c1";

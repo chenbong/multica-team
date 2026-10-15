@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { notifyUsers } from "./reply-mentions.js";
 
 // Only a leading, explicit creation request is routed to the issue workflow.
 // Mentions, quoted instructions, progress questions and negations remain chat.
@@ -51,7 +52,8 @@ export class ChatRelay {
     });
   }
 
-  async send(conversation, user, text, images, agentName, acknowledge = null, context = "", handoff = null) {
+  async send(conversation, user, text, images, agentName, acknowledge = null, context = "", handoff = null, recipients = []) {
+    const notificationUsers = notifyUsers(conversation, user, recipients);
     const key = this.key(conversation, user);
     return this.serial(key, async () => {
       const agents = await this.multica.listAgents();
@@ -89,7 +91,12 @@ export class ChatRelay {
         handoff?.beforeSubmit();
         const sent = await this.multica.sendChatMessage(thread.id, content, attachmentIds);
         if (!sent.task_id) throw new Error("聊天已提交但缺少执行 ID，请到网页版确认，不要重复发送");
-        this.state.pending[sent.task_id] = { sessionId: thread.id, conversation, user, at: Date.now() };
+        const previous = this.state.pending[sent.task_id];
+        if (previous && (previous.sessionId !== thread.id || this.key(previous.conversation, previous.user) !== key)) {
+          throw new Error("chat task reply destination changed");
+        }
+        const taskUsers = notifyUsers(conversation, user, [...(previous?.notifyUsers || []), ...notificationUsers]);
+        this.state.pending[sent.task_id] = { ...previous, sessionId: thread.id, conversation, user, at: Date.now(), ...(taskUsers.length ? { notifyUsers: taskUsers } : {}) };
         this.save();
         handoff?.afterSubmit();
         if (attachmentIds.some((id) => !(sent.attachment_ids || []).includes(id))) {
@@ -130,11 +137,15 @@ export class ChatRelay {
             let content = answer.failure_reason ? "回复失败：" + answer.failure_reason : answer.content || "本轮已完成，没有文字回复。";
             if (answer.attachments?.length) content += "\n\n本轮生成了附件，请在网页版聊天中查看。";
             // Retain pending delivery on a send failure; restart resumes polling.
-            await this.reply(pending.conversation, pending.user, content, { sessionId: pending.sessionId });
+            pending.replyProgress ||= {};
+            await this.reply(pending.conversation, pending.user, content, { sessionId: pending.sessionId, notifyUsers: pending.notifyUsers || [],
+              replyProgress: pending.replyProgress, saveProgress: () => this.save() });
             delete this.state.pending[taskId];
             this.save();
           } else if (Date.now() - pending.at > (this.config.pollTimeoutMs || 1800000)) {
-            await this.reply(pending.conversation, pending.user, "聊天请求仍未返回，使用 /status 查看状态；请求不会转为新 issue。", { sessionId: pending.sessionId });
+            pending.timeoutProgress ||= {};
+            await this.reply(pending.conversation, pending.user, "聊天请求仍未返回，使用 /status 查看状态；请求不会转为新 issue。", { sessionId: pending.sessionId, notifyUsers: pending.notifyUsers || [],
+              replyProgress: pending.timeoutProgress, saveProgress: () => this.save() });
             delete this.state.pending[taskId];
             this.save();
           }

@@ -35,6 +35,64 @@ test("relay command parsing keeps explicit issue creation and fixed binding oper
   assert.equal(relayOperation("/agent private-agent").operation, "binding");
 });
 
+test("group reply audiences are persisted with the original input and excluded from private requests", async t => {
+  const f = fixture(t);
+  await f.send("请处理并通知指定成员", { notifyUsers: ["BOB", "alice", "bob"], acknowledge: async () => true });
+  const request = f.requests.find(x => x.path === "issue-relay");
+  assert.deepEqual(request.body.notify_users, ["alice", "bob"]);
+  assert.equal(request.body.content, "请处理并通知指定成员");
+  f.requests.length = 0;
+  await f.send("私聊内容", { conversation: { kind: "private", id: "alice" }, messageId: "private-one", notifyUsers: ["bob"], acknowledge: async () => true });
+  assert.equal(f.requests.find(x => x.path === "issue-relay").body.notify_users, undefined);
+});
+
+test("issue Markdown and AT reminder checkpoint independently across restart and failed ACK", async t => {
+  const f = fixture(t), calls = [];
+  const item = { id: "mention-delivery", content: "**Reply**\n\n- Original content", comment_id: "c1", conversation: { kind: "group", id: "42" }, binding, notify_users: ["alice", "bob"] };
+  let failAt = true, failAck = true, acked = false, acks = 0;
+  const sender = async (conversation, content, options) => {
+    calls.push({ conversation, content, options });
+    if (options.notificationOnly && failAt) throw Error("AT transport failed");
+    return { messageid: "1234567890123456789" };
+  };
+  const request = async path => {
+    if (path.endsWith("/ack")) { acks++; if (failAck) throw Error("ACK failed"); acked = true; return {}; }
+    return { deliveries: acked ? [] : [item] };
+  };
+  const relay = f.bridge.issueRelay; relay.send = sender; relay.request = request;
+  await relay.poll();
+  assert.equal(relay.sentParts[item.id].next, 1);
+  assert.deepEqual(relay.sentParts[item.id].notifyUsers, ["alice", "bob"]);
+  assert.equal(acks, 0);
+  f.bridge.stop(); failAt = false;
+  const restored = new IssueRelay(f.config, {}, sender, { warn() {} }); restored.request = request;
+  t.after(() => restored.stop());
+  await restored.poll();
+  assert.equal(restored.sentParts[item.id].notified, true);
+  assert.equal(acks, 1);
+  failAck = false; await restored.poll();
+  assert.equal(acks, 2);
+  assert.equal(calls.filter(x => !x.options.notificationOnly).length, 1);
+  assert.equal(calls.filter(x => x.options.notificationOnly).length, 2);
+  assert.deepEqual(calls[2].options, { atUsers: ["alice", "bob"], notificationOnly: true });
+  assert.match(calls[0].content, /\*\*Reply\*\*/);
+  assert.equal(item.content, "**Reply**\n\n- Original content");
+});
+
+test("changed issue notification audiences pause retries instead of notifying a different person", async t => {
+  const f = fixture(t);
+  const item = { id: "changed-audience", content: "answer", conversation: { kind: "group", id: "42" }, binding, notify_users: ["alice"] };
+  let bodies = 0, notices = 0;
+  f.bridge.issueRelay.send = async (_c, _text, options) => {
+    if (options.notificationOnly) { notices++; throw Error("AT failed"); }
+    bodies++; return {};
+  };
+  f.bridge.issueRelay.request = async () => ({ deliveries: [item] });
+  await f.bridge.issueRelay.poll();
+  item.notify_users = ["mallory"]; await f.bridge.issueRelay.poll();
+  assert.equal(bodies, 1); assert.equal(notices, 1);
+});
+
 test("denied workspace user gets received reaction and owner notice but never starts Chat", async t => {
   const f = fixture(t);
   f.bridge.issueRelay.request = async () => ({ handled: true, silent: false, binding,
