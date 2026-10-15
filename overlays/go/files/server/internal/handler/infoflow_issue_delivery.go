@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -22,6 +23,7 @@ type infoFlowDeliveryRequest struct {
 type infoFlowDelivery struct {
 	AuthorAgentID    string               `json:"author_agent_id"`
 	AuthorName       string               `json:"author_name"`
+	AuthorType       string               `json:"author_type,omitempty"`
 	ID               string               `json:"id"`
 	Conversation     infoFlowConversation `json:"conversation"`
 	Content          string               `json:"content"`
@@ -33,7 +35,10 @@ type infoFlowDelivery struct {
 
 // Walk both exact reply ancestry and the authoring task's complete input set.
 // UNION (not UNION ALL) terminates cycles and prevents exponential path growth.
-// Every origin must identify the SAME binding generation. In particular a
+// Every IM origin must identify the SAME binding generation. No IM origin
+// plus a proven platform human input means a platform-authored conversation;
+// it may go to each active destination. Unrelated agent output is not broadcast.
+// In particular a
 // coalesced run fed by a private and a group source can never leak its combined
 // answer into the group, even if the agent chose the group comment as parent.
 const infoFlowDeliveryCandidates = `
@@ -43,8 +48,8 @@ CROSS JOIN LATERAL (
    SELECT 'comment'::text,c.id
    UNION
    SELECT next.kind,next.id FROM ancestry a
-   LEFT JOIN comment ac ON a.kind='comment' AND ac.id=a.id AND ac.issue_id=c.issue_id AND ac.workspace_id=c.workspace_id
-   LEFT JOIN agent_task_queue t ON a.kind='task' AND t.id=a.id AND t.issue_id=c.issue_id
+   LEFT JOIN comment ac ON a.kind='comment' AND ac.id=a.id
+   LEFT JOIN agent_task_queue t ON a.kind='task' AND t.id=a.id
    CROSS JOIN LATERAL (
      SELECT 'comment'::text AS kind,ac.parent_id AS id
      UNION ALL SELECT 'task',ac.source_task_id
@@ -54,14 +59,29 @@ CROSS JOIN LATERAL (
  ), origins AS (
    SELECT DISTINCT s.id,s.binding_id,s.generation,s.created_at FROM ancestry a JOIN infoflow_issue_source s
    ON (a.kind='comment' AND s.comment_id=a.id) OR (a.kind='task' AND s.task_id=a.id)
-   WHERE s.issue_id=c.issue_id
+ ), foreign_tasks AS (
+   SELECT a.id FROM ancestry a LEFT JOIN agent_task_queue t ON t.id=a.id LEFT JOIN agent ta ON ta.id=t.agent_id
+   WHERE a.kind='task' AND (t.id IS NULL OR ta.id IS NULL OR t.issue_id IS DISTINCT FROM c.issue_id OR ta.workspace_id<>c.workspace_id)
+ ), web_inputs AS (
+   SELECT ac.id FROM ancestry a JOIN comment ac ON a.kind='comment' AND ac.id=a.id
+   WHERE ac.issue_id=c.issue_id AND ac.workspace_id=c.workspace_id AND ac.author_type='member'
+   AND ac.type='comment' AND ac.created_at >= $6 AND ac.deleted_at IS NULL
+   AND NOT EXISTS(SELECT 1 FROM infoflow_issue_source direct WHERE direct.comment_id=ac.id)
  )
  SELECT (array_agg(id ORDER BY created_at DESC,id DESC))[1] AS source_id
- FROM origins HAVING count(DISTINCT (binding_id,generation))=1
- AND bool_and(binding_id=$1 AND generation=$2)
+ FROM origins HAVING NOT EXISTS(SELECT 1 FROM foreign_tasks) AND
+ ((count(*)=0 AND EXISTS(SELECT 1 FROM web_inputs)) OR (count(DISTINCT (binding_id,generation))=1
+ AND bool_and(binding_id=$1 AND generation=$2)))
 ) origin
-WHERE c.issue_id=$3 AND c.workspace_id=$4 AND c.author_type='agent' AND c.author_id=ANY($5::uuid[])
+LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
+WHERE c.issue_id=$3 AND c.workspace_id=$4 AND (
+ (c.author_type='agent' AND c.author_id=ANY($5::uuid[])) OR
+ (c.author_type='member' AND origin.source_id IS NULL AND c.type='comment'
+  AND NOT EXISTS(SELECT 1 FROM infoflow_issue_source direct WHERE direct.comment_id=c.id)
+  AND split_part(lower(u.email),'@',2)=$8
+  AND split_part(lower(u.email),'@',1) ~ '^[a-z0-9][a-z0-9._-]{0,127}$'))
 AND c.deleted_at IS NULL AND c.created_at >= $6 AND c.type IN ('comment','progress_update')
+AND (origin.source_id IS NOT NULL OR c.type='comment')
 AND NOT EXISTS(SELECT 1 FROM infoflow_issue_delivery d WHERE d.binding_id=$1 AND d.generation=$2 AND d.comment_id=c.id)
 ORDER BY c.created_at,c.id LIMIT $7`
 
@@ -167,7 +187,7 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 			return nil, err
 		}
 	}
-	rows, err := tx.Query(ctx, infoFlowDeliveryCandidates, b.ID, b.Generation, b.IssueID, s.WorkspaceID, authors, b.BoundAt, limit)
+	rows, err := tx.Query(ctx, infoFlowDeliveryCandidates, b.ID, b.Generation, b.IssueID, s.WorkspaceID, authors, b.BoundAt, limit, strings.ToLower(os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")))
 	if err != nil {
 		return nil, err
 	}
@@ -196,17 +216,17 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 			return nil, err
 		}
 	}
-	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,s.message_id,c.author_id::text,COALESCE(a.name,'智能体') FROM infoflow_issue_delivery d JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON a.id=c.author_id AND a.workspace_id=c.workspace_id
+	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,COALESCE(s.message_id,''),CASE WHEN c.author_type='member' THEN $7 ELSE c.author_id::text END,CASE WHEN c.author_type='member' THEN split_part(lower(u.email),'@',1) ELSE COALESCE(a.name,'智能体') END,CASE WHEN c.author_type='member' THEN 'user' ELSE c.author_type END FROM infoflow_issue_delivery d LEFT JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON c.author_type='agent' AND a.id=c.author_id AND a.workspace_id=c.workspace_id LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
 		WHERE d.binding_id=$1 AND d.generation=$2 AND d.acked_at IS NULL AND c.issue_id=$3 AND c.workspace_id=$4 AND c.deleted_at IS NULL
-		AND c.author_type='agent' AND c.author_id=ANY($6::uuid[])
-		ORDER BY d.created_at,d.id LIMIT $5`, b.ID, b.Generation, b.IssueID, s.WorkspaceID, limit, authors)
+		AND ((c.author_type='agent' AND c.author_id=ANY($6::uuid[])) OR (c.author_type='member' AND d.source_id IS NULL AND u.id IS NOT NULL))
+		ORDER BY d.created_at,d.id LIMIT $5`, b.ID, b.Generation, b.IssueID, s.WorkspaceID, limit, authors, s.AgentID)
 	if err != nil {
 		return nil, err
 	}
 	var out []infoFlowDelivery
 	for rows.Next() {
 		v := infoFlowDelivery{Conversation: c, IssueID: view.IssueID, Binding: view}
-		if err = rows.Scan(&v.ID, &v.CommentID, &v.Content, &v.ReplyToMessageID, &v.AuthorAgentID, &v.AuthorName); err != nil {
+		if err = rows.Scan(&v.ID, &v.CommentID, &v.Content, &v.ReplyToMessageID, &v.AuthorAgentID, &v.AuthorName, &v.AuthorType); err != nil {
 			break
 		}
 		out = append(out, v)

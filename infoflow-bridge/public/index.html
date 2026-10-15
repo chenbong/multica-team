@@ -579,11 +579,17 @@ form.addEventListener("submit", async (event) => {
     render();
     warmChatLinks();
     resetForm();
-    toast("已保存，连接状态见上面的列表");
+    toast(bindingSaveMessage(data.bindingNotice));
   } catch (error) {
     toast(error.message);
   }
 });
+
+function bindingSaveMessage(notice) {
+  if (notice?.status === "failed") return "绑定已保存，但如流确认消息发送失败，请检查机器人可见范围后点击“发测试消息”。";
+  if (notice?.status === "sent") return "绑定成功，已向你的机器人私聊发送确认消息";
+  return "已保存，连接状态见上面的列表";
+}
 
 function resetForm() {
   // Named form controls (including the clear button) can shadow reset().

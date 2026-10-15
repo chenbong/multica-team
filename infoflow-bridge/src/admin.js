@@ -7,6 +7,8 @@ import { AdminAuth } from "./auth.js";
 import { DEFAULT_BASE_URL, ROOT, loadConfig, redactRobot, saveRobots } from "./config.js";
 import { fetchRobotLink, fetchRobotName } from "./infoflow.js";
 import { Multica } from "./multica.js";
+import { randomUUID } from "node:crypto";
+import { saveRobotBinding } from "./robot-binding-notice.js";
 
 const PAGE = resolve(ROOT, "public/index.html");
 const SESSION_COOKIE = "bridge_admin";
@@ -202,7 +204,7 @@ async function route(request, response, runtime, accounts, auth, logger) {
 
     const merged = {
       ...previous,
-      id: input.id || previous.id,
+      id: input.id || previous.id || randomUUID(),
       name,
       purpose: "task",
       profile: account.profile,
@@ -228,10 +230,9 @@ async function route(request, response, runtime, accounts, auth, logger) {
     };
     if (index === -1) robots.push(merged);
     else robots[index] = merged;
-    saveRobots(robots);
-    await runtime.sync(loadConfig());
+    const bindingNotice = await saveRobotBinding({ runtime, robots, previous, robot: merged, email: session.email, logger });
     logger.log(`admin saved robot ${merged.name}`);
-    send(response, 200, await snapshot(runtime, accounts, account.profile, session));
+    send(response, 200, { ...await snapshot(runtime, accounts, account.profile, session), bindingNotice });
     return;
   }
 

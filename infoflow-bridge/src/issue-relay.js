@@ -7,6 +7,10 @@ import { messageIdString } from "./conversation-context.js";
 import { formatReply, replyUrl, withReplyMode, noticeReplyMode } from "./reply-format.js";
 import { pollWebGroupJobs } from "./web-group-bindings.js";
 import { pollWebPrivateJobs, privateRobotMetadata } from "./web-private-bindings.js";
+import { pollConversationNotices } from "./conversation-notices.js";
+import { pollRobotDirectory } from "./robot-directory.js";
+import { groupUsername } from "./issue-groups.js";
+import { formatCommandNotice } from "./commands.js";
 
 const DEFERRED_BINDING = Symbol("deferred-binding");
 const RECEIPT_ATTEMPTED = Symbol("receipt-attempted");
@@ -14,7 +18,7 @@ const RECEIPT_ATTEMPTED = Symbol("receipt-attempted");
 // The service credential only authorizes the trusted inbound bridge. Never put
 // it in agent prompts, CLI profiles, robot admin responses, or daemon requests.
 export class IssueRelay {
-  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null, getPrivateRobotInfo = null, privateRobotInfoTimeoutMs = 10000, acknowledgeReceipt = null } = {}) {
+  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null, getPrivateRobotInfo = null, getRobotAvailable = () => true, privateRobotInfoTimeoutMs = 10000, acknowledgeReceipt = null, now = Date.now } = {}) {
     this.config = config;
     this.multica = multica;
     this.send = send;
@@ -24,8 +28,10 @@ export class IssueRelay {
     this.stageImages = stageImages;
     this.groups = groups;
     this.getPrivateRobotInfo = getPrivateRobotInfo;
+    this.getRobotAvailable = getRobotAvailable;
     this.privateRobotInfoTimeoutMs = privateRobotInfoTimeoutMs;
     this.acknowledgeReceipt = acknowledgeReceipt;
+    this.now = now;
     this.enabled = config.issueRelay?.enabled === true;
     this.queues = new Map();
     this.stopped = false;
@@ -34,6 +40,8 @@ export class IssueRelay {
     this.inboxPath = this.path + ".inbox";
     this.quarantinePath = this.path + ".quarantine";
     this.decisionsPath = this.path + ".decisions";
+    this.noticesPath = this.path + ".notices";
+    this.sentNotices = {};
     // A receipt belongs to the physical robot/message, not the current agent.
     this.receiptsPath = config.statePath + ".received-" + createHash("sha256")
       .update(JSON.stringify([config.robotId])).digest("hex").slice(0, 16) + ".json";
@@ -47,8 +55,14 @@ export class IssueRelay {
       catch (error) { if (error.code !== "ENOENT") throw error; }
       try { this.receipts = JSON.parse(readFileSync(this.receiptsPath, "utf8")); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
+      try { this.sentNotices = JSON.parse(readFileSync(this.noticesPath, "utf8")); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
       this.timer = setInterval(() => void this.poll(), config.pollIntervalMs || 5000);
       this.timer.unref?.();
+      this.noticeTimer = setInterval(() => void this.pollConversationNotices(), config.pollIntervalMs || 5000);
+      this.noticeTimer.unref?.();
+      this.directoryTimer = setInterval(() => void this.pollRobotDirectory(), config.pollIntervalMs || 5000);
+      this.directoryTimer.unref?.();
       if (this.groups) {
         // Web admission has its own timer: slow membership/invitation calls
         // must not delay established group leases, input retries or deliveries.
@@ -63,7 +77,33 @@ export class IssueRelay {
   stop() {
     this.stopped = true;
     clearInterval(this.timer); clearInterval(this.webJobTimer); clearInterval(this.webPrivateJobTimer);
+    clearInterval(this.noticeTimer); clearInterval(this.directoryTimer);
     this.timer = null; this.webJobTimer = null; this.webPrivateJobTimer = null;
+    this.noticeTimer = null; this.directoryTimer = null;
+  }
+
+  async pollConversationNotices() {
+    if (!this.enabled || this.stopped || this.noticePolling) return;
+    this.noticePolling = true;
+    try {
+      const scope = await this.scope();
+      if (!this.stopped) await pollConversationNotices(this, scope);
+    } catch (error) {
+      if (!this.stopped && error.status !== 404) this.logger.warn("conversation notice pending");
+    } finally { this.noticePolling = false; }
+  }
+
+  async pollRobotDirectory() {
+    if (!this.enabled || this.stopped || this.directoryPolling ||
+        (this.directoryPolledAt ?? -Infinity) + 60000 > this.now()) return;
+    this.directoryPolling = true;
+    this.directoryPolledAt = this.now();
+    try {
+      const scope = await this.scope();
+      if (!this.stopped) await pollRobotDirectory(this, scope);
+    } catch (error) {
+      if (!this.stopped && error.status !== 404) this.logger.warn("robot directory update pending");
+    } finally { this.directoryPolling = false; }
   }
 
   async pollWebBindings() {
@@ -132,7 +172,7 @@ export class IssueRelay {
     return result;
   }
 
-  async privateBindingMetadata() {
+  async privateBindingMetadata({ includeDisabled = false } = {}) {
     if (typeof this.getPrivateRobotInfo !== "function") return {};
     let timer;
     try {
@@ -140,9 +180,10 @@ export class IssueRelay {
         Promise.resolve().then(() => this.getPrivateRobotInfo()),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("metadata timeout")), this.privateRobotInfoTimeoutMs); }),
       ]);
-      const metadata = privateRobotMetadata(info);
-      if (metadata.reason) return {};
-      return { robot_chat_id: metadata.robot_chat_id, robot_name: metadata.robot_name };
+      const metadata = privateRobotMetadata(info, { includeDisabled });
+      if (metadata.reason && !includeDisabled) return {};
+      return { robot_chat_id: metadata.robot_chat_id, robot_name: metadata.robot_name,
+        ...(includeDisabled ? { private_enabled: !metadata.reason } : {}) };
     } catch {
       // Public display metadata is optional; a failed read must not lose an IM
       // bind or expose SDK errors/credentials. A later explicit bind can retry.
@@ -322,7 +363,8 @@ export class IssueRelay {
       const body = record.preparedBody ? structuredClone(record.preparedBody) : {
         ...scope, conversation: { kind: conversation.kind, id: String(conversation.id) },
         sender: user, message_id: String(messageId), operation: parsed.operation,
-        ...(parsed.explicitBinding && parsed.operation === "binding" ? { command: "binding" } : {}),
+        ...(parsed.command ? { command: parsed.command } : parsed.explicitBinding && parsed.operation === "binding" ? { command: "binding" } : {}),
+        ...(parsed.statusPage ? { status_page: parsed.statusPage } : {}),
         ...(parsed.issue_ref ? { issue_ref: parsed.issue_ref } : {}),
         content: parsed.content,
         ...(replyToMessageId ? { reply_to_message_id: String(replyToMessageId) } : {}),
@@ -339,7 +381,7 @@ export class IssueRelay {
           throw Object.assign(new Error("unversioned prepared input requires operator review"), { status: 409 });
         }
         if (record.preflightPending || (!wasPrepared && (versionedOperation ||
-            (this.groups && conversation.kind === "group" && parsed.operation === "binding")))) {
+            (this.groups && conversation.kind === "group" && parsed.operation === "binding" && !parsed.command)))) {
           // Routing is server-authoritative: preserve the text/task numbers and
           // exact quoted message ID, including when checking a pinned retry.
           preflight = await this.request("issue-relay", { ...body, operation: "binding", ...(unbind ? { command: "unbind" } : {}) });
@@ -358,7 +400,8 @@ export class IssueRelay {
             // a Chat fallback, or a mutation with an unpinned destination.
             record.routingNotice = { handled: true, silent: preflight.silent,
               notice: preflight.notice || (unbind ? "当前对话未绑定所指定的任务。" : undefined),
-              conversation_mode: preflight.conversation_mode };
+              conversation_mode: preflight.conversation_mode,
+              notice_kind: preflight.notice_kind, task_choices: preflight.task_choices };
             this.saveInbox();
             await this.sendNotice(conversation, record.routingNotice);
             return true;
@@ -443,6 +486,12 @@ export class IssueRelay {
         result = await this.request("issue-relay", body);
       } finally { await staged?.cleanup(); }
       this.validateDecision(result);
+      if (result.handled && ["help", "status"].includes(parsed.command)) {
+        // Freeze read-only command results across retries; never reinterpret
+        // them as task input after the conversation's bindings change.
+        record.routingNotice = result;
+        this.saveInbox();
+      }
       if (this.groups && conversation.kind === "group" && result.binding?.group && ["bind", "create"].includes(parsed.operation) && result.can_reconcile_group === true) {
         // Pending bind/create notices must not claim success until the leader
         // (or the single assigned agent) is observed in the real group.
@@ -465,7 +514,15 @@ export class IssueRelay {
       if (parsed.operation === "binding" && result.binding && result.can_comment && !result.notice) {
         result.notice = `当前绑定任务：${result.binding.identifier || result.binding.issue_id}${result.binding.title ? " " + result.binding.title : ""}\n回复该任务消息或注明任务编号可发布评论；使用 /unbind ${result.binding.identifier || result.binding.issue_id} 解除此任务绑定。`;
       }
-      await this.sendNotice(conversation, result);
+      // Only an explicit durable-success flag suppresses the legacy mutation
+      // notice. Preflight/permission/admission errors above remain visible.
+      if (!(result.suppress_im_notice === true && result.can_comment !== false &&
+          ["bind", "create", "unbind"].includes(parsed.operation) &&
+          (parsed.operation === "unbind" || (result.binding &&
+            (!result.binding.group || result.binding.group.state === "active") &&
+            (!result.binding.private || result.binding.private.state === "active"))))) {
+        await this.sendNotice(conversation, result);
+      }
       return true;
   }
 
@@ -542,7 +599,12 @@ export class IssueRelay {
   async sendNotice(conversation, result) {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
     if (this.stopped) throw new Error("issue relay stopped before notice delivery");
-    await this.send(conversation, formatReply(result.notice, { mode: noticeReplyMode(result), identifier: result.binding?.identifier,
+    const options = { mode: noticeReplyMode(result), identifier: result.binding?.identifier };
+    if (["help", "status", "task_choices"].includes(result.notice_kind)) {
+      await this.send(conversation, formatCommandNotice(this.config.multica, result), {});
+      return;
+    }
+    await this.send(conversation, formatReply(result.notice, { ...options,
       url: replyUrl(this.config.multica, { binding: result.binding, commentId: result.comment_id, sessionId: result.session_id }) }), {});
   }
 
@@ -584,6 +646,11 @@ export class IssueRelay {
     renameSync(this.path + ".tmp", this.path);
   }
 
+  saveNotices() {
+    writeFileSync(this.noticesPath + ".tmp", JSON.stringify(this.sentNotices), { mode: 0o600 });
+    renameSync(this.noticesPath + ".tmp", this.noticesPath);
+  }
+
   async poll() {
     if (!this.enabled || this.stopped || this.polling) return;
     this.polling = true;
@@ -608,6 +675,9 @@ export class IssueRelay {
             !["private", "group"].includes(item.conversation?.kind) || !item.conversation?.id) {
           throw new Error("invalid issue delivery");
         }
+        const authorType = item.author_type ?? "agent";
+        if (!["agent", "user"].includes(authorType)) throw new Error("invalid delivery author type");
+        const userLabel = authorType === "user" ? `@${groupUsername(item.author_name)}：` : "";
         const shared = this.groups && item.conversation.kind === "group";
         const checkpoints = shared ? this.groups.deliveries : this.sentParts;
         const save = () => shared ? this.groups.saveDeliveries() : this.save();
@@ -620,8 +690,11 @@ export class IssueRelay {
         const parts = legacy ? this.replyParts(item.content, binding, shared ? 1200 : 1800) : [item.content];
         // Hash the full content, not just the displayed prefix. A changed tail
         // cannot be silently acknowledged as the already delivered response.
-        const digest = createHash("sha256").update(legacy ? parts.join("") :
-          JSON.stringify([item.content, this.issueUrl(binding, this.config.multica.webUrl), item.comment_id || null])).digest("hex");
+        const canonical = legacy ? parts.join("") :
+          JSON.stringify([item.content, this.issueUrl(binding, this.config.multica.webUrl), item.comment_id || null]);
+        // Existing agent checkpoint digests stay byte-for-byte unchanged.
+        const digest = createHash("sha256").update(authorType === "user" ?
+          JSON.stringify([canonical, authorType, userLabel]) : canonical).digest("hex");
         if (prior && prior.digest !== digest) throw new Error("issue delivery content changed during retry");
         if (prior && (!Number.isInteger(prior.next) || prior.next < 0 || prior.next > parts.length)) throw new Error("invalid issue delivery checkpoint progress");
         let route = null;
@@ -654,7 +727,7 @@ export class IssueRelay {
           }
           const content = legacy
             ? withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], binding), "issue", binding.identifier)
-            : formatReply(parts[index], { mode: "issue", identifier: binding.identifier, label: route?.pin.label || "",
+            : formatReply(userLabel + parts[index], { mode: "issue", identifier: binding.identifier, label: route?.pin.label || "",
               url: replyUrl(this.config.multica, { binding, commentId: item.comment_id }) });
           const receipt = await (route?.send || this.send)(item.conversation, content, {});
           // Private sendToUser returns msgkey, whereas the group send API uses
@@ -694,6 +767,11 @@ function joinPath(directory, id) {
 }
 
 export function relayOperation(text) {
+  const command = String(text).trim().match(/^\/(help|status)(?:\s+([\s\S]*))?$/i);
+  if (command && !command[2]) return { operation: "binding", command: command[1].toLowerCase(), content: "" };
+  if (command?.[1].toLowerCase() === "status" && /^[1-9]\d{0,4}$/.test(command[2]?.trim())) return { operation: "binding", command: "status", statusPage: Number(command[2].trim()), content: "" };
+  if (command?.[1].toLowerCase() === "status") return { operation: "binding", command: "task_status", issue_ref: command[2].trim(), content: "" };
+  if (/^\/binding\s*$/i.test(String(text).trim())) return { operation: "binding", command: "status", content: "", explicitBinding: true };
   const match = String(text).trim().match(/^\/(bind|binding|unbind)(?:\s+([\s\S]*))?$/i);
   if (match) return { operation: match[1].toLowerCase(), issue_ref: (match[2] || "").trim(), content: "", explicitBinding: true };
   const create = issueRequest(String(text).trim());

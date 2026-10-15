@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS infoflow_conversation_notice_poll_idx;

@@ -263,6 +263,7 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	state := "pending"
+	previousGroupState := b.GroupState
 	var verified any
 	revalidated := false
 	if req.LeaderPresent {
@@ -287,6 +288,13 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	v := sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, true)
+	queuedNotice := state == "active" && (previousGroupState != "active" || revalidated)
+	if queuedNotice {
+		if err = infoFlowEnqueueNotice(r.Context(), tx, req.infoFlowScope, req.Conversation, b, "bound"); err != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
+	}
 	notice := "等待队长或负责智能体的机器人入群"
 	if state == "active" {
 		notice = "群聊任务绑定已启用"
@@ -295,7 +303,7 @@ func (h *Handler) InfoFlowIssueGroupStatus(w http.ResponseWriter, r *http.Reques
 		infoFlowError(w, 500, "commit")
 		return
 	}
-	writeJSON(w, 200, infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Binding: v, Notice: notice, BindingRevalidated: revalidated})
+	writeJSON(w, 200, infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Binding: v, Notice: notice, BindingRevalidated: revalidated, SuppressIMNotice: queuedNotice})
 }
 
 func infoFlowGroupURL(id string) string {

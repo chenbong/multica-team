@@ -29,7 +29,7 @@ test("admin reset uses the native prototype when a named control shadows reset",
 test("clear and successful save both use the same reset handler", () => {
   assert.match(html, /id="reset"/);
   assert.match(html, /getElementById\("reset"\)\.addEventListener\("click", resetForm\)/);
-  assert.match(html, /warmChatLinks\(\);\s+resetForm\(\);\s+toast\("已保存/);
+  assert.match(html, /warmChatLinks\(\);\s+resetForm\(\);\s+toast\(bindingSaveMessage\(data\.bindingNotice\)\)/);
 });
 
 test("robot setup guide includes the requested enterprise group visibility step", () => {

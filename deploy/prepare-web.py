@@ -15,7 +15,7 @@ KEYS = (
     "MULTICA_CLI_INSTALL_URL", "MULTICA_CLI_INSTALL_WINDOWS_URL",
     "MULTICA_INFOFLOW_BRIDGE_URL", "MULTICA_INFOFLOW_BRIDGE_LABEL",
     "MULTICA_DAEMON_RUNTIME_DEFAULTS", "MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS",
-    "MULTICA_ONEAPI_TRACE_URL", "MULTICA_QUICKSTART_URL",
+    "MULTICA_ONEAPI_TRACE_URL", "MULTICA_QUICKSTART_URL", "MULTICA_INFOFLOW_USER_GROUP_URL",
 )
 REQUIRED = tuple(key for key in KEYS if key not in (
     "MULTICA_BRAND_BRIDGE_URL", "MULTICA_CLI_INSTALL_WINDOWS_URL",
@@ -48,8 +48,11 @@ def verify_output(target, config):
     page = (target / "packages/views/auth/login-page.tsx").read_text()
     if config["MULTICA_VERIFICATION_BOT_URL"] not in page or "$.signin.verification_bot_hint" not in page or "$.verify.title_link" not in page:
         raise ValueError("Generated login page lost verification robot instructions")
+    for key in ("MULTICA_QUICKSTART_URL", "MULTICA_INFOFLOW_USER_GROUP_URL"):
+        if config[key] not in page:
+            raise ValueError(f"Generated login page lost {key}")
     sidebar = (target / "packages/views/layout/app-sidebar.tsx").read_text()
-    for key in ("MULTICA_ONEAPI_TRACE_URL", "MULTICA_QUICKSTART_URL"):
+    for key in ("MULTICA_ONEAPI_TRACE_URL", "MULTICA_QUICKSTART_URL", "MULTICA_INFOFLOW_USER_GROUP_URL"):
         if config[key] not in sidebar:
             raise ValueError(f"Generated sidebar lost {key}")
 

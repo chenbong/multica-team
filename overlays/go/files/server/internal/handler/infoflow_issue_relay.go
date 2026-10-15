@@ -46,6 +46,7 @@ type infoFlowRelayRequest struct {
 	MessageID          string               `json:"message_id"`
 	Operation          string               `json:"operation"`
 	Command            string               `json:"command,omitempty"`
+	StatusPage         int                  `json:"status_page,omitempty"`
 	IssueRef           string               `json:"issue_ref,omitempty"`
 	Content            string               `json:"content,omitempty"`
 	ReplyToMessageID   string               `json:"reply_to_message_id,omitempty"`
@@ -78,6 +79,10 @@ type infoFlowRelayResponse struct {
 	Notice             string               `json:"notice,omitempty"`
 	Binding            *infoFlowBindingView `json:"binding,omitempty"`
 	CommentID          string               `json:"comment_id,omitempty"`
+	SuppressIMNotice   bool                 `json:"suppress_im_notice,omitempty"`
+	NoticeKind         string               `json:"notice_kind,omitempty"`
+	TaskChoices        []infoFlowTaskChoice `json:"task_choices,omitempty"`
+	StatusPage         int                  `json:"status_page,omitempty"`
 }
 
 // Routing metadata is separate from the retained issue link on unbind notices.
@@ -417,10 +422,18 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sh, flush := h.infoFlowScoped(tx)
+	if req.Operation == "binding" && (req.Command == "help" || req.Command == "status") {
+		sh.infoFlowConversationCommand(w, r, tx, req)
+		return
+	}
 	var b infoFlowBinding
 	{
 		var notice string
 		b, notice, err = sh.infoFlowRouteGroup(r.Context(), tx, req)
+		var choiceNotice *infoFlowTaskChoiceNotice
+		if errors.As(err, &choiceNotice) {
+			notice, err = choiceNotice.Error(), nil
+		}
 		if errors.Is(err, errInfoFlowGroupEcho) {
 			writeJSON(w, 200, infoFlowRelayResponse{Handled: true, Silent: true, ConversationMode: "issue"})
 			return
@@ -438,14 +451,22 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				infoFlowError(w, 409, "pinned route unavailable")
 				return
 			}
+			out := infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Notice: notice}
 			if _, _, e := sh.infoFlowIdentity(r.Context(), req.Sender, req.WorkspaceID); e != nil {
 				if !errors.Is(e, pgx.ErrNoRows) {
 					infoFlowError(w, 500, "identity")
 					return
 				}
-				notice = "没有工作区权限，无法评论，请向[" + sh.infoFlowOwner(r.Context(), req.WorkspaceID, nil) + "]申请工作区权限"
+				out.Notice = "没有工作区权限，无法评论，请向[" + sh.infoFlowOwner(r.Context(), req.WorkspaceID, nil) + "]申请工作区权限"
+			} else if choiceNotice != nil {
+				out.NoticeKind = "task_choices"
+				out.TaskChoices, err = sh.infoFlowTaskChoices(r.Context(), tx, req.WorkspaceID, choiceNotice.Bindings)
+				if err != nil {
+					infoFlowError(w, 500, "task choices")
+					return
+				}
 			}
-			writeJSON(w, 200, infoFlowRelayResponse{Handled: true, ConversationMode: "issue", Notice: notice})
+			writeJSON(w, 200, out)
 			return
 		}
 	}
@@ -623,6 +644,16 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			// unbound Chat message. Do not redownload media or fall through.
 			resp.Handled, resp.Silent, resp.CanComment = true, true, false
 		}
+		if req.Command == "task_status" && b.IssueID.Valid {
+			choices, e := sh.infoFlowTaskChoices(r.Context(), tx, req.WorkspaceID, []infoFlowBinding{b})
+			if e != nil {
+				infoFlowError(w, 500, "task status")
+				return
+			}
+			if len(choices) == 1 {
+				resp.Notice = choices[0].Identifier + "：" + choices[0].Status
+			}
+		}
 		writeJSON(w, 200, resp)
 		return
 	}
@@ -797,6 +828,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 	var commentID, taskID pgtype.UUID
 	previousBindingView := resp.Binding
 	previousIssueID := b.IssueID
+	previousBinding := b
 	var uploads []string
 	committed := false
 	defer func() {
@@ -1078,6 +1110,20 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 				resp.CanReconcileGroup = true
 			}
 		}
+	}
+	if req.Operation == "unbind" {
+		previousBinding.BinderID = user.ID
+		if err = infoFlowEnqueueNotice(r.Context(), tx, req.infoFlowScope, req.Conversation, previousBinding, "unbound"); err != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
+		resp.SuppressIMNotice = true
+	} else if req.Conversation.Kind == "private" && (req.Operation == "bind" || req.Operation == "create") {
+		if err = infoFlowEnqueueNotice(r.Context(), tx, req.infoFlowScope, req.Conversation, b, "bound"); err != nil {
+			infoFlowError(w, 500, "binding notice")
+			return
+		}
+		resp.SuppressIMNotice = true
 	}
 	resp.Binding = sh.infoFlowBindingView(r.Context(), b, req.WorkspaceID, true)
 	if groupRepeat && resp.Binding != nil && resp.Binding.Group != nil {

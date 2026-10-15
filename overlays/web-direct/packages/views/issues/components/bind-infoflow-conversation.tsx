@@ -15,7 +15,7 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, Di
 import { useT } from "../../i18n";
 import { IssueInfoFlowGroupBinding } from "./issue-infoflow-group-binding";
 
-export function BindInfoFlowConversation({ workspaceId, issueId }: { workspaceId: string; issueId: string }) {
+export function BindInfoFlowConversation({ workspaceId, issueId, managementURL = "" }: { workspaceId: string; issueId: string; managementURL?: string }) {
   const { t } = useT("issues");
   const userId = useAuthStore((state) => state.user?.id);
   const query = useIssueInfoFlowConversations(workspaceId, issueId);
@@ -48,16 +48,17 @@ export function BindInfoFlowConversation({ workspaceId, issueId }: { workspaceId
         <MessageSquare aria-hidden="true" />{t(($) => $.infoflow_conversations.bind)}
       </DialogTrigger>}
       {open && <ConversationDialog key={`${userId}:${workspaceId}:${issueId}`} status={status} readError={query.isError || !userId}
-        refreshing={query.isFetching} refresh={() => { void query.refetch(); }} bind={bind} unbind={unbind} cancel={cancel} />}
+        refreshing={query.isFetching} refresh={() => { void query.refetch(); }} bind={bind} unbind={unbind} cancel={cancel} managementURL={managementURL} />}
     </Dialog>
   </>;
 }
 
-function ConversationDialog({ status, readError, refreshing, refresh, bind, unbind, cancel }: {
+function ConversationDialog({ status, readError, refreshing, refresh, bind, unbind, cancel, managementURL }: {
   status?: InfoFlowConversationsStatus;
   readError: boolean;
   refreshing: boolean;
   refresh: () => void;
+  managementURL: string;
   bind: ReturnType<typeof useBindIssueInfoFlowConversation>;
   unbind: ReturnType<typeof useUnbindIssueInfoFlowConversation>;
   cancel: ReturnType<typeof useCancelIssueInfoFlowRequest>;
@@ -68,6 +69,8 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
   const privateStatus = status?.private;
   const groupCanManage = status?.enabled === true && group?.canManage === true && !readError;
   const privateCanManage = status?.enabled === true && privateStatus?.canManage === true && !readError;
+  const privateRobot = privateCanManage && privateStatus?.eligible ? privateStatus.robot : undefined;
+  const robotBlocked = privateRobot && ["missing", "ambiguous", "unavailable"].includes(privateRobot.state);
   const reserved = group?.binding?.groupId || (group?.request && group.request.state !== "failed" ? group.request.groupId : undefined);
   const [kind, setKind] = useState<"group" | "private">(!groupCanManage && privateCanManage ? "private" : "group");
   const [mode, setMode] = useState<"existing" | "manual">(!reserved && !group?.request && group?.groups.length ? "existing" : "manual");
@@ -88,7 +91,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
   const request = kind === "group" ? group?.request : privateStatus?.request;
   const cancellable = status?.enabled === true && !readError && request?.canCancel === true && !!request.generation;
   const writable = kind === "group" ? groupCanManage && !groupActive && !groupWaiting && !!target :
-    privateCanManage && privateStatus?.eligible === true && !privateWaiting && !privateActive;
+    privateCanManage && privateStatus?.eligible === true && !robotBlocked && !privateWaiting && !privateActive;
   const reasonCopy: Record<string, string> = {
     approval_pending: t(($) => $.infoflow_groups.approval),
     invitation_failed: t(($) => $.infoflow_groups.invitation_failed),
@@ -203,6 +206,14 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
           {groupFailed && <p role="alert">{reasonLabel(group?.request?.reason, t(($) => $.infoflow_groups.failed))}</p>}
         </TabsContent>
         <TabsContent value="private" className="grid gap-3 pt-2">
+          {privateRobot?.name && <p className="break-words">{t(($) => $.infoflow_conversations.private_robot)}：{privateRobot.name}</p>}
+          {privateRobot?.state === "missing" && <p role="status">
+            {managementURL ? <a href={managementURL} target="_blank" rel="noreferrer" className="underline underline-offset-4">
+              {t(($) => $.infoflow_conversations.bind_robot_first)}
+            </a> : t(($) => $.infoflow_conversations.bind_robot_first)}
+          </p>}
+          {privateRobot?.state === "ambiguous" && <p role="status">{t(($) => $.infoflow_conversations.private_missing)}</p>}
+          {privateRobot?.state === "unavailable" && <p role="status">{t(($) => $.infoflow_conversations.private_unavailable)}</p>}
           {privateStatus?.reason && reasonLabel(privateStatus.reason) !== t(($) => $.infoflow_conversations.private_restriction) &&
             <p className="text-caption">{reasonLabel(privateStatus.reason)}</p>}
           {privateStatus?.eligible && !privateCanManage && <p>{t(($) => $.infoflow_conversations.no_manage)}</p>}

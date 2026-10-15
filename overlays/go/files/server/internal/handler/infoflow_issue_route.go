@@ -206,9 +206,27 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 	if req.Operation == "bind" {
 		return infoFlowBinding{}, "请指定要绑定的任务编号", nil
 	}
-	rows, err := tx.Query(ctx, `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind=$3 AND conversation_id=$2 AND issue_id IS NOT NULL AND ($3='group' OR (robot_id=$4 AND agent_id::text=lower($5))) ORDER BY issue_id,id`, req.WorkspaceID, req.Conversation.ID, req.Conversation.Kind, req.RobotID, req.AgentID)
+	candidates, err := h.infoFlowAssociatedBindings(ctx, tx, req)
 	if err != nil {
 		return infoFlowBinding{}, "", err
+	}
+	if len(candidates) == 1 {
+		return candidates[0], "", nil
+	}
+	if len(candidates) > 1 {
+		return infoFlowBinding{}, "", &infoFlowTaskChoiceNotice{Bindings: candidates}
+	}
+	if anyGroup {
+		return infoFlowBinding{}, "当前对话没有可路由到该智能体的任务，请指定已绑定的任务编号或联系任务负责人", nil
+	}
+	return infoFlowBinding{}, "", nil
+}
+
+// Ambiguous routing choices use the same scope as unique-task routing.
+func (h *Handler) infoFlowAssociatedBindings(ctx context.Context, tx pgx.Tx, req infoFlowRelayRequest) ([]infoFlowBinding, error) {
+	rows, err := tx.Query(ctx, `SELECT id::text FROM infoflow_issue_binding WHERE workspace_id=$1 AND conversation_kind=$3 AND conversation_id=$2 AND issue_id IS NOT NULL AND ($3='group' OR (robot_id=$4 AND agent_id::text=lower($5))) ORDER BY issue_id,id`, req.WorkspaceID, req.Conversation.ID, req.Conversation.Kind, req.RobotID, req.AgentID)
+	if err != nil {
+		return nil, err
 	}
 	var ids []string
 	for rows.Next() {
@@ -223,13 +241,13 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 	}
 	rows.Close()
 	if err != nil {
-		return infoFlowBinding{}, "", err
+		return nil, err
 	}
 	var candidates []infoFlowBinding
 	for _, id := range ids {
 		b, e := infoFlowLoadBindingID(ctx, tx, req.infoFlowScope, req.Conversation, id)
 		if e != nil {
-			return b, "", e
+			return nil, e
 		}
 		if req.Operation == "message" {
 			var live string
@@ -238,7 +256,7 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 				continue
 			}
 			if e != nil {
-				return b, "", e
+				return nil, e
 			}
 		}
 		if req.Conversation.Kind == "private" {
@@ -250,22 +268,19 @@ func (h *Handler) infoFlowRouteGroup(ctx context.Context, tx pgx.Tx, req infoFlo
 		}
 		t, reason, e := h.infoFlowTopology(ctx, b.IssueID, req.WorkspaceID)
 		if e != nil {
-			return b, "", e
+			return nil, e
 		}
 		if reason == "" && slices.Contains(t.AgentIDs, strings.ToLower(req.AgentID)) {
 			candidates = append(candidates, b)
 		}
 	}
-	if len(candidates) == 1 {
-		return candidates[0], "", nil
-	}
-	if len(candidates) > 1 {
-		return infoFlowBinding{}, "当前智能体关联多个任务，请回复对应任务消息或指定任务编号", nil
-	}
-	if anyGroup {
-		return infoFlowBinding{}, "当前对话没有可路由到该智能体的任务，请指定已绑定的任务编号或联系任务负责人", nil
-	}
-	return infoFlowBinding{}, "", nil
+	return candidates, nil
+}
+
+type infoFlowTaskChoiceNotice struct{ Bindings []infoFlowBinding }
+
+func (*infoFlowTaskChoiceNotice) Error() string {
+	return "当前智能体关联多个任务，请回复对应任务消息或带上指定任务编号"
 }
 
 var errInfoFlowRouteChanged = errors.New("binding route changed")

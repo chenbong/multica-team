@@ -58,6 +58,7 @@ func newInfoFlowFixture(t *testing.T) infoFlowTestFixture {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for _, sql := range []string{
+			`DELETE FROM infoflow_conversation_notice WHERE binding_id IN (SELECT id FROM infoflow_issue_binding WHERE robot_id=$1)`,
 			`DELETE FROM infoflow_issue_delivery WHERE binding_id IN (SELECT id FROM infoflow_issue_binding WHERE robot_id=$1)`,
 			`DELETE FROM infoflow_issue_source WHERE binding_id IN (SELECT id FROM infoflow_issue_binding WHERE robot_id=$1)`,
 			`DELETE FROM infoflow_issue_binding WHERE robot_id=$1`,

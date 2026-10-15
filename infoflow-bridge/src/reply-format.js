@@ -30,14 +30,14 @@ export function replyUrl(multica, { binding = null, commentId = null, sessionId 
 
 // Budget the complete IM message, including a pinned leader attribution. The
 // original platform content is never modified or used as routing metadata.
-export function formatReply(content, { mode = "chat", identifier = null, label = "", url, maxBytes = 1800 }) {
+export function formatReply(content, { mode = "chat", identifier = null, label = "", url = null, maxBytes = 1800 }) {
   const prefix = withReplyMode(label, mode, identifier);
-  const target = url.replace(/[()]/g, c => c === "(" ? "%28" : "%29");
-  const footer = `\n\n**[完整对话链接](${target})**`;
+  const target = url?.replace(/[()]/g, c => c === "(" ? "%28" : "%29");
+  const footer = target ? `\n\n**[完整对话链接](${target})**` : "";
   const text = String(content);
   const closing = replyFenceSuffix(text);
   if (Buffer.byteLength(prefix + text + closing + footer) <= maxBytes) return prefix + text + closing + footer;
-  const suffix = "\n\n...（回复较长，全文请在下方链接查看。）" + footer;
+  const suffix = (target ? "\n\n...（回复较长，全文请在下方链接查看。）" : "\n\n...（内容较长，后续已省略。）") + footer;
   const budget = maxBytes - Buffer.byteLength(prefix + suffix);
   if (budget < 0) throw new Error("reply metadata exceeds byte budget");
   const chars = [];

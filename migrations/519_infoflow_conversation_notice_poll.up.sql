@@ -1,0 +1,1 @@
+CREATE INDEX CONCURRENTLY IF NOT EXISTS infoflow_conversation_notice_poll_idx ON infoflow_conversation_notice(workspace_id,robot_id,agent_id,next_at,created_at,id) WHERE acked_at IS NULL AND cancelled_at IS NULL;

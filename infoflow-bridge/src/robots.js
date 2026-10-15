@@ -186,6 +186,10 @@ export class RobotRuntime {
       getImageAccessToken: () => client.getAccessToken(),
       issueGroups: this.issueGroups,
       getPrivateRobotInfo: () => client.robot.getInfo(),
+      getRobotAvailable: () => {
+        const current = this.instances.get(robot.id);
+        return Boolean(current && !current.stopping && current.wsClient && connectionState(current.wsClient) === "connected");
+      },
       acknowledgeReceipt: options => acknowledgeReceipt(client, options, this.logger),
     });
     const instance = {

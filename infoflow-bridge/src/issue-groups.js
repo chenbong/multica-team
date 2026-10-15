@@ -282,6 +282,17 @@ export class IssueGroups {
     if (!observation.leader_present) throw new Error("leader membership is not confirmed");
     const group = item.binding?.group;
     if (!group?.agent_ids?.includes(item.author_agent_id)) throw new Error("delivery author is outside the assigned team");
+    if (item.author_type === "user") {
+      groupUsername(item.author_name);
+      const leader = observation.leader;
+      if (item.author_agent_id !== group.leader_agent_id || !leader?.client || !leader.send ||
+          !observation.members.some(member => member.appId === String(leader.appId))) {
+        throw new Error("user mirror coordinator is unavailable");
+      }
+      if (pinned && (pinned.robot_id !== leader.robotId || pinned.agent_id !== leader.agentId ||
+          pinned.delegated !== false || pinned.label !== "")) throw new Error("user mirror coordinator changed during retry");
+      return { send: leader.send, pin: { robot_id: leader.robotId, agent_id: leader.agentId, delegated: false, label: "" } };
+    }
     let sender, delegated = false;
     if (pinned) {
       sender = observation.entries.find(entry => entry.robotId === pinned.robot_id && entry.agentId === pinned.agent_id);
