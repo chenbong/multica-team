@@ -30,27 +30,19 @@ var errOneAPIFetch = errors.New("OneAPI model catalog is unavailable; retry or e
 // execution. The credential is read from a private deployment file and never
 // enters a model entry, error, log, daemon payload or source-controlled config.
 type OneAPIModelCatalog struct {
-	endpoint, tokenFile, protocolsFile string
-	client                             *http.Client
-	configError                        bool
-	mu                                 sync.Mutex
-	key                                [32]byte
-	models                             []oneAPIModel
-	storedAt                           time.Time
-	group                              singleflight.Group
+	endpoint, tokenFile string
+	client              *http.Client
+	configError         bool
+	mu                  sync.Mutex
+	key                 [32]byte
+	models              []oneAPIModel
+	storedAt            time.Time
+	group               singleflight.Group
 }
 
 type oneAPIModel struct {
 	ID        string   `json:"id"`
 	Endpoints []string `json:"supported_endpoint_types"`
-}
-
-// /v1/models currently supplies names, not protocol support. Exact, reviewed
-// capability lists live outside the repository. Never infer compatibility
-// from a model brand or equate Chat Completions with Codex's Responses API.
-type oneAPIProtocols struct {
-	Messages  []string `json:"messages"`
-	Responses []string `json:"responses"`
 }
 
 type OneAPIModelResult struct {
@@ -59,7 +51,10 @@ type OneAPIModelResult struct {
 	Cached   bool
 }
 
-func NewOneAPIModelCatalog(endpoint, tokenFile, protocolsFile, caFile string) *OneAPIModelCatalog {
+// The third argument is retained for deployment compatibility. The old protocol
+// allowlist is deliberately ignored: discovery lists every returned model and
+// does not assert that an arbitrary model supports a runtime's wire protocol.
+func NewOneAPIModelCatalog(endpoint, tokenFile, _ string, caFile string) *OneAPIModelCatalog {
 	if endpoint == "" {
 		return nil
 	}
@@ -81,7 +76,7 @@ func NewOneAPIModelCatalog(endpoint, tokenFile, protocolsFile, caFile string) *O
 		}
 	}
 	return &OneAPIModelCatalog{
-		endpoint: endpoint, tokenFile: tokenFile, protocolsFile: protocolsFile,
+		endpoint: endpoint, tokenFile: tokenFile,
 		configError: configError,
 		client: &http.Client{Transport: transport, Timeout: 10 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -129,14 +124,6 @@ func (c *OneAPIModelCatalog) Models(ctx context.Context, protocol string, force 
 	if token == "" || strings.ContainsFunc(token, unicode.IsSpace) {
 		return result, errOneAPIConfig
 	}
-	policy, err := readOneAPIFile(c.protocolsFile, oneAPICatalogLimit, false)
-	if err != nil {
-		return result, err
-	}
-	var protocols oneAPIProtocols
-	if json.Unmarshal(policy, &protocols) != nil {
-		return result, errOneAPIConfig
-	}
 	key := sha256.Sum256([]byte(c.endpoint + "\x00" + token))
 	c.mu.Lock()
 	models, storedAt := c.models, c.storedAt
@@ -177,7 +164,7 @@ func (c *OneAPIModelCatalog) Models(ctx context.Context, protocol string, force 
 		c.mu.Unlock()
 		cached = false
 	}
-	result.Models = filterOneAPIModels(models, protocols, protocol)
+	result.Models = listOneAPIModels(models)
 	result.StoredAt, result.Cached = storedAt, cached
 	return result, nil
 }
@@ -215,36 +202,15 @@ func (c *OneAPIModelCatalog) fetch(ctx context.Context, token string) ([]oneAPIM
 	return payload.Data, nil
 }
 
-func filterOneAPIModels(models []oneAPIModel, policy oneAPIProtocols, protocol string) []Model {
-	allow := policy.Messages
-	label := "Anthropic Messages"
-	if protocol == "responses" {
-		allow, label = policy.Responses, "OpenAI Responses"
-	}
-	allowed := make(map[string]bool, len(allow))
-	for _, id := range allow {
-		allowed[id] = true
-	}
+func listOneAPIModels(models []oneAPIModel) []Model {
 	seen := make(map[string]bool)
 	result := make([]Model, 0)
 	for _, m := range models {
-		compatible := allowed[m.ID]
-		// If OneAPI starts advertising endpoint metadata, it takes precedence
-		// over the deployment's reviewed list, including an explicit empty list.
-		if m.Endpoints != nil {
-			compatible = false
-			for _, endpoint := range m.Endpoints {
-				if (protocol == "messages" && (endpoint == "anthropic" || endpoint == "messages")) ||
-					(protocol == "responses" && (endpoint == "responses" || endpoint == "openai-response")) {
-					compatible = true
-				}
-			}
-		}
-		if !compatible || seen[m.ID] {
+		if seen[m.ID] {
 			continue
 		}
 		seen[m.ID] = true
-		result = append(result, Model{ID: m.ID, Label: m.ID, Provider: label})
+		result = append(result, Model{ID: m.ID, Label: m.ID, Provider: "OneAPI"})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result

@@ -79,7 +79,6 @@ API 服务可为 `ducc`（Claude 协议）和 `ducx`（Codex 协议）的模型�
 ```bash
 MULTICA_ONEAPI_CATALOG_URL=https://gateway.example.com/v1/models
 MULTICA_ONEAPI_CATALOG_TOKEN_FILE=/run/secrets/oneapi-catalog.token
-MULTICA_ONEAPI_CATALOG_PROTOCOLS_FILE=/etc/multica/model-protocols.json
 ```
 
 令牌文件必须是仅当前服务账号可读的普通文件（例如 `0600`），不可放入代码仓库。
@@ -89,18 +88,14 @@ MULTICA_ONEAPI_CATALOG_PROTOCOLS_FILE=/etc/multica/model-protocols.json
 该信任配置仅作用于模型目录客户端，始终保留证书与主机名校验。
 
 模型名称实时来自 `/v1/models`，缓存 5 分钟，模型选择器的刷新按钮会主动重新查询。
-当接口没有返回 `supported_endpoint_types` 时，通过外部 JSON 清单声明已确认的协议：
-
-```json
-{"messages":["documented-messages-model"],"responses":["documented-responses-model"]}
-```
-
-`ducc` 使用 Messages 列表，`ducx` 使用 Responses 列表；Chat Completions 兼容不等于
-Responses 兼容。最终选项是实时模型名称与对应协议清单的交集，不按品牌推断。
-协议清单与令牌文件修改后，下次目录请求即可读取新内容；未知协议模型仍可手动输入。
-若上游提供明确的协议元数据，则优先使用该元数据，包括明确的不兼容结果。
+`ducc` 和 `ducx` 均展示接口返回的全部模型，只做模型 ID 去重及排序；不再按外部协议清单
+或 `supported_endpoint_types` 隐藏条目。旧的 `MULTICA_ONEAPI_CATALOG_PROTOCOLS_FILE` 配置
+可保留，但不再参与目录筛选。列出模型不等于确认其支持当前运行时的协议：Claude 的
+Messages 与 Codex 的 Responses 仍是不同的调用方式，渠道不兼容时显示实际调用错误。
 查询失败会显示错误并保留手动输入，不覆盖已有模型。OneAPI 模型提供 Low、Medium、High、
 Extra high、Max 五个思考选项，沿用 Claude/Codex 的值和标签；未选择时继续跟随 CLI 配置。
+手动输入目录外的 OneAPI 模型名时，也可选择相同的思考档位；不会改写输入的模型 ID，
+也不会借用其他模型的速度等级。普通非 OneAPI 模型仍遵循运行时报告的能力。
 这些是网关的可配置档位，不代表每个上游模型都以同样的强度执行；不据此推断速度等级。
 `v0.6.1-overlay.4` 起，daemon 对明确的 ducc/ducx 命令保留这些设置，不再因本地目录仅包含
 默认模型而丢弃参数；仍遵守 CLI 已明确报告的参数词汇限制。普通 Claude/Codex 不变。

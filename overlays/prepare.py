@@ -62,6 +62,8 @@ def main() -> None:
     guards = runpy.run_path(str(HERE / "issue-transfer-sql.py"))
     chat = runpy.run_path(str(HERE / "chat-access-go-patch.py"))
     generated = list(guards["generated"](UPSTREAM, FILES)) + list(chat["generated"](UPSTREAM, FILES))
+    builtin_env = runpy.run_path(str(HERE / "builtin-agent-env-sql.py"))
+    generated = builtin_env["extend"](UPSTREAM, generated)
     for rel, text in generated:
         source = UPSTREAM / rel
         override = HERE / ".generated" / rel
