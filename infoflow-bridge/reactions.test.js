@@ -17,5 +17,5 @@ test("missing or rounded identifiers fall back instead of reacting to a differen
 });
 test("API error returns false for text fallback", async () => {
   const client={im:{message:{addEmojiReply:async()=>{throw new Error("denied")}}}};
-  assert.equal(await acknowledge(client,{FromUserId:"alice",MsgId:"123",MsgId2:"456"},"private","robot",{warn(){}}),false);
+  assert.equal(await acknowledge(client,{FromUserId:"alice",MsgId:"123",MsgId2:"456"},"private","1234",{warn(){}}),false);
 });

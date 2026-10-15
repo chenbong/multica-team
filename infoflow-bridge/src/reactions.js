@@ -1,3 +1,5 @@
+import { messageIdString } from "./conversation-context.js";
+
 // Keep 64-bit message identifiers as strings; never round them through Number.
 export function receiptOptions(raw, kind, robotId) {
   const header = raw.message?.header || {};
@@ -19,17 +21,30 @@ export function receiptOptions(raw, kind, robotId) {
   };
 }
 
+export async function acknowledgeReceipt(client, options, logger = console) {
+  // Persist only the SDK receipt descriptor, never a client or API credential.
+  // Rebuild a fixed operation when recovering a durable Chat handoff.
+  if (!options || ![2, 7].includes(options.chatType) ||
+      !messageIdString(options.chatId) || !messageIdString(options.baseMsgId) || !messageIdString(options.msgId2) ||
+      typeof options.fromUid !== "string" || !/^[A-Za-z0-9_.@-]{1,256}$/.test(options.fromUid)) return false;
+  try {
+    const result = await client.im.message.addEmojiReply({
+      fromUid: options.fromUid, chatType: options.chatType, chatId: options.chatId,
+      baseMsgId: String(options.baseMsgId), msgId2: String(options.msgId2),
+      replyContent: "d101", replyDesc: "/收到",
+    });
+    return result?.success === true;
+  } catch (error) {
+    logger.warn("receipt reaction failed: " + error.message);
+    return false;
+  }
+}
+
 export async function acknowledge(client, raw, kind, robotId, logger = console) {
   const options = receiptOptions(raw, kind, robotId);
   if (!options) {
     logger.warn("receipt missing identifiers: " + JSON.stringify({ kind, keys: Object.keys(raw), headerKeys: Object.keys(raw.message?.header || {}) }));
     return false;
   }
-  try {
-    const result = await client.im.message.addEmojiReply(options);
-    return result?.success === true;
-  } catch (error) {
-    logger.warn("receipt reaction failed: " + error.message);
-    return false;
-  }
+  return acknowledgeReceipt(client, options, logger);
 }

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { Accounts } from "./accounts.js";
+import { ownedAgents, resolveOwnedAgent } from "./admin-agents.js";
 import { AdminAuth } from "./auth.js";
 import { DEFAULT_BASE_URL, ROOT, loadConfig, redactRobot, saveRobots } from "./config.js";
 import { fetchRobotLink, fetchRobotName } from "./infoflow.js";
@@ -148,6 +149,26 @@ async function route(request, response, runtime, accounts, auth, logger) {
       send(response, 400, { error: "验证码机器人不在这个页面管理" });
       return;
     }
+    if (index !== -1 && !(await ownsRobot(accounts, session, previous, runtime.config.multica.serverUrls))) {
+      send(response, 400, { error: "这个机器人绑在别人的 Multica 账号上，不能在这里编辑" });
+      return;
+    }
+
+    // Resolve the exact workspace and creator before validating external robot
+    // credentials. Hiding shared agents in the dropdown is not an API guard.
+    let binding;
+    try {
+      binding = await resolveOwnedAgent({
+        account,
+        workspaces: await accounts.workspaces(account.profile),
+        workspaceId: String(input.workspaceId ?? "").trim() || previous.workspaceId || account.workspaceId,
+        agentName: input.agent,
+        listAgents: (workspaceId) => new Multica({ ...runtime.config.multica, profile: account.profile, workspaceId }).listAgents(),
+      });
+    } catch (error) {
+      send(response, 400, { error: error.message });
+      return;
+    }
 
     // An empty secret field means "keep what is stored" — the page never sees the
     // current value, so it cannot send it back.
@@ -177,15 +198,7 @@ async function route(request, response, runtime, accounts, auth, logger) {
       return;
     }
 
-    // Which workspace the bound agent lives in. The form sends it along with the
-    // agent name; a robot saved before this existed falls back to whatever it
-    // already recorded, and finally to the profile's pinned workspace.
-    const accountWorkspaces = await accounts.workspaces(account.profile);
-    const wantedWorkspace = String(input.workspaceId ?? "").trim();
-    const workspace =
-      accountWorkspaces.find((entry) => entry.id === wantedWorkspace) ??
-      accountWorkspaces.find((entry) => entry.id === String(previous.workspaceId ?? "")) ??
-      null;
+    const { workspace, agent } = binding;
 
     const merged = {
       ...previous,
@@ -194,13 +207,13 @@ async function route(request, response, runtime, accounts, auth, logger) {
       purpose: "task",
       profile: account.profile,
       boundByEmail: session.email,
-      workspaceId: workspace?.id ?? previous.workspaceId ?? account.workspaceId ?? "",
-      workspaceSlug: workspace?.slug ?? account.workspaceSlug ?? previous.workspaceSlug ?? "",
+      workspaceId: workspace.id,
+      workspaceSlug: workspace.slug ?? "",
       appId: input.appId,
       appKey: input.appKey,
       appSecret,
       baseUrl,
-      agent: input.agent,
+      agent: agent.name,
       // Neither list is configured on the page anymore. Groups are open — every
       // member of a group the robot is in can @ it — and a direct chat is limited
       // to whoever created the robot, which is the one person we can name here.
@@ -286,8 +299,8 @@ async function route(request, response, runtime, accounts, auth, logger) {
 
 // The page always looks through exactly one signed-in Multica account: that
 // account decides which agents can be bound, and the robot saved from the form
-// dispatches as it. Everything an account can see is what Multica itself grants
-// it — the page only adds the owner label and the "mine" flag on top.
+// dispatches as it. Only that account's own agents are binding candidates;
+// robots already bound to another agent remain unchanged in the saved list.
 async function snapshot(runtime, accounts, requestedProfile, session) {
   const config = runtime.config;
   // The verification robot is shared infrastructure for login codes, not
@@ -335,17 +348,14 @@ async function snapshot(runtime, accounts, requestedProfile, session) {
       const perWorkspace = await Promise.all(
         workspaces.map(async (workspace) => {
           try {
-            const [raw, members] = await Promise.all([
-              new Multica({ ...config.multica, profile: active.profile, workspaceId: workspace.id }).listAgents(),
-              accounts.members(active.profile, workspace.id),
-            ]);
+            const raw = await new Multica({ ...config.multica, profile: active.profile, workspaceId: workspace.id }).listAgents();
             return {
-              agents: (raw ?? []).map((agent) => ({
+              agents: ownedAgents(raw, active.userId).map((agent) => ({
                 name: agent.name,
                 model: agent.model,
                 ownerId: agent.owner_id,
-                ownerEmail: members[agent.owner_id]?.email ?? null,
-                mine: Boolean(active.userId) && agent.owner_id === active.userId,
+                ownerEmail: active.email,
+                mine: true,
                 visibility: agent.visibility,
                 workspaceId: workspace.id,
                 workspaceName: workspace.name,

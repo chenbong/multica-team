@@ -4,6 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./env.sh
+# A host-local daemon must not inherit the privileged bridge identity credential.
+unset INFOFLOW_ISSUE_RELAY_TOKEN
 
 MULTICA_HOME_DIR="${MULTICA_HOME:-$HOME/.multica}"
 PROFILE_DIR="$MULTICA_HOME_DIR/profiles/$PROFILE_NAME"

@@ -119,12 +119,13 @@
 </section>
 
 <section>
-  <h2 style="font-size:16px;margin:0 0 10px">还没有机器人？两步创建</h2>
+  <h2 style="font-size:16px;margin:0 0 10px">还没有机器人？三步创建</h2>
   <ol style="margin:0;padding-left:20px">
     <li><strong>建应用</strong>：打开 <a id="console-link" href="#" target="_blank" rel="noreferrer">如流开放平台</a>，右上角「新建应用」，填应用名称（2–16 字）和账号 ID（<code>ai_xxx@example.com</code>），点「创建」。免审，建完立刻可用。</li>
     <li><strong>拿凭据</strong>：在左侧应用列表里点开它 →「凭证与能力」→ 用「复制全部」拿到应用 ID、App Key、App Secret，粘到下面的表单里。</li>
+    <li><strong>改权限</strong>：在左侧应用列表里点开它 → 可见范围 → 可见群聊 → 群聊范围改成 <code>全部企业群</code>。</li>
   </ol>
-  <p class="hint">默认权限就够用，不用改。只有一处要留意：新应用的「可见范围」里没有你要用它的人和群时，机器人发消息会报「接收者不在可见范围/未关注」（errcode 40070）。</p>
+  <p class="hint">「可见范围」里没有你要用它的人和群时，机器人发消息会报「接收者不在可见范围/未关注」（errcode 40070）。</p>
   <p class="hint">保存之后点列表里的「发测试消息」，如流里收到就说明凭据、权限、可见范围都对了。</p>
 </section>
 
@@ -137,7 +138,6 @@
      <div>
        <label>绑定的 Team Mesh 智能体</label>
        <select name="agent" id="agent" required></select>
-       <label style="margin:6px 0 0;color:inherit"><input type="checkbox" id="mine-only" /> 只看这个账号创建的</label>
        <p class="hint" id="agent-hint"></p>
      </div>
     </div>
@@ -196,7 +196,6 @@ applyPageConfig();
 const form = document.getElementById("form");
 const listBody = document.querySelector("#list tbody");
 const agentSelect = document.getElementById("agent");
-const mineOnly = document.getElementById("mine-only");
 let data = { robots: [], status: [], agents: [], accounts: [], activeProfile: "" };
 const chatLinks = new Map();
 const chatLinkLoads = new Map();
@@ -330,7 +329,7 @@ function button(text, onClick, className) {
 function renderAgents() {
   const keep = agentSelect.value;
   const keepWorkspace = agentSelect.selectedOptions[0]?.dataset.workspaceId ?? "";
-  const visible = mineOnly.checked ? data.agents.filter((agent) => agent.mine) : data.agents;
+  const visible = data.agents.filter((agent) => agent.mine);
   // data.me is null when this machine holds no Multica profile for the address
   // that signed into the page, which is a different state from "logged in, no
   // agents yet". The server writes that profile when the account logs into
@@ -358,7 +357,6 @@ function renderAgents() {
     if (workspace) parts.push("【" + workspace + "】");
     parts.push(agent.name);
     if (agent.model) parts.push(agent.model);
-    parts.push(agent.mine ? "本人创建" : agent.ownerEmail ? "来自 " + agent.ownerEmail : "他人创建");
     option.textContent = parts.join(" · ");
     agentSelect.append(option);
   }
@@ -366,7 +364,7 @@ function renderAgents() {
     const match =
       [...agentSelect.options].find(
         (option) => option.value === keep && (option.dataset.workspaceId ?? "") === keepWorkspace,
-      ) ?? [...agentSelect.options].find((option) => option.value === keep);
+      ) ?? (!keepWorkspace ? [...agentSelect.options].find((option) => option.value === keep) : null);
     if (match) match.selected = true;
   }
 
@@ -380,7 +378,6 @@ function renderAgents() {
       hint.push("当前账号 " + (data.me.email || "未知") +
         (names.length ? "，可见工作区 " + names.join("、") : data.me.workspaceName ? "，工作区 " + data.me.workspaceName : ""));
     }
-    if (!mineOnly.checked && data.agents.some((agent) => !agent.mine)) hint.push("列表里也包含别人创建但这个账号有权访问的智能体。");
   }
   document.getElementById("agent-hint").textContent = hint.join(" ");
 }
@@ -508,7 +505,7 @@ async function edit(robot) {
       (option.dataset.workspaceId ?? "") === (robot.workspaceId ?? ""),
   );
   if (match) match.selected = true;
-  else form.agent.value = robot.agent;
+  else form.agent.value = "";
   form.allowAllInGroups.checked = robot.allowAllInGroups;
   document.getElementById("form-title").textContent = "编辑 " + robot.name;
   document.getElementById("secret-hint").textContent = robot.hasSecret ? "已保存过，留空表示不修改。" : "还没有保存过 App Secret。";
@@ -589,7 +586,8 @@ form.addEventListener("submit", async (event) => {
 });
 
 function resetForm() {
-  form.reset();
+  // Named form controls (including the clear button) can shadow reset().
+  HTMLFormElement.prototype.reset.call(form);
   form.id.value = "";
   form.allowAllInGroups.checked = true;
   document.getElementById("form-title").textContent = "新增机器人";
@@ -598,7 +596,6 @@ function resetForm() {
 
 document.getElementById("reset").addEventListener("click", resetForm);
 
-mineOnly.addEventListener("change", renderAgents);
 load().catch((error) => toast("加载失败：" + error.message));
 setInterval(() => {
   if (!document.getElementById("app").hidden) load().catch(() => {});

@@ -11,11 +11,7 @@ mkdir -p "$DEPLOY_DIR/logs"
 
 (cd "$INSTANCE_DIR/multica/server" && "$DEPLOY_DIR/bin/migrate" up) \
   >> "$DEPLOY_DIR/logs/migrate.log" 2>&1
-for migration in "$INSTANCE_DIR"/migrations/*.up.sql; do
-  [ -e "$migration" ] || continue
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration" \
-    >> "$DEPLOY_DIR/logs/migrate.log" 2>&1
-done
+bash "$DEPLOY_DIR/migrate-team.sh" >> "$DEPLOY_DIR/logs/migrate.log" 2>&1
 
 BRIDGE_CONFIG="$INSTANCE_DIR/infoflow-bridge/config.local.json"
 if [ ! -f "$BRIDGE_CONFIG" ]; then
@@ -61,11 +57,11 @@ start_one() {
 
 start_one api "$DEPLOY_DIR/bin/server"
 cd "$WEB_TREE/apps/web"
-start_one web "$WEB_TREE/apps/web/node_modules/.bin/next" start \
+start_one web env -u INFOFLOW_ISSUE_RELAY_TOKEN "$WEB_TREE/apps/web/node_modules/.bin/next" start \
   --hostname 0.0.0.0 --port "$WEB_PORT"
 cd "$INSTANCE_DIR"
 python3 "$INSTANCE_DIR/infoflow-bridge/scripts/bridgectl.py" start
-start_one backup python3 "$DEPLOY_DIR/db-backup.py"
+start_one backup env -u INFOFLOW_ISSUE_RELAY_TOKEN python3 "$DEPLOY_DIR/db-backup.py"
 
 echo "API    http://$HOST_IP:$API_PORT"
 echo "Web    http://$HOST_IP:$WEB_PORT"

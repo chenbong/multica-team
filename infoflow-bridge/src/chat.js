@@ -39,16 +39,19 @@ export class ChatRelay {
     this.queues.set(key, next);
     return next.finally(() => { if (this.queues.get(key) === next) this.queues.delete(key); });
   }
-  reset(conversation, user) {
+  reset(conversation, user, onReset = null) {
     const key = this.key(conversation, user);
     return this.serial(key, async () => {
       delete this.state.threads[key];
       this.save();
+      // The reset is committed even if its external receipt fails. Never replay
+      // that effect against a newer conversation just to resend a notification.
+      onReset?.();
       await this.reply(conversation, user, "已开启新对话。之后的消息使用新的聊天上下文；之前正在执行的对话会继续完成。\n使用 /issue <内容> 创建任务。");
     });
   }
 
-  async send(conversation, user, text, images, agentName, acknowledge = null) {
+  async send(conversation, user, text, images, agentName, acknowledge = null, context = "", handoff = null) {
     const key = this.key(conversation, user);
     return this.serial(key, async () => {
       const agents = await this.multica.listAgents();
@@ -72,7 +75,7 @@ export class ChatRelay {
       }
       const staged = await this.stageImages(images);
       const attachmentIds = [];
-      let content = text;
+      let content = context ? context + "\n\n" + text : text;
       try {
         for (const path of staged.paths) {
           const attachment = await this.multica.uploadChatImage(thread.id, path);
@@ -81,19 +84,21 @@ export class ChatRelay {
         }
         if (staged.failed.length) {
           content += "\n\n图片附件处理失败：\n" + staged.failed.join("\n");
-          await this.reply(conversation, user, "部分图片未能读取：\n" + staged.failed.join("\n"));
+          await this.reply(conversation, user, "部分图片未能读取：\n" + staged.failed.join("\n"), { sessionId: thread.id });
         }
+        handoff?.beforeSubmit();
         const sent = await this.multica.sendChatMessage(thread.id, content, attachmentIds);
         if (!sent.task_id) throw new Error("聊天已提交但缺少执行 ID，请到网页版确认，不要重复发送");
         this.state.pending[sent.task_id] = { sessionId: thread.id, conversation, user, at: Date.now() };
         this.save();
+        handoff?.afterSubmit();
         if (attachmentIds.some((id) => !(sent.attachment_ids || []).includes(id))) {
-          await this.reply(conversation, user, "消息已发送，但部分图片未绑定成功，请到网页版检查附件。");
+          await this.reply(conversation, user, "消息已发送，但部分图片未绑定成功，请到网页版检查附件。", { sessionId: thread.id });
         }
         let reacted = false;
         try { reacted = acknowledge ? await acknowledge() : false; }
         catch (error) { this.logger.warn("receipt failed: " + error.message); }
-        if (!reacted) await this.reply(conversation, user, sent.queued ? "消息已加入当前聊天队列。" : "收到，正在回复…");
+        if (!reacted) await this.reply(conversation, user, sent.queued ? "消息已加入当前聊天队列。" : "收到，正在回复…", { sessionId: thread.id });
       } finally { await staged.cleanup(); }
     });
   }
@@ -107,7 +112,7 @@ export class ChatRelay {
     const text = pending.task_id
       ? `当前聊天：${pending.status}${pending.wait_reason ? "\n" + pending.wait_reason : ""}`
       : "当前聊天没有正在执行的请求。";
-    await this.reply(conversation, user, text + (last ? "\n最近回复：\n" + (last.content || last.failure_reason || "无文字回复").slice(0, 2000) : ""));
+    await this.reply(conversation, user, text + (last ? "\n最近回复：\n" + (last.content || last.failure_reason || "无文字回复") : ""), { sessionId: thread.id });
     return true;
   }
 
@@ -118,17 +123,18 @@ export class ChatRelay {
       for (const [taskId, pending] of Object.entries(this.state.pending)) {
         if (this.stopped) break;
         try {
+          if (typeof pending.sessionId !== "string" || !pending.sessionId) throw new Error("chat session metadata is missing");
           const messages = await this.multica.chatMessages(pending.sessionId);
           const answer = messages.find((message) => message.role === "assistant" && message.task_id === taskId);
           if (answer) {
             let content = answer.failure_reason ? "回复失败：" + answer.failure_reason : answer.content || "本轮已完成，没有文字回复。";
             if (answer.attachments?.length) content += "\n\n本轮生成了附件，请在网页版聊天中查看。";
             // Retain pending delivery on a send failure; restart resumes polling.
-            await this.reply(pending.conversation, pending.user, content);
+            await this.reply(pending.conversation, pending.user, content, { sessionId: pending.sessionId });
             delete this.state.pending[taskId];
             this.save();
           } else if (Date.now() - pending.at > (this.config.pollTimeoutMs || 1800000)) {
-            await this.reply(pending.conversation, pending.user, "聊天请求仍未返回，使用 /status 查看状态；请求不会转为新 issue。");
+            await this.reply(pending.conversation, pending.user, "聊天请求仍未返回，使用 /status 查看状态；请求不会转为新 issue。", { sessionId: pending.sessionId });
             delete this.state.pending[taskId];
             this.save();
           }

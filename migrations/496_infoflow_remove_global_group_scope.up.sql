@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS infoflow_binding_group_global_idx;

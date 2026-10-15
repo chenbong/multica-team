@@ -1,10 +1,10 @@
-import { Client } from "@baidu/infoflow-sdk-nodejs";
-import { createWSClient } from "./ws-transport.js";
 import { Bridge } from "./bridge.js";
-import { ReviewNotifications } from "./review-notifications.js";
-import { acknowledge } from "./reactions.js";
+import { acknowledge, acknowledgeReceipt, receiptOptions } from "./reactions.js";
 import { VerificationCodeRelay } from "./codes.js";
+import { parseConversationBlocks, messageIdString, privateReplyMessageId, conversationContext } from "./conversation-context.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
+import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
+import { groupRobotEntries } from "./group-robot-entries.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5000;
 const MAX_INITIAL_RECONNECT_DELAY_MS = 120000;
@@ -16,8 +16,16 @@ export class RobotRuntime {
     this.config = config;
     this.logger = logger;
     this.instances = new Map();
+    this.issueGroups = config.issueRelay?.enabled ? new IssueGroups({
+      statePath: config.statePath,
+      entries: (workspaceId, agentIds, options) => this.groupRobotEntries(workspaceId, agentIds, options),
+      // IDs only: each candidate is resolved separately under its own account.
+      // An unrelated legacy name must not break discovery for all other robots.
+      candidateRobotIds: workspaceId => this.config.robots.filter(robot => robot.enabled &&
+        robot.purpose !== "verification" && (robot.workspaceId || this.config.multica.workspaceId) === workspaceId)
+        .map(robot => robot.id),
+    }) : null;
     this.relay = null;
-    this.reviewNotifications = new ReviewNotifications(this);
   }
 
   async sync(config = this.config) {
@@ -34,7 +42,6 @@ export class RobotRuntime {
       if (!this.instances.has(id)) await this.#start(robot);
     }
     await this.#syncRelay();
-    await this.reviewNotifications.poll();
   }
 
   status() {
@@ -70,6 +77,10 @@ export class RobotRuntime {
     const instance = this.instances.get(robotId);
     if (!instance) throw new Error("这个机器人当前没有连接，先保存并启用它。");
     return instance.client.im.message.sendToUser(user, content, "md");
+  }
+
+  async groupRobotEntries(workspaceId, agentIds = null, options = {}) {
+    return groupRobotEntries(this.config, this.instances, workspaceId, agentIds, this.logger, options);
   }
 
   // One verification robot serves everybody: Multica's login codes and the admin
@@ -113,7 +124,6 @@ export class RobotRuntime {
   }
 
   async stopAll() {
-    this.reviewNotifications.stop();
     for (const id of [...this.instances.keys()]) await this.#stop(id);
     this.relay?.stop();
     this.relay = null;
@@ -147,6 +157,11 @@ export class RobotRuntime {
   }
 
   async #start(robot) {
+    // Pure coordination and fake-transport tests do not need the private SDK.
+    // Load it only when starting an actual configured robot connection.
+    const [{ Client }, { createWSClient }] = await Promise.all([
+      import("@baidu/infoflow-sdk-nodejs"), import("./ws-transport.js"),
+    ]);
     const client = new Client({
       appKey: robot.appKey,
       appSecret: robot.appSecret,
@@ -156,6 +171,7 @@ export class RobotRuntime {
 
     const send = async (conversation, content, options = {}) => {
       if (conversation.kind === "group") {
+        if (this.config.issueRelay?.enabled) return sendGroupExact(client, conversation, content, options);
         const body = [];
         if (options.atUser) body.push({ type: "AT", atall: false, atuserids: [options.atUser] });
         body.push({ type: "MD", content });
@@ -168,11 +184,15 @@ export class RobotRuntime {
 
     const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger, {
       getImageAccessToken: () => client.getAccessToken(),
+      issueGroups: this.issueGroups,
+      getPrivateRobotInfo: () => client.robot.getInfo(),
+      acknowledgeReceipt: options => acknowledgeReceipt(client, options, this.logger),
     });
     const instance = {
       robot,
       client,
       bridge,
+      send,
       wsClient: null,
       fingerprint: fingerprint(robot),
       error: null,
@@ -214,7 +234,7 @@ export class RobotRuntime {
       this.logger.error("[" + robot.name + "] InfoFlow error: " + message);
     });
 
-    registerHandlers({ wsClient, client, bridge, robot, logger: this.logger });
+    registerHandlers({ wsClient, client, bridge, robot, logger: this.logger, issueGroups: this.issueGroups });
     // Established connections use the SDK's reconnect loop (infinite by default).
     // Initial endpoint failures need a local retry loop because this SDK deliberately
     // does not start reconnect() after connect() rejects before the first connection.
@@ -351,7 +371,7 @@ function fingerprint(robot) {
 function robotConfig(base, robot) {
   return {
     robotId: robot.id,
-    reviewNotifications: true,
+    issueRelay: base.issueRelay,
     multica: {
       ...base.multica,
       // Each robot dispatches as its own Multica account, and links point at
@@ -372,43 +392,17 @@ function robotConfig(base, robot) {
 }
 
 export function parseGroupBlocks(blocks) {
-  const images = [];
-  const parts = [];
-
-  for (const block of Array.isArray(blocks) ? blocks : []) {
-    const type = String(block?.type ?? "").toUpperCase();
-
-    if (type === "IMAGE") {
-      images.push(block);
-      continue;
-    }
-
-    if (type === "REPLYDATA" || type === "REPLY" || type === "QUOTE") {
-      if (Array.isArray(block.replyImages)) images.push(...block.replyImages.filter(Boolean));
-    }
-
-    if (type === "AT") continue;
-
-    if (type === "LINK") {
-      parts.push(block.label ?? block.url ?? block.href ?? "");
-      continue;
-    }
-
-    parts.push(block.content ?? block.text ?? "");
-  }
-
-  return {
-    text: parts.filter(Boolean).join(" ").trim(),
-    images,
-  };
+  const { text, images } = parseConversationBlocks(blocks);
+  return { text, images };
 }
-function registerHandlers({ wsClient, client, bridge, robot, logger }) {
+export function registerHandlers({ wsClient, client, bridge, robot, logger, issueGroups = null }) {
   for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
       // Despite the names, FromUserId is the readable username and FromUserName is
       // a numeric uid. Replies are addressed by username.
       const user = raw.FromUserId ?? raw.FromUserName;
+      if (botOrigin(raw) || issueGroups?.isBot(raw, user)) return;
       const rawContent = raw.Content ?? raw.content ?? raw.Text ?? raw.text;
       const imageContent =
         event === "private.image" && typeof rawContent === "string" ? rawContent : "";
@@ -427,7 +421,10 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
         user,
         text: body,
         images,
-        messageId: raw.MsgId ?? raw.msgId,
+        messageId: messageIdString(raw.MsgId ?? raw.msgId),
+        replyToMessageId: privateReplyMessageId(raw),
+        receipt: receiptOptions(raw, "private", robot.appId),
+        context: conversationContext({ conversation: { kind: "private", id: user }, sender: user }),
         acknowledge: () => acknowledge(client, raw, "private", robot.appId, logger),
       });
     });
@@ -436,16 +433,23 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
   for (const event of ["group.text", "group.markdown", "group.mixed", "group.image"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
+      const observedGroupId = raw.groupid ?? raw.groupId;
+      // Discovery originates ONLY in an SDK group event. Run independently so
+      // failed permissions/network cannot block Chat or existing task messages.
+      if (observedGroupId != null) void bridge.issueRelay?.observeGroupEvent?.({
+        groupId: observedGroupId, appId: robot.appId, client,
+      });
       // MESSAGE_RECEIVE is the @robot / slash-command delivery. ALL_MESSAGE_FORWARD
       // copies every message in the group and would turn small talk into runs.
       if (raw.eventtype && raw.eventtype !== "MESSAGE_RECEIVE") return;
 
-      const groupId = raw.groupid ?? raw.groupId;
+      const groupId = messageIdString(raw.groupid ?? raw.groupId);
       const header = raw.message?.header ?? {};
       const user = header.fromuserid ?? raw.fromuserid;
+      if (botOrigin(raw) || issueGroups?.isBot(raw, user)) return;
       const blocks = Array.isArray(raw.message?.body) ? raw.message.body : [];
       const mentionsRobot = blocks.some((block) => String(block?.type ?? "").toUpperCase() === "AT" && (block.robotid !== undefined || block.name));
-      const parsed = parseGroupBlocks(blocks);
+      const parsed = parseConversationBlocks(blocks);
       const text = parsed.text || (parsed.images.length > 0 ? "（图片消息，详见附件）" : "");
 
       if (!groupId || !user || text === "" || !mentionsRobot) return;
@@ -455,7 +459,10 @@ function registerHandlers({ wsClient, client, bridge, robot, logger }) {
         user,
         text,
         images: parsed.images,
-        messageId: header.messageid ?? raw.messageid,
+        messageId: messageIdString(header.messageid ?? raw.messageid),
+        replyToMessageId: parsed.replyToMessageId,
+        receipt: receiptOptions(raw, "group", robot.appId),
+        context: conversationContext({ conversation: { kind: "group", id: groupId }, sender: user, mentions: parsed.mentions }),
         acknowledge: () => acknowledge(client, raw, "group", robot.appId, logger),
       });
     });

@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS infoflow_binding_private_scope_idx;

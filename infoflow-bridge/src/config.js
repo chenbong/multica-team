@@ -33,6 +33,7 @@ export function loadConfig() {
   // typed, and the loopback and public forms are the same server.
   const trimUrl = (value) => String(value ?? "").trim().replace(/\/+$/, "");
   multica.serverUrl = trimUrl(multica.serverUrl);
+  multica.issueWebUrl = trimUrl(process.env.INFOFLOW_ISSUE_WEB_URL ?? multica.issueWebUrl ?? "");
   multica.serverUrls = [...new Set([multica.serverUrl, ...(file.multica?.serverUrls ?? []).map(trimUrl)])].filter(Boolean);
   // The backend prints login codes here when no email backend is configured;
   // that is what the verification robot relays into InfoFlow.
@@ -56,6 +57,9 @@ export function loadConfig() {
       infoflowConsoleUrl: String(file.admin?.infoflowConsoleUrl ?? "").trim().replace(/\/+$/, ""),
     },
     multica,
+    // Opt in only after the server relay endpoints and migration are deployed.
+    // The credential is environment-only, never stored in admin-editable JSON.
+    issueRelay: { enabled: process.env.INFOFLOW_ISSUE_RELAY_ENABLED === "true" },
     robots: migrateRobots(file).map(normalizeRobot).map(robot =>
       process.env.INFOFLOW_STANDBY === "true" && robot.purpose !== "verification"
         ? { ...robot, enabled: false }

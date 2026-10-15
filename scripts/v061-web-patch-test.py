@@ -39,6 +39,8 @@ class FrontendPatches(unittest.TestCase):
             "MULTICA_CLI_INSTALL_URL": "https://example.test/install.sh",
             "MULTICA_DAEMON_RUNTIME_DEFAULTS": "ducc,codex",
             "MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS": "ducc",
+            "MULTICA_ONEAPI_TRACE_URL": "https://probe.example.test/",
+            "MULTICA_QUICKSTART_URL": "https://docs.example.test/quickstart",
         })
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -81,6 +83,44 @@ class FrontendPatches(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.assertFalse((self.target / ".overlay-backup").exists())
 
+    def test_form_controls_avoid_foreign_editor_class_without_changing_other_styles(self):
+        self.apply()
+        for component in self.module["FORM_BORDER_COMPONENTS"]:
+            rel = f"packages/ui/components/ui/{component}.tsx"
+            with self.subTest(component=component):
+                original = self.originals[rel]
+                self.assertEqual(original.count(" border-input "), 1)
+                patched = (self.target / rel).read_text()
+                self.assertEqual(patched, original.replace(" border-input ", " border-[color:var(--input)] "))
+                self.assertNotIn(" border-input ", patched)
+                self.assertIn(" border-[color:var(--input)] ", patched)
+        for component in ("bind-infoflow-conversation", "issue-infoflow-group-binding"):
+            source = (ROOT / f"overlays/web-direct/packages/views/issues/components/{component}.tsx").read_text()
+            self.assertNotIn(" border-input ", source)
+            self.assertIn(" border-[color:var(--input)] ", source)
+
+    def test_explicit_build_configuration_fails_closed_and_retains_login_copy(self):
+        with patch.dict(os.environ, {"MULTICA_VERIFICATION_BOT_URL": ""}):
+            with self.assertRaisesRegex(SystemExit, "configuration is incomplete"):
+                runpy.run_path(str(ROOT / "overlays/web-patch.py"))
+        prepare = runpy.run_path(str(ROOT / "deploy/prepare-web.py"))
+        config = {key: os.environ.get(key, "Fixture") or "Fixture" for key in prepare["REQUIRED"]}
+        config["MULTICA_BRAND_NAME"] = "Fixture title"
+        path = self.target / "build-config.json"
+        path.write_text(json.dumps(config))
+        self.assertEqual(prepare["load_config"](path), config)
+        for key in prepare["REQUIRED"]:
+            missing = {**config, key: ""}
+            path.write_text(json.dumps(missing))
+            with self.assertRaisesRegex(ValueError, key):
+                prepare["load_config"](path)
+        self.apply()
+        prepare["verify_output"](self.target, config)
+        login = self.target / "packages/views/auth/login-page.tsx"
+        login.write_text(login.read_text().replace("$.verify.title_link", "$.verify.title"))
+        with self.assertRaisesRegex(ValueError, "lost verification"):
+            prepare["verify_output"](self.target, config)
+
     def test_runtime_ownership_overlay_keeps_existing_page_features(self):
         rel = "packages/views/runtimes/components/runtimes-page.tsx"
         (self.target / rel).write_text((ROOT / "overlays/web-direct" / rel).read_text())
@@ -118,6 +158,23 @@ class FrontendPatches(unittest.TestCase):
         installer = (self.target / "packages/views/common/cli-install-command.tsx").read_text()
         self.assertIn("platforms = PLATFORMS", installer)
 
+    def test_code_fonts_use_a_monospace_fallback_and_shortcuts_precede_statistics(self):
+        self.apply()
+        layout = (self.target / "apps/web/app/layout.tsx").read_text()
+        mono = layout[layout.index("const geistMono"):layout.index("export const metadata")]
+        self.assertIn("adjustFontFallback: false", mono)
+        self.assertIn('"Menlo"', mono)
+        self.assertIn('"monospace"', mono)
+        sidebar = (self.target / "packages/views/layout/app-sidebar.tsx").read_text()
+        footer = sidebar[sidebar.index("<SidebarFooter"):]
+        self.assertEqual(footer.count("<SidebarShortcutLinks "), 1)
+        self.assertLess(footer.index("<SidebarShortcutLinks "), footer.index("utilityNav.map"))
+        self.assertIn('modelTraceUrl={"https://probe.example.test/"}', footer)
+        self.assertIn('quickstartUrl={"https://docs.example.test/quickstart"}', footer)
+        for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
+            labels = json.loads((self.target / f"packages/views/locales/{locale}/layout.json").read_text())
+            self.assertEqual(set(labels["sidebar"]["quick_links"]), {"model_trace", "quickstart_wishlist"})
+
     def test_upstream_checkout_is_rejected(self):
         result = subprocess.run(
             ["python3", str(ROOT / "overlays/web-patch.py"), "apply"],
@@ -142,6 +199,54 @@ class FrontendPatches(unittest.TestCase):
             copy = json.loads((self.target / f"packages/views/locales/{locale}/issues.json").read_text())
             self.assertTrue(copy["transfer"]["warning"])
             self.assertTrue(copy["transfer"]["block_unknown"])
+
+    def test_issue_group_binding_wiring_and_translations(self):
+        self.apply()
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        self.assertIn("async getIssueInfoFlowGroupBinding", client)
+        self.assertIn("async bindIssueInfoFlowGroup", client)
+        self.assertIn("InfoFlowGroupBindingSchema, null", client)
+        self.assertIn("InfoFlowGroupTargetSchema.safeParse(target)", client)
+        self.assertIn("async getIssueInfoFlowGroups", client)
+        detail = (self.target / "packages/views/issues/components/issue-detail.tsx").read_text()
+        self.assertIn("<BindInfoFlowConversation", detail)
+        self.assertNotIn("<IssueInfoFlowGroups ", detail)
+        fixture = (self.target / "packages/views/issues/components/issue-detail.test.tsx").read_text()
+        self.assertIn("getIssueInfoFlowGroupBinding: vi.fn()", fixture)
+        exports = json.loads((self.target / "packages/core/package.json").read_text())["exports"]
+        self.assertEqual(exports["./issues/infoflow-group-binding"], "./issues/infoflow-group-binding.ts")
+        self.assertEqual(exports["./issues/infoflow-groups"], "./issues/infoflow-groups.ts")
+        copies = [json.loads((self.target / f"packages/views/locales/{locale}/issues.json").read_text())["infoflow_groups"]
+                  for locale in ("en", "zh-Hans")]
+        self.assertEqual(set(copies[0]), set(copies[1]))
+        for copy in copies:
+            for key in ("bind", "warning", "waiting", "approval", "failed", "retry", "invalid", "read_failed", "open"):
+                self.assertTrue(copy[key])
+
+    def test_unified_conversation_wiring_and_private_privacy(self):
+        self.apply()
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        for method in ("getIssueInfoFlowConversations", "bindIssueInfoFlowConversation", "unbindIssueInfoFlowConversation", "cancelIssueInfoFlowRequest"):
+            self.assertIn(f"async {method}", client)
+        self.assertIn("InfoFlowConversationsSchema, null", client)
+        self.assertIn("InfoFlowConversationTargetSchema.safeParse(target)", client)
+        self.assertIn("InfoFlowConversationBindingIdSchema.safeParse(bindingId)", client)
+        self.assertIn("InfoFlowConversationRequestTargetSchema.safeParse(target)", client)
+        self.assertIn("const { request_id, ...body } = input.data;", client)
+        self.assertIn("/infoflow-conversation-requests/", client)
+        self.assertIn('method: "DELETE"', client)
+        exports = json.loads((self.target / "packages/core/package.json").read_text())["exports"]
+        self.assertEqual(exports["./issues/infoflow-conversations"], "./issues/infoflow-conversations.ts")
+        detail = (self.target / "packages/views/issues/components/issue-detail.tsx").read_text()
+        self.assertIn('<BindInfoFlowConversation key={`${issue.workspace_id}:${issue.id}`}', detail)
+        fixture = (self.target / "packages/views/issues/components/issue-detail.test.tsx").read_text()
+        self.assertIn("getIssueInfoFlowConversations: vi.fn()", fixture)
+        copies = [json.loads((self.target / f"packages/views/locales/{locale}/issues.json").read_text())["infoflow_conversations"]
+                  for locale in ("en", "zh-Hans")]
+        self.assertEqual(set(copies[0]), set(copies[1]))
+        for copy in copies:
+            for key in ("bind", "private", "private_restriction", "needs_rebind", "reassignment", "unbind", "group_pending"):
+                self.assertTrue(copy[key])
 
     def test_brand_is_checked_idempotent_and_keeps_bot_identity(self):
         self.apply()

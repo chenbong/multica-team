@@ -1,8 +1,10 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
 import { ChatRelay, issueRequest } from "./chat.js";
+import { IssueRelay } from "./issue-relay.js";
+import { formatReply, replyUrl } from "./reply-format.js";
 
 const HELP = [
   "**Multica 机器人**",
@@ -12,6 +14,8 @@ const HELP = [
   "- `/agents` 列出可用 agent",
   "- `/agent <名字>` 切换你自己的默认 agent（私聊和群里共用）",
   "- `/issue <内容>` 创建任务，也可说「帮我创建一个任务：内容」",
+  "- `/bind <任务编号>` 给当前如流对话添加任务绑定；私聊仅支持由单个智能体负责的任务",
+  "- `/binding [任务编号]` 查看绑定；`/unbind [任务编号]` 解除指定绑定，不删除任务",
   "- `/new` 开启新的聊天上下文",
   "- `/status` 查询当前聊天状态（没有聊天时查询最近任务）",
   "- `/status <任务编号>` 查询指定 issue；也可问「CBH-15 进展怎么样？」",
@@ -29,23 +33,29 @@ export class Bridge {
   // Enough id history to cover a redelivery burst without growing the state file.
   static SEEN_MESSAGE_LIMIT = 200;
 
-  constructor(config, sender, logger = console, { getImageAccessToken = null } = {}) {
+  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null, acknowledgeReceipt = null } = {}) {
     this.config = config;
     this.sender = sender;
     this.logger = logger;
     this.multica = new Multica(config.multica, logger);
     this.getImageAccessToken = getImageAccessToken;
     this.state = this.#loadState();
+    this.inboundQueues = new Map();
     this.chat = new ChatRelay(config, this.multica,
-      async (conversation, user, content) => {
-        for (let i = 0; i < content.length; i += 3000) {
-          await this.sender(conversation, content.slice(i, i + 3000), { atUser: user });
-        }
+      async (conversation, user, content, metadata = {}) => {
+        await this.sender(conversation, formatReply(content, { mode: "chat", url: replyUrl(this.config.multica, metadata) }), {});
       },
       (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger);
+    this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
+      stageImages: (images) => stageInboundImages(images, this.logger, this.getImageAccessToken),
+      groups: issueGroups,
+      getPrivateRobotInfo,
+      acknowledgeReceipt,
+    });
+    this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message, skipIssueRelay: true, handoff });
   }
 
-  stop() { this.chat.stop(); }
+  stop() { this.chat.stop(); this.issueRelay.stop(); }
 
   // Inbound events normally carry the username already; a payload that only has
   // the numeric uid is mapped here so state, allow list, and replies agree.
@@ -56,16 +66,43 @@ export class Bridge {
 
   // conversation: { kind: "private" | "group", id }. For a private chat the id is
   // the username to reply to; for a group it is the numeric group id.
-  async handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null }) {
+  handleMessage(message) {
+    // Relay fallback runs inside the outer call and must not wait on itself.
+    if (message.skipIssueRelay) return this.#handleMessage(message);
+    const key = JSON.stringify([message.conversation?.kind, String(message.conversation?.id), this.resolveUser(message.user)]);
+    const prior = this.inboundQueues.get(key) || Promise.resolve();
+    const pending = prior.catch(() => {}).then(() => this.#handleMessage(message));
+    this.inboundQueues.set(key, pending);
+    return pending.finally(() => { if (this.inboundQueues.get(key) === pending) this.inboundQueues.delete(key); });
+  }
+
+  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
-    if (messageId && this.#alreadyHandled(messageId)) {
+    const user = this.resolveUser(rawUser);
+    // A completed Chat input must keep its original destination even if the
+    // conversation has since bound an issue. This is a read-only check: failed
+    // and not-yet-accepted inputs must remain retryable.
+    if (messageId && this.#loadState().seenMessageIds.includes(String(messageId))) {
       this.logger.warn(`ignoring redelivered InfoFlow message ${messageId} from ${rawUser}`);
       return;
     }
+    if (messageId && this.#loadState().uncertainChatMessageIds.includes(String(messageId))) {
+      this.logger.warn("Chat submission outcome uncertain; inspect retained Chat state before retrying");
+      return;
+    }
+    if (!this.issueRelay.enabled && acknowledge) {
+      let confirmed = false;
+      try { confirmed = await acknowledge() === true; }
+      catch { this.logger.warn("receipt confirmation failed"); }
+      acknowledge = async () => confirmed;
+    }
+    // The relay has persistent, server-side deduplication and authenticates the
+    // real sender before an owner-profile command or Chat fallback. A receipt
+    // only confirms the SDK message was received, never grants invocation.
+    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt })) return;
 
-    const user = this.resolveUser(rawUser);
     if (!this.#allowed(user, conversation)) {
       this.logger.warn(`rejected ${conversation.kind} message from ${user}: not in allowUsers`);
       if (conversation.kind === "private") {
@@ -74,41 +111,61 @@ export class Bridge {
       return;
     }
 
+    const complete = () => {
+      if (messageId) this.#alreadyHandled(messageId);
+      handoff?.afterSubmit();
+    };
     try {
       const issueBody = issueRequest(body);
       if (issueBody !== null) {
         if (!issueBody) {
           await this.reply(conversation, user, "请提供任务内容，例如 /issue 优化推理性能。");
+          complete();
           return;
         }
         await this.#dispatch(conversation, user, issueBody, inboundImages);
+        complete();
         return;
       }
       if (body.startsWith("/")) {
-        await this.#handleCommand(conversation, user, body);
+        await this.#handleCommand(conversation, user, body, complete);
+        complete();
         return;
       }
       const progress = body.match(/^([A-Za-z][A-Za-z0-9]*-\d+)\s*(?:的)?(?:进度|进展|状态|完成了吗|怎么样了)(?:怎么样|怎么样了|如何|呢)?[？?\s]*$/);
       if (progress) {
         await this.#issueStatus(conversation, user, progress[1]);
+        complete();
         return;
       }
       if (/^(?:刚才|之前|上一个|最近)(?:的)?(?:那个)?任务(?:的)?(?:进度|进展|状态|完成了吗|怎么样了)[？?\s]*$/.test(body)) {
         await this.#issueStatus(conversation, user, "");
+        complete();
         return;
       }
-      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge);
+      const chatHandoff = {
+        beforeSubmit: () => {
+          if (handoff) handoff.beforeSubmit();
+          else if (messageId) this.#markChatSubmitting(messageId);
+        },
+        afterSubmit: complete,
+      };
+      await this.chat.send(conversation, user, body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff);
+      complete();
     } catch (error) {
+      if (handoff) throw error;
       this.logger.error(`handling message from ${user} failed: ${error.message}`);
       await this.reply(conversation, user, `出错了：${error.message}`);
     }
   }
 
-  async reply(conversation, user, content) {
+  async reply(conversation, user, content, mode = "chat", strict = false, metadata = {}) {
     try {
-      await this.sender(conversation, content, { atUser: user });
+      await this.sender(conversation, formatReply(content, { mode, identifier: metadata.binding?.identifier,
+        url: replyUrl(this.config.multica, metadata) }), {});
     } catch (error) {
       this.logger.error(`sending to ${conversation.kind}:${conversation.id} failed: ${error.message}`);
+      if (strict) throw error;
     }
   }
 
@@ -124,17 +181,18 @@ export class Bridge {
     return this.config.allowUsers.some((name) => name.toLowerCase() === String(user).toLowerCase());
   }
 
-  async #handleCommand(conversation, user, body) {
+  async #handleCommand(conversation, user, body, complete) {
     const [command, ...rest] = body.split(/\s+/);
     const argument = rest.join(" ").trim();
+    const reply = content => this.reply(conversation, user, content, "chat", true);
 
     if (command === "/new") {
-      await this.chat.reset(conversation, user);
+      await this.chat.reset(conversation, user, complete);
       return;
     }
 
     if (command === "/help") {
-      await this.reply(conversation, user, HELP);
+      await reply(HELP);
       return;
     }
     if (command === "/agents") {
@@ -143,12 +201,12 @@ export class Bridge {
       const lines = agents.map(
         (agent) => `- ${agent.name === current ? "**" + agent.name + "**（当前）" : agent.name}　${agent.model ?? ""}`,
       );
-      await this.reply(conversation, user, lines.length > 0 ? lines.join("\n") : "这个工作区还没有 agent。");
+      await reply(lines.length > 0 ? lines.join("\n") : "这个工作区还没有 agent。");
       return;
     }
     if (command === "/agent") {
       if (argument === "") {
-        await this.reply(conversation, user, `你当前的 agent：${this.agentFor(user)}。用 \`/agent <名字>\` 切换。`);
+        await reply(`你当前的 agent：${this.agentFor(user)}。用 \`/agent <名字>\` 切换。`);
         return;
       }
       const agents = await this.multica.listAgents();
@@ -156,11 +214,12 @@ export class Bridge {
         agents.find((agent) => agent.name === argument) ??
         agents.find((agent) => agent.name.toLowerCase() === argument.toLowerCase());
       if (!match) {
-        await this.reply(conversation, user, `没找到叫「${argument}」的 agent。用 \`/agents\` 看看有哪些。`);
+        await reply(`没找到叫「${argument}」的 agent。用 \`/agents\` 看看有哪些。`);
         return;
       }
       this.#rememberUser(user, { agent: match.name });
-      await this.reply(conversation, user, `好，之后你的任务派给「${match.name}」。`);
+      complete();
+      await reply(`好，之后你的任务派给「${match.name}」。`);
       return;
     }
     if (command === "/status") {
@@ -168,7 +227,7 @@ export class Bridge {
       await this.#issueStatus(conversation, user, argument);
       return;
     }
-    await this.reply(conversation, user, `不认识的命令：${command}。发 \`/help\` 看用法。`);
+    await reply(`不认识的命令：${command}。发 \`/help\` 看用法。`);
   }
 
   async #issueStatus(conversation, user, reference) {
@@ -189,7 +248,7 @@ export class Bridge {
     }
     const issue = await this.multica.getIssue(reference || last.id);
     const run = latestRun(await this.multica.runs(issue.id));
-    await this.reply(conversation, user, `${issue.identifier} ${issue.title}\n执行状态：${run?.status || "尚无执行记录"}\n${this.multica.issueUrl(issue)}`);
+    await this.reply(conversation, user, `${issue.identifier} ${issue.title}\n执行状态：${run?.status || "尚无执行记录"}`, "issue", false, { binding: issue });
   }
 
   async #dispatch(conversation, user, body, images = []) {
@@ -198,7 +257,8 @@ export class Bridge {
       await this.reply(
         conversation,
         user,
-        `同样的内容一分钟内已经派过任务 **${repeat.identifier}**，这次没有重复派单。确实想再跑一遍就稍等一会儿再发，或者换个说法。\n${repeat.url}`,
+        `同样的内容一分钟内已经派过任务 **${repeat.identifier}**，这次没有重复派单。确实想再跑一遍就稍等一会儿再发，或者换个说法。`,
+        "issue", false, { binding: { identifier: repeat.identifier } },
       );
       return;
     }
@@ -223,30 +283,23 @@ export class Bridge {
       lastIssue: { id: issue.id, identifier: issue.identifier, url },
       lastRequest: { body, identifier: issue.identifier, url, at: Date.now() },
     });
-    await this.reply(conversation, user, `已建任务 **${issue.identifier}**，派给「${assignee}」，跑完发回这里。\n${url}`);
+    await this.reply(conversation, user, `已建任务 **${issue.identifier}**，派给「${assignee}」，跑完发回这里。`, "issue", false, { binding: issue });
 
     const outcome = await this.#waitForRun(issue.id);
     if (outcome.kind === "timeout") {
       await this.reply(
         conversation,
         user,
-        `${issue.identifier} 还在跑（已经 ${Math.round(this.config.pollTimeoutMs / 60000)} 分钟），先不等了，用 \`/status\` 查进度。\n${url}`,
+        `${issue.identifier} 还在跑（已经 ${Math.round(this.config.pollTimeoutMs / 60000)} 分钟），先不等了，用 \`/status\` 查进度。`,
+        "issue", false, { binding: issue },
       );
       return;
     }
     if (outcome.kind === "failed") {
-      await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}\n${url}`);
+      await this.reply(conversation, user, `${issue.identifier} 执行失败：${outcome.detail}`, "issue", false, { binding: issue });
       return;
     }
-    // The review watcher sends the binder a single cross-entry notification.
-    // Retain replies to groups/other users and runs that do not enter review.
-    if (this.config.reviewNotifications && conversation.kind === "private") {
-      try {
-        const [current, me] = await Promise.all([this.multica.getIssue(issue.id), this.multica.request("/api/me")]);
-        if ((current.status_category || current.status) === "in_review" && me.email?.split("@")[0] === user) return;
-      } catch (error) { this.logger.warn("review handoff check failed: " + error.message); }
-    }
-    await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}\n\n${url}`);
+    await this.reply(conversation, user, `**${issue.identifier}** 完成\n\n${outcome.detail}`, "issue", false, { binding: issue, commentId: outcome.commentId });
   }
 
   // Polls until the newest run reaches a terminal status. The daemon reports the
@@ -263,12 +316,11 @@ export class Bridge {
         const comments = await this.multica.comments(issueId);
         const fromRun = comments
           .filter((comment) => comment.author_type === "agent" && comment.source_task_id === run.id)
-          .map((comment) => comment.content)
-          .filter(Boolean);
-        const detail = fromRun.length > 0 ? fromRun.join("\n\n") : (run.result?.output ?? "（agent 没有留下文字结果）");
-        return { kind: "completed", detail: truncate(detail, 3500) };
+          .filter((comment) => comment.content);
+        const detail = fromRun.length > 0 ? fromRun.map(comment => comment.content).join("\n\n") : (run.result?.output ?? "（agent 没有留下文字结果）");
+        return { kind: "completed", detail, commentId: fromRun.at(-1)?.id };
       }
-      return { kind: "failed", detail: truncate(run.error ?? run.result?.output ?? run.status, 1500) };
+      return { kind: "failed", detail: run.error ?? run.result?.output ?? run.status };
     }
     return { kind: "timeout" };
   }
@@ -307,28 +359,42 @@ export class Bridge {
     this.state = this.#loadState();
     const id = String(messageId);
     if (this.state.seenMessageIds.includes(id)) return true;
+    this.state.uncertainChatMessageIds = this.state.uncertainChatMessageIds.filter(value => value !== id);
     this.state.seenMessageIds.push(id);
     if (this.state.seenMessageIds.length > Bridge.SEEN_MESSAGE_LIMIT) {
       this.state.seenMessageIds = this.state.seenMessageIds.slice(-Bridge.SEEN_MESSAGE_LIMIT);
     }
-    this.#persist();
+    this.#persist(true);
     return false;
   }
 
-  #persist() {
+  #markChatSubmitting(messageId) {
+    this.state = this.#loadState();
+    const id = String(messageId);
+    if (this.state.uncertainChatMessageIds.includes(id)) throw new Error("Chat submission outcome uncertain");
+    if (this.state.uncertainChatMessageIds.length >= 500) throw new Error("uncertain Chat submissions require operator review");
+    this.state.uncertainChatMessageIds.push(id);
+    // This is not a completed-message marker. A lost POST response must remain
+    // unresolved instead of being submitted again or retargeted to an issue.
+    this.#persist(true);
+  }
+
+  #persist(strict = false) {
     try {
-      writeFileSync(this.config.statePath, JSON.stringify(this.state, null, 2) + "\n", { mode: 0o600 });
+      writeFileSync(this.config.statePath + ".tmp", JSON.stringify(this.state, null, 2) + "\n", { mode: 0o600 });
+      renameSync(this.config.statePath + ".tmp", this.config.statePath);
     } catch (error) {
       this.logger.warn(`could not persist state: ${error.message}`);
+      if (strict) throw error;
     }
   }
 
   #loadState() {
     try {
       const parsed = JSON.parse(readFileSync(this.config.statePath, "utf8"));
-      return { users: parsed.users ?? {}, seenMessageIds: parsed.seenMessageIds ?? [] };
+      return { users: parsed.users ?? {}, seenMessageIds: parsed.seenMessageIds ?? [], uncertainChatMessageIds: parsed.uncertainChatMessageIds ?? [] };
     } catch {
-      return { users: {}, seenMessageIds: [] };
+      return { users: {}, seenMessageIds: [], uncertainChatMessageIds: [] };
     }
   }
 }

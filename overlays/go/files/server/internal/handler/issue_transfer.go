@@ -136,6 +136,20 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 	if _, err = tx.Exec(ctx, "SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='10s'"); err != nil {
 		return nil, err
 	}
+	// The relay is an optional overlay. Keep transfers usable before its
+	// migrations are installed, but never move an actively routed issue.
+	var hasInfoFlowBindings bool
+	if err = tx.QueryRow(ctx, `SELECT to_regclass('infoflow_issue_binding') IS NOT NULL`).Scan(&hasInfoFlowBindings); err != nil {
+		return nil, err
+	}
+	var hasInfoFlowWebRequests bool
+	if err = tx.QueryRow(ctx, `SELECT to_regclass('infoflow_web_group_request') IS NOT NULL`).Scan(&hasInfoFlowWebRequests); err != nil {
+		return nil, err
+	}
+	var hasInfoFlowPrivateRequests bool
+	if err = tx.QueryRow(ctx, `SELECT to_regclass('infoflow_web_private_request') IS NOT NULL`).Scan(&hasInfoFlowPrivateRequests); err != nil {
+		return nil, err
+	}
 	if apply {
 		if _, err = tx.Exec(ctx, `SELECT id FROM workspace WHERE id IN ($1,$2) ORDER BY id FOR UPDATE NOWAIT`, source, target); err != nil {
 			return nil, err
@@ -152,6 +166,23 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
           autopilot_run IN SHARE ROW EXCLUSIVE MODE NOWAIT`)
 		if err != nil {
 			return nil, err
+		}
+		if hasInfoFlowBindings {
+			// Include relay association writes in the existing transfer fence.
+			// Source/delivery receipts remain immutable historical records.
+			if _, err = tx.Exec(ctx, `LOCK TABLE infoflow_issue_binding IN SHARE ROW EXCLUSIVE MODE NOWAIT`); err != nil {
+				return nil, err
+			}
+		}
+		if hasInfoFlowWebRequests {
+			if _, err = tx.Exec(ctx, `LOCK TABLE infoflow_web_group_request IN SHARE ROW EXCLUSIVE MODE NOWAIT`); err != nil {
+				return nil, err
+			}
+		}
+		if hasInfoFlowPrivateRequests {
+			if _, err = tx.Exec(ctx, `LOCK TABLE infoflow_web_private_request IN SHARE ROW EXCLUSIVE MODE NOWAIT`); err != nil {
+				return nil, err
+			}
 		}
 		if _, err = tx.Exec(ctx, `SELECT id FROM issue WHERE id=$1 FOR UPDATE NOWAIT`, id); err != nil {
 			return nil, err
@@ -245,6 +276,17 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 		{"automation_or_sources", `SELECT EXISTS(SELECT 1 FROM issue_source_context WHERE issue_id=$1 OR source_issue_id=$1) OR EXISTS(SELECT 1 FROM issue_wakeup WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM autopilot_run WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM task_supplement WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM task_supplement_capability WHERE issue_id=$1)`},
 		{"labels_pins_or_prs", `SELECT EXISTS(SELECT 1 FROM issue_to_label WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM pinned_item WHERE item_id=$1) OR EXISTS(SELECT 1 FROM issue_pull_request WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM issue_vcs_pull_request WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM issue_pr_automation WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM issue_pull_request_exclusion WHERE issue_id=$1)`},
 		{"notification_recipients", `SELECT EXISTS(SELECT 1 FROM inbox_item n WHERE n.issue_id=$1 AND (n.recipient_type<>'member' OR NOT EXISTS(SELECT 1 FROM member m WHERE m.workspace_id=$2 AND m.user_id=n.recipient_id)))`},
+	}
+	if hasInfoFlowBindings {
+		// Check the resolved issue ID across all bindings, including an already
+		// stale workspace scope. Unbound source/delivery history is not a route.
+		checks = append(checks, struct{ code, sql string }{"infoflow_binding", `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE issue_id=$1)`})
+	}
+	if hasInfoFlowWebRequests {
+		checks = append(checks, struct{ code, sql string }{"infoflow_pending_binding", `SELECT EXISTS(SELECT 1 FROM infoflow_web_group_request WHERE issue_id=$1 AND state IN ('queued','pending') AND expires_at>clock_timestamp())`})
+	}
+	if hasInfoFlowPrivateRequests {
+		checks = append(checks, struct{ code, sql string }{"infoflow_pending_private_binding", `SELECT EXISTS(SELECT 1 FROM infoflow_web_private_request WHERE issue_id=$1 AND state IN ('queued','pending') AND expires_at>clock_timestamp())`})
 	}
 	for _, c := range checks {
 		var blocked bool

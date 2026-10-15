@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS infoflow_web_private_request (
+    id UUID NOT NULL,
+    issue_id UUID NOT NULL,
+    workspace_id UUID NOT NULL,
+    requester_id UUID NOT NULL,
+    sender TEXT NOT NULL,
+    agent_id UUID NOT NULL,
+    assignment_version BIGINT NOT NULL,
+    generation UUID NOT NULL,
+    binding_snapshot JSONB NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('queued','pending','failed','active')),
+    reason TEXT NOT NULL DEFAULT '',
+    lease_token UUID,
+    lease_robot_id TEXT,
+    lease_agent_id UUID,
+    lease_until TIMESTAMPTZ,
+    next_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS infoflow_binding_private_issue_idx ON infoflow_issue_binding(robot_id,workspace_id,agent_id,conversation_kind,conversation_id,issue_id) WHERE conversation_kind='private' AND issue_id IS NOT NULL;

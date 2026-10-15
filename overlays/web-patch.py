@@ -124,6 +124,8 @@ LOGIN_DESCRIPTION = os.environ.get("MULTICA_LOGIN_DESCRIPTION", "").strip()
 EMAIL_PLACEHOLDER = os.environ.get("MULTICA_EMAIL_PLACEHOLDER", "").strip()
 BOT_NAME = os.environ.get("MULTICA_VERIFICATION_BOT_NAME", "").strip()
 BOT_URL = os.environ.get("MULTICA_VERIFICATION_BOT_URL", "").strip()
+if bool(BOT_NAME) != bool(BOT_URL):
+    raise SystemExit("Verification robot configuration is incomplete: set both MULTICA_VERIFICATION_BOT_NAME and MULTICA_VERIFICATION_BOT_URL.")
 BOT_CONFIGURED = bool(BOT_NAME and BOT_URL)
 # Where the "add a computer" dialog tells people to get the CLI. Points at this
 # repository's own installer by default in a deployment, and at upstream's when
@@ -304,10 +306,32 @@ def login_page_changes():
     ]
 
 
+# Embedded visual editors can inject an unscoped .border-input control style.
+# Keep our semantic color token without sharing that foreign class name.
+FORM_BORDER_COMPONENTS = (
+    "input", "textarea", "checkbox", "toggle", "select", "time-input",
+    "input-otp", "input-group",
+)
+
+
+def login_test_changes():
+    source = (HERE.parent / "multica/packages/views/auth/login-page.test.tsx").read_text()
+    updated = source.replace("/sign in to multica/i", "enAuth.signin.title")
+    if BOT_CONFIGURED:
+        updated = updated.replace("/check your email/i", "/verification messages/i")
+    return [(source, updated)]
+
 CHANGES = {
+    **{
+        f"packages/ui/components/ui/{component}.tsx": [
+            (" border-input ", " border-[color:var(--input)] "),
+        ]
+        for component in FORM_BORDER_COMPONENTS
+    },
     AUTH_ZH: auth_zh_changes(),
     AUTH_EN: auth_en_changes(),
     LOGIN_PAGE: login_page_changes(),
+    "packages/views/auth/login-page.test.tsx": login_test_changes(),
     LOGIN_ROUTE: [
         # The web shell passes a "prefer the desktop app? download" slot into the
         # sign-in card. This deployment has no desktop build to point at, so the
@@ -375,11 +399,18 @@ CHANGES = {
     SIDEBAR: [
         (
             'import { JoinDiscordCard } from "./join-discord-card";\n',
-            '',
+            'import { SidebarShortcutLinks } from "./sidebar-shortcut-links";\n',
         ),
         (
             SIDEBAR_DRAFT_DOT,
             SIDEBAR_DRAFT_DOT + "\n\n" + SIDEBAR_MOBILE_CONTROL,
+        ),
+        (
+            '          <SidebarMenu className="gap-0.5">\n            {utilityNav.map((item) => {',
+            '          <SidebarMenu className="gap-0.5">\n            <SidebarShortcutLinks '
+            'modelTraceUrl=' + '{' + json.dumps(os.environ.get("MULTICA_ONEAPI_TRACE_URL", "")) + '} '
+            'quickstartUrl=' + '{' + json.dumps(os.environ.get("MULTICA_QUICKSTART_URL", "")) + '} '
+            'className={NAV_ITEM_CLASS_NAME} />\n            {utilityNav.map((item) => {',
         ),
         (
             '          {/* Discord fills the strip while visible; once dismissed, help\n'
@@ -390,6 +421,27 @@ CHANGES = {
             '          <div className="flex min-w-0 items-center gap-1">\n'
             '            <MobileControlLink />\n',
         ),
+    ],
+    "apps/web/app/layout.tsx": [
+        (
+            '  variable: "--font-mono",\n  fallback:',
+            '  variable: "--font-mono",\n  // A proportional synthetic fallback must never replace code fonts.\n  adjustFontFallback: false,\n  fallback:',
+        ),
+    ],
+    "packages/views/locales/en/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI model quality probe", "quickstart_wishlist": "Quick start & wishlist" },\n'),
+    ],
+    "packages/views/locales/zh-Hans/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI 降智探测", "quickstart_wishlist": "快速上手 & 许愿板" },\n'),
+    ],
+    "packages/views/locales/ja/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI モデル品質チェック", "quickstart_wishlist": "クイックスタートと要望" },\n'),
+    ],
+    "packages/views/locales/ko/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "oneAPI 모델 품질 검사", "quickstart_wishlist": "빠른 시작 및 요청" },\n'),
+    ],
+    "packages/views/locales/fr/layout.json": [
+        ('  "sidebar": {\n', '  "sidebar": {\n    "quick_links": { "model_trace": "Qualité des modèles oneAPI", "quickstart_wishlist": "Démarrage rapide et souhaits" },\n'),
     ],
     PROXY: [
         (
@@ -1002,6 +1054,7 @@ CHANGES.setdefault("packages/views/common/cli-install-command.test.tsx", []).app
 
 
 runpy.run_path(str(HERE / "issue-transfer-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "infoflow-groups-patch.py"))["extend"](CHANGES)
 
 
 def apply_patches():
