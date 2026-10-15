@@ -6,9 +6,10 @@ Nothing inside the Multica checkout is modified.
 ## Group reply notifications
 
 Group AI replies retain one Markdown summary and its full-conversation link,
-followed by a short native AT notification. The audience consists of the
-original sender and structured human mentions in that input, normalized and
-deduplicated. Private replies are unchanged. Help, status, binding confirmations
+followed by a short native AT notification. The reminder does not repeat the
+full-conversation link, which stays in the Markdown body. Its audience consists
+of the original sender and structured human mentions in that input, normalized
+and deduplicated. Private replies are unchanged. Help, status, binding confirmations
 and receipt fallbacks do not add another AT notification.
 
 Notification metadata stays separate from prompts and issue reply bodies.

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { notifyUsers, mentionedReplyUsers, deliverReply, notificationText } from "./src/reply-mentions.js";
 import { sendGroupExact } from "./src/issue-groups.js";
 import { Bridge } from "./src/bridge.js";
@@ -40,7 +41,9 @@ test("one untouched Markdown body plus one native AT; retry after AT failure ski
   assert.equal(bodies.filter(m => m.header.msgtype === "MD").length, 1);
   assert.deepEqual(bodies[0].body, [{ type: "MD", content }]);
   assert.deepEqual(bodies[2].body[0], { type: "AT", atall: false, atuserids: ["alice", "bob"] });
-  assert.deepEqual(bodies[2].body[2], { type: "LINK", href: "https://example.test/issues/TEST-1", label: "完整对话链接" });
+  assert.equal(bodies[2].body.length, 2);
+  assert.equal(bodies[2].body.some(block => block.type === "LINK"), false);
+  assert.doesNotMatch(bodies[2].body[1].content, /https?:|完整对话链接/);
   assert.equal(saved.notified, true);
   await deliverReply(send, group, content, ["alice", "bob"], notice, saved);
   assert.equal(bodies.length, 3);
@@ -53,6 +56,18 @@ test("private replies keep Markdown and do not add an AT message", async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0][1], "**Bold**");
   assert.deepEqual(calls[0][2], {});
+});
+
+test("new reminders omit the URL while an already sent body's legacy reminder can finish safely", async () => {
+  const body = "**Body**", users = ["alice"], oldNotice = "[回复提醒]\n回复已更新，请查看上一条消息。\n完整对话链接：https://example.test/chat";
+  const progress = { bodySent: true, digest: createHash("sha256").update(JSON.stringify([body, users, oldNotice])).digest("hex") };
+  const calls = [];
+  await deliverReply(async (_c, text, options) => calls.push({ text, options }), group, body, users,
+    notificationText("https://example.test/chat"), progress, () => {}, oldNotice);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.notificationOnly, true);
+  assert.equal(calls[0].text, oldNotice);
+  assert.doesNotMatch(notificationText("https://example.test/chat"), /https?:|完整对话链接/);
 });
 
 test("coalesced audiences over 50 are notified in checkpointed batches without repeating Markdown", async () => {

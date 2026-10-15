@@ -38,7 +38,7 @@ export function plainGroupReply(content) {
     .trim();
 }
 export function notificationText(url = null, identifier = null) {
-  return `${identifier ? `[任务模式] ${identifier}` : "[回复提醒]"}\n回复已更新，请查看上一条消息。${url ? `\n完整对话链接：${url}` : ""}`;
+  return `${identifier ? `[任务模式] ${identifier}\n` : ""}已回复，请查看上一条消息。`;
 }
 
 export function nativeAtBody(content, recipients) {
@@ -54,11 +54,16 @@ export function nativeAtBody(content, recipients) {
 
 // Keep the Markdown body and native AT reminder as separate, durable stages.
 // In particular, a failed AT send must not replay an already accepted body.
-export async function deliverReply(send, conversation, content, recipients, notice, progress = {}, save = () => {}) {
+export async function deliverReply(send, conversation, content, recipients, notice, progress = {}, save = () => {}, legacyNotice = null) {
   const users = notifyUsers(conversation, null, recipients);
-  const digest = createHash("sha256").update(JSON.stringify([content, users, notice])).digest("hex");
+  if (!progress.noticeText && legacyNotice && progress.bodySent && progress.digest ===
+      createHash("sha256").update(JSON.stringify([content, users, legacyNotice])).digest("hex")) {
+    progress.noticeText = legacyNotice;
+  }
+  const pinnedNotice = progress.noticeText || notice;
+  const digest = createHash("sha256").update(JSON.stringify([content, users, pinnedNotice])).digest("hex");
   if (progress.digest && progress.digest !== digest) throw new Error("reply changed during notification retry");
-  if (!progress.digest) { progress.digest = digest; save(); }
+  if (!progress.digest) { progress.digest = digest; progress.noticeText = pinnedNotice; save(); }
   if (!progress.bodySent) {
     await send(conversation, content, {});
     progress.bodySent = true; save();
@@ -67,7 +72,7 @@ export async function deliverReply(send, conversation, content, recipients, noti
     const start = progress.notificationNext || 0;
     if (!Number.isInteger(start) || start < 0 || start > users.length) throw new Error("invalid notification progress");
     for (let next = start; next < users.length; next += MAX_NOTIFY_USERS) {
-      const receipt = await send(conversation, notice, { atUsers: users.slice(next, next + MAX_NOTIFY_USERS), notificationOnly: true });
+      const receipt = await send(conversation, pinnedNotice, { atUsers: users.slice(next, next + MAX_NOTIFY_USERS), notificationOnly: true });
       progress.notificationNext = Math.min(next + MAX_NOTIFY_USERS, users.length);
       const id = messageIdString(receipt?.messageid ?? receipt?.messageId);
       if (id) progress.notificationMessageIds = [...(progress.notificationMessageIds || []), id];

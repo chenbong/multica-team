@@ -32,7 +32,8 @@ export class Bridge {
         const recipients = metadata.replyProgress ? notifyUsers(conversation, user, metadata.notifyUsers || []) : [];
         const url = replyUrl(this.config.multica, metadata);
         await deliverReply(this.sender, conversation, formatReply(content, { mode: "chat", url }), recipients,
-          notificationText(url), metadata.replyProgress, metadata.saveProgress);
+          notificationText(url), metadata.replyProgress, metadata.saveProgress,
+          `[回复提醒]\n回复已更新，请查看上一条消息。${url ? `\n完整对话链接：${url}` : ""}`);
       },
       (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger);
     this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
