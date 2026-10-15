@@ -23,8 +23,16 @@ func (h *Handler) chatAccess(ctx context.Context, userID, workspaceID string, se
 	if err != nil {
 		return false
 	}
-	agent, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: session.AgentID, WorkspaceID: session.WorkspaceID})
-	if err != nil {
+	agent, err := h.Queries.GetAgent(ctx, session.AgentID)
+	if err != nil || uuidToString(agent.WorkspaceID) != workspaceID {
+		return false
+	}
+	// Builders are hidden system carriers, not shareable chat agents. Their
+	// creator may use the creation flow without granting access to other members.
+	if isAgentBuilderCarrier(agent) {
+		return uuidToString(session.CreatorID) == userID && uuidToString(agent.OwnerID) == userID
+	}
+	if agent.Kind != "user" {
 		return false
 	}
 	// Ordinary user chat access follows explicit grants and shared/private
