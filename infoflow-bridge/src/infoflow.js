@@ -3,6 +3,13 @@ import { Client } from "@baidu/infoflow-sdk-nodejs";
 // The SDK calls logger.trace, which console does not have.
 const QUIET = { info() {}, warn() {}, error() {}, debug() {}, trace() {}, log() {} };
 
+// Deletion has already removed the runtime connection. Send with the captured
+// credentials over HTTP only; never reconnect or recreate the deleted binding.
+export async function sendRobotDirect({ appId, appKey, appSecret, baseUrl }, user, content) {
+  const client = new Client({ appKey, appSecret, agentId: appId, baseUrl, logger: QUIET });
+  return client.im.message.sendToUser(user, content, "md");
+}
+
 // Asks InfoFlow what an application is called. The admin page names a robot from
 // its credentials instead of asking someone to type a label, so the name always
 // matches the application in 如流 — and a wrong App Key or Secret fails while

@@ -8,7 +8,7 @@ import { DEFAULT_BASE_URL, ROOT, loadConfig, redactRobot, saveRobots } from "./c
 import { fetchRobotLink, fetchRobotName } from "./infoflow.js";
 import { Multica } from "./multica.js";
 import { randomUUID } from "node:crypto";
-import { saveRobotBinding } from "./robot-binding-notice.js";
+import { saveRobotBinding, deleteRobotBinding } from "./robot-binding-notice.js";
 
 const PAGE = resolve(ROOT, "public/index.html");
 const SESSION_COOKIE = "bridge_admin";
@@ -247,10 +247,9 @@ async function route(request, response, runtime, accounts, auth, logger) {
       send(response, 400, { error: "这个机器人绑在别人的 Multica 账号上，不能在这里删" });
       return;
     }
-    saveRobots(runtime.config.robots.filter((robot) => robot.id !== input.id));
-    await runtime.sync(loadConfig());
+    const unbindingNotice = await deleteRobotBinding({ runtime, robot: target, email: session.email, logger });
     logger.log(`admin deleted robot ${input.id}`);
-    send(response, 200, await snapshot(runtime, accounts, input.profile, session));
+    send(response, 200, { ...await snapshot(runtime, accounts, input.profile, session), unbindingNotice });
     return;
   }
 

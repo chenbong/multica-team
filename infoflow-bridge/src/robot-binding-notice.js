@@ -2,6 +2,31 @@ import { loadConfig, saveRobots } from "./config.js";
 import { inlineMarkdown } from "./inline-markdown.js";
 import { withReplyMode } from "./reply-format.js";
 
+export async function deleteRobotBinding({ runtime, robot, email, logger = console,
+  persist = saveRobots, readConfig = loadConfig,
+  sendDirect = async (...args) => (await import("./infoflow.js")).sendRobotDirect(...args) }) {
+  if (!robot) return { status: "skipped" };
+  // The ownership check may await a remote API. Do not remove a replacement
+  // binding or repeat a deletion that completed while that check was pending.
+  const current = runtime.config.robots.find(entry => entry.id === robot.id);
+  if (!current) return { status: "skipped" };
+  if (current !== robot) throw new Error("机器人绑定已变化，请刷新页面后重试");
+  const removed = { ...robot };
+  persist(runtime.config.robots.filter(entry => entry.id !== removed.id));
+  await runtime.sync(readConfig());
+  try {
+    if (runtime.config.robots.some(entry => entry.id === removed.id)) throw new Error("binding still present");
+    const recipient = String(email).split("@")[0];
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(recipient)) throw new Error("invalid notice recipient");
+    const text = `智能体 **${inlineMarkdown(removed.agent)}** 解绑如流机器人 **${inlineMarkdown(removed.name)}** 成功`;
+    await sendDirect(removed, recipient, withReplyMode(text, "chat"));
+    return { status: "sent" };
+  } catch {
+    logger.warn("robot binding deleted; confirmation message delivery failed");
+    return { status: "failed" };
+  }
+}
+
 function sameBinding(a, b) {
   return ["appId", "profile", "workspaceId", "agent"].every(key => String(a?.[key] ?? "").trim() === String(b?.[key] ?? "").trim());
 }

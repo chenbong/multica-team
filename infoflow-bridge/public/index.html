@@ -549,7 +549,13 @@ async function remove(robot) {
   activeProfile = data.activeProfile ?? "";
   render();
   warmChatLinks();
-  toast("已删除");
+  toast(bindingDeleteMessage(data.unbindingNotice));
+}
+
+function bindingDeleteMessage(notice) {
+  if (notice?.status === "failed") return "解绑成功，但如流通知发送失败。机器人凭据已移除，无需重复删除。";
+  if (notice?.status === "sent") return "解绑成功，已向你的机器人私聊发送确认消息";
+  return "已解绑（绑定已不存在）";
 }
 
 form.addEventListener("submit", async (event) => {
