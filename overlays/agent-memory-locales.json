@@ -3,6 +3,7 @@
     "tab": "Memory",
     "body": {
       "intro": "Memory files are delivered with every run of this agent: they are written to .multica/memory/ in the working directory and included in the runtime instructions (CLAUDE.md / AGENTS.md). Use them for durable notes, preferences and project context. Switch a file off to keep it without delivering it.",
+      "machine_files_note": "Memory lives here and is the same on every machine. Files a runtime machine keeps for itself, such as its own ~/.claude/CLAUDE.md, still apply to runs on that machine and are not managed here.",
       "loading": "Loading memory…",
       "load_failed": "Could not load memory",
       "retry": "Retry",
@@ -27,7 +28,7 @@
       "source_upload": "Upload",
       "source_runtime": "Runtime",
       "source_detail_upload": "Uploaded from {{path}}",
-      "source_detail_runtime": "Imported from {{path}} on the runtime machine",
+      "source_detail_runtime": "Copied from {{path}} on the runtime machine",
       "saved_toast": "Memory saved",
       "save_failed_toast": "Could not save memory",
       "upload_added_toast": "Added {{n}} file(s) — save to keep them",
@@ -51,7 +52,7 @@
       },
       "runtime_import": {
         "title": "Import memory from a runtime machine",
-        "description": "Lists memory and instruction files on one of your computers (CLAUDE.md, Claude project memory, AGENTS.md, GEMINI.md and similar). Only the files you select are copied, and nothing is stored until you save the Memory tab.",
+        "description": "Lists memory and instruction files on one of your computers (CLAUDE.md, Claude project memory, AGENTS.md, GEMINI.md and similar). The files you select are copied once: later changes on that machine are not picked up, and nothing is stored until you save the Memory tab.",
         "runtime_label": "Runtime",
         "runtime_placeholder": "Choose a runtime",
         "no_runtimes": "You have no local runtimes. Connect a computer first.",
@@ -73,8 +74,6 @@
         "read_errors": "Some files were not imported:"
       },
       "source_agent": "Agent",
-      "auto_sync_label": "Keep in sync with the source file on that machine",
-      "synced_at": "last synced {{time}}",
       "writeback": {
         "title": "Learning from runs",
         "mode_label": "What happens to the agent's own memory edits",
@@ -82,9 +81,9 @@
         "mode_review": "Review",
         "mode_auto": "Automatic",
         "hint_off": "Memory changes the agent makes during a run are discarded.",
-        "hint_review": "After each run, the agent's edits to its memory (and Claude's own auto-memory for the task) are queued here; they take effect once you accept them.",
+        "hint_review": "After each run, the agent's edits to its memory are queued here; they take effect once you accept them.",
         "hint_auto": "After each run, the agent's memory edits are saved right away. Changes to a file you edited meanwhile still wait for review.",
-        "capture_label": "Also collect Claude's own auto-memory from runs (saved under auto/)",
+        "capture_label": "Also collect Claude's own auto-memory from runs (saved under auto/). Off by default: it produces many small changes to review.",
         "pending_title": "Changes waiting for review ({{n}})",
         "dirty_hint": "Save or discard your unsaved edits before reviewing changes.",
         "action_create": "New",
@@ -101,7 +100,6 @@
         "no_file": "(no file yet)",
         "will_delete": "(the file will be deleted)",
         "note_conflict": "This file changed after the run started — compare before accepting.",
-        "note_sync": "This file syncs from its source; accepting stops the sync.",
         "settings_saved": "Memory settings saved",
         "settings_failed": "Could not save memory settings",
         "accepted_toast": "Accepted the change to {{path}}",
@@ -110,14 +108,14 @@
         "load_failed": "Could not load memory changes",
         "runtime_unsupported": "This agent's runtime runs an older Multica version: memory is still delivered, but edits from runs are not sent back. Upgrade that machine's CLI/daemon."
       },
-      "save_conflict_toast": "This agent's memory changed after the page was loaded (a run, a sync or another tab saved it). Reload to see the latest, then reapply your edits.",
-      "sync_unsupported": "That machine runs an older Multica version that cannot sync. Upgrade its CLI/daemon."
+      "save_conflict_toast": "This agent's memory changed after the page was loaded (a run or another tab saved it). Reload to see the latest, then reapply your edits."
     }
   },
   "zh-Hans": {
     "tab": "记忆",
     "body": {
       "intro": "记忆文件会随这个智能体的每次运行下发：写入工作目录的 .multica/memory/，并合并进运行时指令（CLAUDE.md / AGENTS.md）。适合存放长期笔记、偏好和项目背景。关闭某个文件的开关即可保留它但不下发。",
+      "machine_files_note": "记忆以这里为准，在任何机器上都一样。运行时机器自己的文件（例如它的 ~/.claude/CLAUDE.md）仍会对在那台机器上的运行生效，不在这里管理。",
       "loading": "正在加载记忆…",
       "load_failed": "无法加载记忆",
       "retry": "重试",
@@ -142,7 +140,7 @@
       "source_upload": "上传",
       "source_runtime": "运行时",
       "source_detail_upload": "上传自 {{path}}",
-      "source_detail_runtime": "导入自运行时机器上的 {{path}}",
+      "source_detail_runtime": "复制自运行时机器上的 {{path}}",
       "saved_toast": "记忆已保存",
       "save_failed_toast": "保存记忆失败",
       "upload_added_toast": "已添加 {{n}} 个文件，保存后生效",
@@ -166,7 +164,7 @@
       },
       "runtime_import": {
         "title": "从运行时机器导入记忆",
-        "description": "列出你某台电脑上的记忆与指令文件（CLAUDE.md、Claude 项目记忆、AGENTS.md、GEMINI.md 等）。只复制你勾选的文件，并且在保存记忆页之前不会存储任何内容。",
+        "description": "列出你某台电脑上的记忆与指令文件（CLAUDE.md、Claude 项目记忆、AGENTS.md、GEMINI.md 等）。勾选的文件只复制一次，之后那台机器上的改动不会同步过来；保存记忆页之前不会存储任何内容。",
         "runtime_label": "运行时",
         "runtime_placeholder": "选择运行时",
         "no_runtimes": "你还没有本地运行时，请先添加电脑。",
@@ -188,8 +186,6 @@
         "read_errors": "以下文件未能导入："
       },
       "source_agent": "智能体",
-      "auto_sync_label": "与该机器上的来源文件保持同步",
-      "synced_at": "上次同步 {{time}}",
       "writeback": {
         "title": "从运行中学习",
         "mode_label": "智能体对记忆的修改如何处理",
@@ -197,9 +193,9 @@
         "mode_review": "需审核",
         "mode_auto": "自动保存",
         "hint_off": "智能体在运行中对记忆的修改会被丢弃。",
-        "hint_review": "每次运行结束后，智能体对记忆的修改（以及 Claude 在该任务里自动生成的记忆）会进入这里排队，你接受后才生效。",
+        "hint_review": "每次运行结束后，智能体对记忆的修改会进入这里排队，你接受后才生效。",
         "hint_auto": "每次运行结束后，智能体对记忆的修改会直接保存。如果同一个文件在运行期间被你改过，仍会留在这里等你审核。",
-        "capture_label": "同时收集 Claude 在运行中自动生成的记忆（保存在 auto/ 下）",
+        "capture_label": "同时收集 Claude 在运行中自动生成的记忆（保存在 auto/ 下）。默认关闭：它会产生较多需要审核的小改动。",
         "pending_title": "待审核的修改（{{n}}）",
         "dirty_hint": "请先保存或放弃当前未保存的修改，再审核。",
         "action_create": "新建",
@@ -216,7 +212,6 @@
         "no_file": "（尚无此文件）",
         "will_delete": "（将删除此文件）",
         "note_conflict": "运行开始后这个文件被改过，请对比后再决定。",
-        "note_sync": "这个文件会从来源同步，接受后将停止同步。",
         "settings_saved": "记忆设置已保存",
         "settings_failed": "记忆设置保存失败",
         "accepted_toast": "已接受对 {{path}} 的修改",
@@ -225,14 +220,14 @@
         "load_failed": "无法加载待审核的修改",
         "runtime_unsupported": "这个智能体所在运行时的 Multica 版本较旧：记忆仍会下发，但运行中的修改不会写回。请升级该机器的 CLI/daemon。"
       },
-      "save_conflict_toast": "页面打开后，这个智能体的记忆被修改过（可能是某次运行、同步或其他标签页保存的）。请刷新查看最新内容，再重新做你的修改。",
-      "sync_unsupported": "该机器上的 Multica 版本较旧，不支持同步，请升级它的 CLI/daemon。"
+      "save_conflict_toast": "页面打开后，这个智能体的记忆被修改过（可能是某次运行或其他标签页保存的）。请刷新查看最新内容，再重新做你的修改。"
     }
   },
   "ja": {
     "tab": "メモリ",
     "body": {
       "intro": "メモリファイルはこのエージェントの実行ごとに配布されます。作業ディレクトリの .multica/memory/ に書き込まれ、ランタイム指示（CLAUDE.md / AGENTS.md）にも含まれます。長期的なメモ、好み、プロジェクトの背景に使用してください。スイッチをオフにすると、ファイルを残したまま実行には渡しません。",
+      "machine_files_note": "メモリはここが唯一の保存先で、どのマシンでも同じです。ランタイムマシン自身のファイル（例: そのマシンの ~/.claude/CLAUDE.md）は、そのマシンでの実行に引き続き適用され、ここでは管理されません。",
       "loading": "メモリを読み込み中…",
       "load_failed": "メモリを読み込めませんでした",
       "retry": "再試行",
@@ -257,7 +252,7 @@
       "source_upload": "アップロード",
       "source_runtime": "ランタイム",
       "source_detail_upload": "{{path}} からアップロード",
-      "source_detail_runtime": "ランタイムマシンの {{path}} からインポート",
+      "source_detail_runtime": "ランタイムマシンの {{path}} からコピー",
       "saved_toast": "メモリを保存しました",
       "save_failed_toast": "メモリを保存できませんでした",
       "upload_added_toast": "{{n}} 件のファイルを追加しました。保存すると反映されます",
@@ -281,7 +276,7 @@
       },
       "runtime_import": {
         "title": "ランタイムマシンからメモリをインポート",
-        "description": "あなたのコンピュータ上のメモリ・指示ファイル（CLAUDE.md、Claude のプロジェクトメモリ、AGENTS.md、GEMINI.md など）を一覧表示します。選択したファイルのみコピーされ、メモリタブを保存するまで何も保存されません。",
+        "description": "あなたのコンピュータ上のメモリ・指示ファイル（CLAUDE.md、Claude のプロジェクトメモリ、AGENTS.md、GEMINI.md など）を一覧表示します。選択したファイルは一度だけコピーされ、その後のマシン上の変更は反映されません。メモリタブを保存するまで何も保存されません。",
         "runtime_label": "ランタイム",
         "runtime_placeholder": "ランタイムを選択",
         "no_runtimes": "ローカルランタイムがありません。先にコンピュータを接続してください。",
@@ -303,8 +298,6 @@
         "read_errors": "次のファイルはインポートされませんでした:"
       },
       "source_agent": "エージェント",
-      "auto_sync_label": "そのマシン上の元ファイルと同期する",
-      "synced_at": "最終同期 {{time}}",
       "writeback": {
         "title": "実行からの学習",
         "mode_label": "エージェントによるメモリ編集の扱い",
@@ -312,9 +305,9 @@
         "mode_review": "レビュー",
         "mode_auto": "自動",
         "hint_off": "実行中にエージェントが行ったメモリの変更は破棄されます。",
-        "hint_review": "各実行の後、エージェントのメモリ編集（とタスク中の Claude の自動メモリ）がここに並び、承認すると反映されます。",
+        "hint_review": "各実行の後、エージェントのメモリ編集がここに並び、承認すると反映されます。",
         "hint_auto": "各実行の後、エージェントのメモリ編集はすぐに保存されます。その間にあなたが編集したファイルへの変更はレビュー待ちになります。",
-        "capture_label": "Claude の自動メモリも収集する（auto/ に保存）",
+        "capture_label": "Claude の自動メモリも収集する（auto/ に保存）。小さな変更が多く発生するため、既定ではオフです。",
         "pending_title": "レビュー待ちの変更（{{n}}）",
         "dirty_hint": "未保存の編集を保存または破棄してからレビューしてください。",
         "action_create": "新規",
@@ -331,7 +324,6 @@
         "no_file": "（まだファイルなし）",
         "will_delete": "（ファイルは削除されます）",
         "note_conflict": "実行開始後にこのファイルが変更されました。比較してから承認してください。",
-        "note_sync": "このファイルは元ファイルから同期されています。承認すると同期は止まります。",
         "settings_saved": "メモリ設定を保存しました",
         "settings_failed": "メモリ設定を保存できませんでした",
         "accepted_toast": "{{path}} の変更を承認しました",
@@ -340,14 +332,14 @@
         "load_failed": "変更を読み込めませんでした",
         "runtime_unsupported": "このエージェントのランタイムは古い Multica です。メモリは配信されますが、実行中の編集は戻されません。そのマシンの CLI/daemon を更新してください。"
       },
-      "save_conflict_toast": "ページを開いた後にこのエージェントのメモリが変更されました（実行、同期、または別のタブによる保存）。再読み込みして最新の内容を確認してから、編集をやり直してください。",
-      "sync_unsupported": "そのマシンの Multica は古く、同期に対応していません。CLI/daemon を更新してください。"
+      "save_conflict_toast": "ページを開いた後にこのエージェントのメモリが変更されました（実行または別のタブによる保存）。再読み込みして最新の内容を確認してから、編集をやり直してください。"
     }
   },
   "ko": {
     "tab": "메모리",
     "body": {
       "intro": "메모리 파일은 이 에이전트가 실행될 때마다 전달됩니다. 작업 디렉터리의 .multica/memory/에 기록되고 런타임 지침(CLAUDE.md / AGENTS.md)에도 포함됩니다. 장기 메모, 선호 사항, 프로젝트 배경에 사용하세요. 스위치를 끄면 파일을 보관하되 실행에는 전달하지 않습니다.",
+      "machine_files_note": "메모리는 여기에만 저장되며 어느 머신에서나 같습니다. 런타임 머신 자체의 파일(예: 그 머신의 ~/.claude/CLAUDE.md)은 그 머신에서의 실행에 계속 적용되며 여기서 관리되지 않습니다.",
       "loading": "메모리를 불러오는 중…",
       "load_failed": "메모리를 불러오지 못했습니다",
       "retry": "다시 시도",
@@ -372,7 +364,7 @@
       "source_upload": "업로드",
       "source_runtime": "런타임",
       "source_detail_upload": "{{path}}에서 업로드됨",
-      "source_detail_runtime": "런타임 머신의 {{path}}에서 가져옴",
+      "source_detail_runtime": "런타임 머신의 {{path}}에서 복사함",
       "saved_toast": "메모리를 저장했습니다",
       "save_failed_toast": "메모리를 저장하지 못했습니다",
       "upload_added_toast": "파일 {{n}}개를 추가했습니다. 저장해야 반영됩니다",
@@ -396,7 +388,7 @@
       },
       "runtime_import": {
         "title": "런타임 머신에서 메모리 가져오기",
-        "description": "내 컴퓨터에 있는 메모리 및 지침 파일(CLAUDE.md, Claude 프로젝트 메모리, AGENTS.md, GEMINI.md 등)을 나열합니다. 선택한 파일만 복사되며, 메모리 탭을 저장하기 전에는 아무것도 저장되지 않습니다.",
+        "description": "내 컴퓨터에 있는 메모리 및 지침 파일(CLAUDE.md, Claude 프로젝트 메모리, AGENTS.md, GEMINI.md 등)을 나열합니다. 선택한 파일은 한 번만 복사되며 이후 해당 머신의 변경 사항은 반영되지 않습니다. 메모리 탭을 저장하기 전에는 아무것도 저장되지 않습니다.",
         "runtime_label": "런타임",
         "runtime_placeholder": "런타임 선택",
         "no_runtimes": "로컬 런타임이 없습니다. 먼저 컴퓨터를 연결하세요.",
@@ -418,8 +410,6 @@
         "read_errors": "다음 파일은 가져오지 못했습니다:"
       },
       "source_agent": "에이전트",
-      "auto_sync_label": "해당 머신의 원본 파일과 동기화",
-      "synced_at": "마지막 동기화 {{time}}",
       "writeback": {
         "title": "실행에서 학습",
         "mode_label": "에이전트의 메모리 편집 처리 방식",
@@ -427,9 +417,9 @@
         "mode_review": "검토",
         "mode_auto": "자동",
         "hint_off": "실행 중 에이전트가 만든 메모리 변경은 버려집니다.",
-        "hint_review": "실행이 끝날 때마다 에이전트의 메모리 편집(및 작업 중 Claude 자동 메모리)이 여기에 쌓이며, 승인하면 적용됩니다.",
+        "hint_review": "실행이 끝날 때마다 에이전트의 메모리 편집이 여기에 쌓이며, 승인하면 적용됩니다.",
         "hint_auto": "실행이 끝나면 에이전트의 메모리 편집이 바로 저장됩니다. 그 사이 직접 수정한 파일에 대한 변경은 검토를 기다립니다.",
-        "capture_label": "Claude 자동 메모리도 수집 (auto/ 아래에 저장)",
+        "capture_label": "Claude 자동 메모리도 수집 (auto/ 아래에 저장). 검토할 작은 변경이 많이 생기므로 기본값은 꺼짐입니다.",
         "pending_title": "검토 대기 중인 변경 ({{n}})",
         "dirty_hint": "검토하기 전에 저장하지 않은 편집을 저장하거나 취소하세요.",
         "action_create": "새로 만들기",
@@ -446,7 +436,6 @@
         "no_file": "(아직 파일 없음)",
         "will_delete": "(파일이 삭제됩니다)",
         "note_conflict": "실행이 시작된 뒤 이 파일이 바뀌었습니다. 비교한 뒤 승인하세요.",
-        "note_sync": "이 파일은 원본에서 동기화됩니다. 승인하면 동기화가 중지됩니다.",
         "settings_saved": "메모리 설정을 저장했습니다",
         "settings_failed": "메모리 설정을 저장하지 못했습니다",
         "accepted_toast": "{{path}} 변경을 승인했습니다",
@@ -455,14 +444,14 @@
         "load_failed": "변경 사항을 불러오지 못했습니다",
         "runtime_unsupported": "이 에이전트의 런타임은 오래된 Multica 버전입니다. 메모리는 전달되지만 실행 중 편집은 돌아오지 않습니다. 해당 머신의 CLI/daemon을 업그레이드하세요."
       },
-      "save_conflict_toast": "페이지를 연 뒤 이 에이전트의 메모리가 변경되었습니다(실행, 동기화 또는 다른 탭에서 저장). 새로고침해 최신 내용을 확인한 뒤 다시 편집하세요.",
-      "sync_unsupported": "해당 머신의 Multica 버전이 오래되어 동기화를 지원하지 않습니다. CLI/daemon을 업그레이드하세요."
+      "save_conflict_toast": "페이지를 연 뒤 이 에이전트의 메모리가 변경되었습니다(실행 또는 다른 탭에서 저장). 새로고침해 최신 내용을 확인한 뒤 다시 편집하세요."
     }
   },
   "fr": {
     "tab": "Mémoire",
     "body": {
       "intro": "Les fichiers de mémoire accompagnent chaque exécution de cet agent : ils sont écrits dans .multica/memory/ du répertoire de travail et inclus dans les instructions d'exécution (CLAUDE.md / AGENTS.md). Utilisez-les pour les notes durables, les préférences et le contexte du projet. Désactivez un fichier pour le conserver sans le transmettre.",
+      "machine_files_note": "La mémoire est conservée ici et reste la même sur toutes les machines. Les fichiers propres à une machine d'exécution, comme son ~/.claude/CLAUDE.md, s'appliquent toujours aux exécutions sur cette machine et ne sont pas gérés ici.",
       "loading": "Chargement de la mémoire…",
       "load_failed": "Impossible de charger la mémoire",
       "retry": "Réessayer",
@@ -487,7 +476,7 @@
       "source_upload": "Téléversé",
       "source_runtime": "Runtime",
       "source_detail_upload": "Téléversé depuis {{path}}",
-      "source_detail_runtime": "Importé depuis {{path}} sur la machine d'exécution",
+      "source_detail_runtime": "Copié depuis {{path}} sur la machine d'exécution",
       "saved_toast": "Mémoire enregistrée",
       "save_failed_toast": "Impossible d'enregistrer la mémoire",
       "upload_added_toast": "{{n}} fichier(s) ajouté(s) — enregistrez pour les conserver",
@@ -511,7 +500,7 @@
       },
       "runtime_import": {
         "title": "Importer la mémoire depuis une machine d'exécution",
-        "description": "Liste les fichiers de mémoire et d'instructions de l'un de vos ordinateurs (CLAUDE.md, mémoire de projet Claude, AGENTS.md, GEMINI.md, etc.). Seuls les fichiers sélectionnés sont copiés, et rien n'est enregistré avant l'enregistrement de l'onglet Mémoire.",
+        "description": "Liste les fichiers de mémoire et d'instructions de l'un de vos ordinateurs (CLAUDE.md, mémoire de projet Claude, AGENTS.md, GEMINI.md, etc.). Les fichiers sélectionnés sont copiés une seule fois : les modifications ultérieures sur cette machine ne sont pas reprises, et rien n'est enregistré avant l'enregistrement de l'onglet Mémoire.",
         "runtime_label": "Runtime",
         "runtime_placeholder": "Choisir un runtime",
         "no_runtimes": "Vous n'avez aucun runtime local. Connectez d'abord un ordinateur.",
@@ -533,8 +522,6 @@
         "read_errors": "Certains fichiers n'ont pas été importés :"
       },
       "source_agent": "Agent",
-      "auto_sync_label": "Synchroniser avec le fichier source sur cette machine",
-      "synced_at": "dernière synchro {{time}}",
       "writeback": {
         "title": "Apprendre des exécutions",
         "mode_label": "Que faire des modifications de mémoire de l'agent",
@@ -542,9 +529,9 @@
         "mode_review": "Revue",
         "mode_auto": "Automatique",
         "hint_off": "Les modifications de mémoire faites par l'agent pendant une exécution sont ignorées.",
-        "hint_review": "Après chaque exécution, les modifications de mémoire de l'agent (et l'auto-mémoire de Claude pour la tâche) arrivent ici ; elles s'appliquent une fois acceptées.",
+        "hint_review": "Après chaque exécution, les modifications de mémoire de l'agent arrivent ici ; elles s'appliquent une fois acceptées.",
         "hint_auto": "Après chaque exécution, les modifications de mémoire de l'agent sont enregistrées aussitôt. Celles qui touchent un fichier que vous avez modifié entre-temps restent en revue.",
-        "capture_label": "Collecter aussi l'auto-mémoire de Claude (enregistrée sous auto/)",
+        "capture_label": "Collecter aussi l'auto-mémoire de Claude (enregistrée sous auto/). Désactivé par défaut : cela produit beaucoup de petites modifications à relire.",
         "pending_title": "Modifications en attente de revue ({{n}})",
         "dirty_hint": "Enregistrez ou annulez vos modifications avant de faire la revue.",
         "action_create": "Nouveau",
@@ -561,7 +548,6 @@
         "no_file": "(pas encore de fichier)",
         "will_delete": "(le fichier sera supprimé)",
         "note_conflict": "Ce fichier a changé après le début de l'exécution : comparez avant d'accepter.",
-        "note_sync": "Ce fichier se synchronise depuis sa source ; accepter arrête la synchronisation.",
         "settings_saved": "Paramètres de mémoire enregistrés",
         "settings_failed": "Impossible d'enregistrer les paramètres de mémoire",
         "accepted_toast": "Modification de {{path}} acceptée",
@@ -570,8 +556,7 @@
         "load_failed": "Impossible de charger les modifications",
         "runtime_unsupported": "Le runtime de cet agent utilise une ancienne version de Multica : la mémoire est transmise, mais les modifications des exécutions ne reviennent pas. Mettez à jour le CLI/daemon de cette machine."
       },
-      "save_conflict_toast": "La mémoire de cet agent a changé après l'ouverture de la page (une exécution, une synchro ou un autre onglet l'a enregistrée). Rechargez pour voir la dernière version, puis refaites vos modifications.",
-      "sync_unsupported": "Cette machine utilise une version de Multica trop ancienne pour synchroniser. Mettez à jour son CLI/daemon."
+      "save_conflict_toast": "La mémoire de cet agent a changé après l'ouverture de la page (une exécution ou un autre onglet l'a enregistrée). Rechargez pour voir la dernière version, puis refaites vos modifications."
     }
   }
 }

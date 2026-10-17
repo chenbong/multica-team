@@ -75,34 +75,38 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
       （`~/.claude/CLAUDE.md`、`~/.claude/projects/*/memory/**`、`~/.codex/AGENTS.md`、`~/.codex/memories/*`、
       `~/.gemini/GEMINI.md`、`~/.qwen/QWEN.md`、`~/.config/opencode/AGENTS.md`、`~/.kiro/steering/*`、
       Hermes `memories/*` 等），勾选后读取内容加入草稿。读取只认 daemon 自己发现的 key，服务端无法让 daemon
-      读任意路径；列表与读取都仅限运行时所有者（`POST/GET /api/runtimes/{id}/local-memory`）。
+      读任意路径；列表与读取都仅限运行时所有者（`POST/GET /api/runtimes/{id}/local-memory`）。导入是一次性复制：
+      之后与那台机器再无关联，机器上的改动不会同步过来。
 
     读写记忆沿用环境变量的权限规则：智能体所有者或工作区 owner/admin，智能体身份一律拒绝。限制为每个智能体
     64 个文件、单文件 256 KiB、合计 1 MiB。每次领取任务时记忆随 claim 下发，daemon 写到工作目录
     `.multica/memory/`（走 sidecar manifest，本地目录模式下任务结束会清理），并在运行时简报
     （CLAUDE.md / AGENTS.md）里加一节 `## Agent Memory`：48 KiB 以内整份内联，其余只列路径。
-    智能体对这些副本的修改不会回写。每个文件有独立的启用开关（列表里另有「全部启用 / 全部停用」）：
+    智能体对这些副本的修改见下文「运行后写回」。每个文件有独立的启用开关（列表里另有「全部启用 / 全部停用」）：
     停用的文件仍保存在记忆页，但领取任务时不会下发。数据库侧对应 `migrations/467_agent_memory_file`。
     新版 daemon 通过 `X-Client-Capabilities: agent-memory-v1` 声明支持；**没有声明的旧 daemon**（如官方 0.6.1）
     领取任务时，服务端把启用的记忆渲染成同样的 `## Agent Memory` 小节追加到智能体指令里下发（48 KiB 以内内联，
     超出的只列名字），所以部署服务端后记忆对旧客户端也立即生效，只是没有 `.multica/memory/` 副本。
     「从运行时导入」仍需要新版 CLI/daemon——对旧 daemon 发起导入约 45 秒后以超时提示升级。
 
-    **记忆自动更新**（`migrations/468_agent_memory_writeback`）分两条路：
-    - **运行后写回**：新版 daemon 在任务成功结束后，把智能体对 `.multica/memory/` 的新增、修改、删除，以及 Claude 系运行时
-      在该任务里自动生成的记忆（`~/.claude/projects/<工作目录>/memory/`，映射为 `auto/<文件>`；运行前会先把已接受的
-      `auto/` 文件放回该目录，让它在同一份记忆上续写）上报给服务端（`POST /api/daemon/tasks/{id}/memory-changes`）。
+    **平台是记忆的唯一来源**：记忆只沿「平台 → 机器」下发，再通过运行后写回回到平台，不跟任何机器上的文件同步，
+    所以换机器、换运行时拿到的都是同一份记忆。运行时机器自己的文件（例如 ducc/Claude 会读取的 `~/.claude/CLAUDE.md`）
+    仍会对在那台机器上的运行生效，不归记忆页管理，记忆页上有一句说明。
+
+    **运行后写回**（`migrations/468_agent_memory_writeback`）：
+    - 新版 daemon 在任务成功结束后，把智能体对 `.multica/memory/` 的新增、修改、删除上报给服务端
+      （`POST /api/daemon/tasks/{id}/memory-changes`）。可选同时收集 Claude 系运行时在该任务里自动生成的记忆
+      （`~/.claude/projects/<工作目录>/memory/`，映射为 `auto/<文件>`；运行前会先把已接受的 `auto/` 文件放回该目录，让它在
+      同一份记忆上续写），这一项**默认关闭**，因为它会产生较多小提案。
       每个变更是一条提案；记忆页「从运行中学习」可选 **关闭 / 需审核（默认）/ 自动保存**：需审核时在记忆页对比后接受或
-      拒绝；自动保存时直接生效，但运行期间被人改过的文件、正在同步的文件仍进审核。同一路径的新提案会替代旧的待审提案。
+      拒绝；自动保存时直接生效，但运行期间被人改过的文件仍进审核。同一路径的新提案会替代旧的待审提案。
       本地目录 / worktree 模式不收集运行时原生记忆（那是用户自己项目的记忆）。
-    - **来源同步**：从运行时导入的文件可打开「与来源文件保持同步」（仅该运行时的所有者可开），服务端借心跳每 5 分钟
-      让 daemon 重读一次来源文件并覆盖平台上的副本；运行时换了所有者即停止同步。
     - **一致性与权限**：daemon 每次运行前把 `.multica/memory/`（托管工作目录）和 Claude 原生记忆目录重置为平台内容，
       运行后只上报相对启动时真正变化的文件，所以同一 issue 复用工作目录不会把旧副本当成修改。上报接口只接受执行该任务的
       运行时（其 daemon token 或运行时所有者的 PAT），不接受智能体任务 token 或其他成员；每个任务只能上报一次，且仅在
       任务运行中或刚结束 10 分钟内。本地目录 / worktree 模式下智能体新建的记忆文件会在任务结束时删除，不会留在用户目录或
-      被提交进分支。记忆页保存时带 `base_version`，期间有运行、同步或其他标签页改过记忆则返回 409，需刷新后再保存。
-      运行时 daemon 过旧（未声明 `agent-memory-v1`）时，记忆页会提示写回和同步不可用。
+      被提交进分支。记忆页保存时带 `base_version`，期间有运行或其他标签页改过记忆则返回 409，需刷新后再保存。
+      运行时 daemon 过旧（未声明 `agent-memory-v1`）时，记忆页会提示写回不可用。
 
 ## 可选：OneAPI 模型目录
 
@@ -277,7 +281,7 @@ Next.js 没有 overlay 机制，所以采用"临时树 + 脚本补丁"的方式�
 - `001_user_daemon_bootstrap_token`：`user` 表新增 daemon 引导令牌字段
 - `457_skill_scope` … `463_skill_team_scope`：Skill 多级别（个人 / 项目 / 团队）与统计相关的索引、字段
 - `467_agent_memory_file`：智能体记忆文件表（随智能体级联删除）
-- `468_agent_memory_writeback`：记忆写回提案、写回设置与来源同步字段
+- `468_agent_memory_writeback`：记忆写回提案、写回设置、每任务上报记录（并删除早期草案里的来源同步字段）
 
 `overlays/sql/` 里放的是 sqlc 查询定义；对应的 `server/pkg/db/generated/*.go` 生成结果
 同时以完整文件形式放在 `overlays/go/files/` 中，两者要一起改。

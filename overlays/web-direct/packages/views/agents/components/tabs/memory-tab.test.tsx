@@ -313,7 +313,20 @@ describe("MemoryTab", () => {
     await waitFor(() => expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/changed after the page was loaded/)));
   });
 
-  it("warns when the runtime is too old for write-back or sync", async () => {
+  it("warns when the runtime is too old for write-back", async () => {
+    getAgentMemory.mockResolvedValue({
+      agent_id: "agent-1",
+      files: [serverFile("a.md", "x")],
+      limits,
+      settings: { writeback: "review", capture_runtime_memory: false },
+      pending_proposals: 0,
+      runtime_supports_writeback: false,
+    });
+    renderTab();
+    expect(await screen.findByText(/edits from runs are not sent back/)).toBeInTheDocument();
+  });
+
+  it("treats an imported file as a copy with no link to its machine", async () => {
     getAgentMemory.mockResolvedValue({
       agent_id: "agent-1",
       files: [
@@ -321,17 +334,14 @@ describe("MemoryTab", () => {
           ...serverFile("claude/CLAUDE.md", "x", "runtime"),
           source_runtime_id: "rt-1",
           source_path: "~/.claude/CLAUDE.md",
-          auto_sync: true,
-          sync_supported: false,
         },
       ],
       limits,
-      settings: { writeback: "review", capture_runtime_memory: true },
-      pending_proposals: 0,
-      runtime_supports_writeback: false,
+      version: "v1",
     });
     renderTab();
-    expect(await screen.findByText(/edits from runs are not sent back/)).toBeInTheDocument();
-    expect(screen.getByText(/cannot sync/)).toBeInTheDocument();
+    expect(await screen.findByText(/Copied from ~\/\.claude\/CLAUDE\.md/)).toBeInTheDocument();
+    expect(screen.queryByText(/keep in sync/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/its own ~\/\.claude\/CLAUDE\.md/)).toBeInTheDocument();
   });
 });

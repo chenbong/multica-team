@@ -107,11 +107,7 @@ export function MemoryWritebackPanel({
         ? t(($) => $.tab_body.memory.writeback.hint_auto)
         : t(($) => $.tab_body.memory.writeback.hint_review);
   const noteLabel = (note: string) =>
-    note.includes("changed after")
-      ? t(($) => $.tab_body.memory.writeback.note_conflict)
-      : note.includes("syncs from its source")
-        ? t(($) => $.tab_body.memory.writeback.note_sync)
-        : note;
+    note.includes("changed after") ? t(($) => $.tab_body.memory.writeback.note_conflict) : note;
 
   return (
     <section aria-labelledby="memory-writeback-title" className="space-y-2 rounded-lg border p-3">

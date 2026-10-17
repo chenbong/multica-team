@@ -12,11 +12,6 @@ export interface AgentMemoryFile {
   source_path: string;
   /** Disabled files stay stored but are not delivered to runs. */
   enabled: boolean;
-  /** Runtime-imported file kept in sync with its source file. */
-  auto_sync?: boolean;
-  synced_at?: string | null;
-  /** False when the source runtime's Multica is too old to sync. */
-  sync_supported?: boolean;
   size_bytes: number;
   updated_by: string | null;
   created_at: string;
@@ -84,7 +79,6 @@ export interface AgentMemoryFileInput {
   source_path?: string;
   /** Defaults to true on the server when omitted. */
   enabled?: boolean;
-  auto_sync?: boolean;
 }
 
 export interface UpdateAgentMemoryRequest {

@@ -274,9 +274,14 @@ export function MemoryTab({
 
   return (
     <div className="space-y-4">
-      <p className="max-w-2xl text-pretty text-body leading-6 text-muted-foreground">
-        {t(($) => $.tab_body.memory.intro)}
-      </p>
+      <div className="max-w-2xl space-y-1">
+        <p className="text-pretty text-body leading-6 text-muted-foreground">
+          {t(($) => $.tab_body.memory.intro)}
+        </p>
+        <p className="text-pretty text-micro text-muted-foreground">
+          {t(($) => $.tab_body.memory.machine_files_note)}
+        </p>
+      </div>
 
       {settings && (
         <MemoryWritebackPanel
@@ -446,26 +451,6 @@ export function MemoryTab({
                   <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
               </div>
-              {selected.source === "runtime" && selected.sourceRuntimeId && selected.sourcePath && (
-                <label className="flex items-center gap-2 border-b px-3 py-1.5 text-micro text-muted-foreground">
-                  <Switch
-                    size="sm"
-                    checked={selected.autoSync === true}
-                    onCheckedChange={(checked) => updateSelected({ autoSync: checked })}
-                  />
-                  <span className="min-w-0 flex-1">
-                    {t(($) => $.tab_body.memory.auto_sync_label)}
-                    {selected.autoSync && selected.syncedAt
-                      ? " · " + t(($) => $.tab_body.memory.synced_at, { time: new Date(selected.syncedAt).toLocaleString() })
-                      : ""}
-                    {selected.syncSupported === false && (
-                      <span role="note" className="block text-warning">
-                        {t(($) => $.tab_body.memory.sync_unsupported)}
-                      </span>
-                    )}
-                  </span>
-                </label>
-              )}
               {(selected.sourcePath || selectedIssues.length > 0 || !selected.enabled) && (
                 <div className="space-y-0.5 border-b px-3 py-1.5 text-micro">
                   {!selected.enabled && (

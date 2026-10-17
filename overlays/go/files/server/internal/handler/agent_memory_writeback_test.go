@@ -180,49 +180,38 @@ func TestAgentMemoryWritebackReviewAutoAndOff(t *testing.T) {
 	}
 }
 
-func TestAgentMemorySourceSync(t *testing.T) {
+// A runtime import is a one-time copy: the platform keeps the content and
+// remembers where it came from, but nothing ties the file to that machine.
+func TestAgentMemoryRuntimeImportIsACopy(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
 	ctx := context.Background()
 	runtimeID := createRuntimeLocalSkillTestRuntime(t, testUserID)
 	agentID := createAgentMemoryTestAgent(t, testUserID)
-	h := *testHandler
-	h.LocalMemoryStore = NewInMemoryLocalMemoryStore()
-
+	// auto_sync from an older page is ignored rather than rejected.
 	file := map[string]any{"path": "claude/CLAUDE.md", "content": "v1", "source": "runtime",
 		"source_runtime_id": runtimeID, "source_path": "~/.claude/CLAUDE.md", "auto_sync": true}
-	if w := callAgentMemory(t, testUserID, http.MethodPut, agentID, map[string]any{"files": []map[string]any{file}}); w.Code != http.StatusOK {
-		t.Fatalf("enable sync: %d %s", w.Code, w.Body.String())
+	w := callAgentMemory(t, testUserID, http.MethodPut, agentID, map[string]any{"files": []map[string]any{file}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("save imported file: %d %s", w.Code, w.Body.String())
 	}
-	// Someone who does not own the source runtime cannot turn sync on.
-	other := dbfx.Agent(t, "agent-memory-sync-other", dbfx.Runtime(t, "agent-memory-sync-other-runtime"), testutil.Cols{"owner_id": testUserID})
-	memberID := createRuntimeLocalSkillTestMember(t, "admin")
-	if w := callAgentMemory(t, memberID, http.MethodPut, other, map[string]any{"files": []map[string]any{file}}); w.Code != http.StatusBadRequest {
-		t.Fatalf("non-owner sync: want 400, got %d %s", w.Code, w.Body.String())
+	if body := w.Body.String(); strings.Contains(body, "auto_sync") || strings.Contains(body, "sync_supported") {
+		t.Fatalf("response still carries sync fields: %s", body)
 	}
 
-	resetAgentMemorySyncThrottle(runtimeID)
-	h.maybeEnqueueAgentMemorySync(ctx, runtimeID)
-	pending, _ := h.LocalMemoryStore.PopPendingBatch(ctx, runtimeID, 4)
-	if len(pending) != 1 || pending[0].Kind != RuntimeLocalMemoryKindRead || len(pending[0].Keys) != 1 || pending[0].Keys[0] != "~/.claude/CLAUDE.md" {
-		t.Fatalf("sync request = %+v", pending)
-	}
-	// Throttled until the interval passes.
-	h.maybeEnqueueAgentMemorySync(ctx, runtimeID)
-	if again, _ := h.LocalMemoryStore.PopPendingBatch(ctx, runtimeID, 4); len(again) != 0 {
-		t.Fatalf("sync not throttled: %+v", again)
-	}
-
-	h.applyAgentMemorySync(ctx, runtimeID, []RuntimeLocalMemoryFile{{Key: "~/.claude/CLAUDE.md", Content: "v2"}})
-	w := callAgentMemory(t, testUserID, http.MethodGet, agentID, nil)
+	// Defaults: review the agent's own edits, leave the runtime's memory out.
+	w = callAgentMemory(t, testUserID, http.MethodGet, agentID, nil)
 	var resp AgentMemoryResponse
 	json.NewDecoder(w.Body).Decode(&resp)
-	if len(resp.Files) != 1 || resp.Files[0].Content != "v2" || !resp.Files[0].AutoSync || resp.Files[0].SyncedAt == nil {
-		t.Fatalf("after sync = %+v", resp.Files)
+	if len(resp.Files) != 1 || resp.Files[0].Source != "runtime" || resp.Files[0].SourcePath != "~/.claude/CLAUDE.md" {
+		t.Fatalf("imported file = %+v", resp.Files)
 	}
-	if resp.Settings.Writeback != "review" {
+	if resp.Settings.Writeback != "review" || resp.Settings.CaptureRuntimeMemory {
 		t.Fatalf("default settings = %+v", resp.Settings)
+	}
+	if wb := testHandler.agentMemoryWritebackForClaim(ctx, parseUUID(agentID)); wb == nil || wb.Mode != "review" || wb.CaptureRuntime {
+		t.Fatalf("default claim write-back = %+v", wb)
 	}
 }
 
@@ -287,7 +276,7 @@ func TestAgentMemorySaveRefusesStaleVersion(t *testing.T) {
 	if w.Code != http.StatusOK || first.Version == "" {
 		t.Fatalf("seed: %d %+v", w.Code, first)
 	}
-	// Another writer (a run, a sync, another tab) changes the set.
+	// Another writer (a run or another tab) changes the set.
 	w, second := put(map[string]any{"files": []map[string]any{{"path": "a.md", "content": "two"}}, "base_version": first.Version})
 	if w.Code != http.StatusOK || second.Version == first.Version {
 		t.Fatalf("save from the current version: %d %+v", w.Code, second)
@@ -323,7 +312,12 @@ func TestAgentMemoryReportsRuntimeSupport(t *testing.T) {
 	if resp.RuntimeSupportsWriteback == nil || *resp.RuntimeSupportsWriteback {
 		t.Fatalf("old daemon runtime should report no write-back support: %+v", resp.RuntimeSupportsWriteback)
 	}
-	if len(resp.Files) != 1 || resp.Files[0].SyncSupported == nil || !*resp.Files[0].SyncSupported {
-		t.Fatalf("new daemon source runtime should support sync: %+v", resp.Files)
+	// The runtime a file was imported from does not matter: only the
+	// agent's own runtime decides whether write-back works.
+	w = callAgentMemory(t, testUserID, http.MethodGet, dbfx.Agent(t, "agent-memory-support-new", newRuntime, testutil.Cols{"owner_id": testUserID}), nil)
+	resp = AgentMemoryResponse{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.RuntimeSupportsWriteback == nil || !*resp.RuntimeSupportsWriteback {
+		t.Fatalf("new daemon runtime should report write-back support: %+v", resp.RuntimeSupportsWriteback)
 	}
 }

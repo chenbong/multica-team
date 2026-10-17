@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -20,8 +18,7 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
-// Agent memory write-back and source sync (multica-team overlay, team
-// migration 468).
+// Agent memory write-back (multica-team overlay, team migration 468).
 //
 // Write-back: after a run, a memory-aware daemon reports how the agent changed
 // its memory — edits to the .multica/memory/ copies and, for Claude-family
@@ -32,11 +29,10 @@ import (
 // content is untrusted, so nothing reaches every future run unless the
 // owner reviews it or explicitly chose "auto".
 //
-// Source sync: a runtime-imported file with auto_sync on is re-read from its
-// source file on that machine about every agentMemorySyncInterval, piggy-
-// backing on the runtime's heartbeat and the existing local-memory read
-// request. Only the user who turned sync on, while still owning the runtime,
-// keeps it running.
+// The platform is the only source of truth: memory flows platform -> machine
+// at claim time and comes back only through these reports. Nothing tracks the
+// files a runtime import was copied from, so switching machines changes
+// nothing.
 
 const (
 	AgentMemoryWritebackOff    = "off"
@@ -45,8 +41,6 @@ const (
 
 	AgentMemoryOriginAgent   = "agent"
 	AgentMemoryOriginRuntime = "runtime"
-
-	agentMemorySyncInterval = 5 * time.Minute
 )
 
 type AgentMemorySettings struct {
@@ -60,8 +54,11 @@ type AgentMemoryWritebackData struct {
 	CaptureRuntime bool   `json:"capture_runtime"`
 }
 
+// defaultAgentMemorySettings applies when an agent has no settings row.
+// Capturing the runtime's own memory is opt-in because it yields many small
+// proposals; by default only the agent's edits to .multica/memory/ come back.
 func defaultAgentMemorySettings() AgentMemorySettings {
-	return AgentMemorySettings{Writeback: AgentMemoryWritebackReview, CaptureRuntimeMemory: true}
+	return AgentMemorySettings{Writeback: AgentMemoryWritebackReview, CaptureRuntimeMemory: false}
 }
 
 func isUndefinedTable(err error) bool {
@@ -132,50 +129,6 @@ type agentMemoryUserError struct{ msg string }
 
 func (e *agentMemoryUserError) Error() string { return e.msg }
 
-// resolveAgentMemorySyncOwners decides who owns each auto-synced file in a
-// save. A file that already synced from the same source keeps its owner
-// (nil here; the upsert coalesces). Turning sync on, or pointing it at a
-// different source, requires the caller to own that runtime.
-func (h *Handler) resolveAgentMemorySyncOwners(ctx context.Context, agentID pgtype.UUID, member db.Member, files []validatedAgentMemoryFile) (map[string]pgtype.UUID, error) {
-	owners := map[string]pgtype.UUID{}
-	var existing map[string]db.AgentMemoryFile
-	for _, f := range files {
-		if !f.autoSync {
-			continue
-		}
-		if existing == nil {
-			rows, err := h.Queries.ListAgentMemoryFiles(ctx, agentID)
-			if err != nil {
-				return nil, err
-			}
-			existing = make(map[string]db.AgentMemoryFile, len(rows))
-			for _, row := range rows {
-				existing[row.Path] = row
-			}
-		}
-		if prev, ok := existing[f.path]; ok && prev.AutoSync && prev.SyncOwnerID.Valid &&
-			prev.SourceRuntimeID == f.sourceRuntimeID && prev.SourcePath == f.sourcePath {
-			continue
-		}
-		rt, err := h.Queries.GetAgentRuntime(ctx, f.sourceRuntimeID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, &agentMemoryUserError{fmt.Sprintf("memory file %q: its source runtime no longer exists, so it cannot sync", f.path)}
-			}
-			return nil, err
-		}
-		if !rt.OwnerID.Valid || rt.OwnerID != member.UserID {
-			return nil, &agentMemoryUserError{fmt.Sprintf("memory file %q: only the owner of its source runtime can turn on sync", f.path)}
-		}
-		owners[f.path] = member.UserID
-	}
-	return owners, nil
-}
-
-var agentMemorySyncLast sync.Map // runtime id -> time.Time of the last sync enqueue
-
-func resetAgentMemorySyncThrottle(runtimeID string) { agentMemorySyncLast.Delete(runtimeID) }
-
 // applyAgentMemoryChange writes one accepted change into the stored set,
 // re-validating the resulting set against the same limits as a save.
 func applyAgentMemoryChange(ctx context.Context, qtx *db.Queries, agentID pgtype.UUID, path, action, content string, actor pgtype.UUID) error {
@@ -193,7 +146,6 @@ func applyAgentMemoryChange(ctx context.Context, qtx *db.Queries, agentID pgtype
 			Source:     row.Source,
 			SourcePath: row.SourcePath,
 			Enabled:    &row.Enabled,
-			AutoSync:   row.AutoSync,
 		}
 		if row.SourceRuntimeID.Valid {
 			in.SourceRuntimeID = uuidToString(row.SourceRuntimeID)
@@ -204,7 +156,6 @@ func applyAgentMemoryChange(ctx context.Context, qtx *db.Queries, agentID pgtype
 				continue
 			}
 			in.Content = content
-			in.AutoSync = false
 		}
 		inputs = append(inputs, in)
 	}
@@ -229,9 +180,7 @@ func applyAgentMemoryChange(ctx context.Context, qtx *db.Queries, agentID pgtype
 		UpdatedBy: actor,
 	}
 	if target != nil {
-		// Keep where the file came from; an accepted edit replaces the
-		// content, so a synced file stops syncing (the edit would otherwise
-		// be overwritten by the next sync).
+		// Keep where the file came from; only the content changes.
 		params.Source = target.Source
 		params.SourceRuntimeID = target.SourceRuntimeID
 		params.SourcePath = target.SourcePath
@@ -583,8 +532,6 @@ func (h *Handler) ReportAgentMemoryChanges(w http.ResponseWriter, r *http.Reques
 		switch {
 		case conflict:
 			note = "the stored file changed after this run started"
-		case exists && cur.AutoSync:
-			note = "the stored file syncs from its source; accepting stops the sync"
 		case settings.Writeback == AgentMemoryWritebackAuto:
 			if err := applyAgentMemoryChange(ctx, qtx, task.AgentID, path, c.Action, content, pgtype.UUID{}); err != nil {
 				var bad *agentMemoryUserError
@@ -648,62 +595,4 @@ func (h *Handler) agentMemoryWritebackForClaim(ctx context.Context, agentID pgty
 		return nil
 	}
 	return &AgentMemoryWritebackData{Mode: settings.Writeback, CaptureRuntime: settings.CaptureRuntimeMemory}
-}
-
-// maybeEnqueueAgentMemorySync is the heartbeat hook for source sync: at most
-// every agentMemorySyncInterval per runtime, it asks the daemon to re-read
-// the source files that auto-synced memory mirrors. The result is applied by
-// applyAgentMemorySync when the read reports back.
-func (h *Handler) maybeEnqueueAgentMemorySync(ctx context.Context, runtimeID string) {
-	if h.LocalMemoryStore == nil {
-		return
-	}
-	now := time.Now()
-	if last, ok := agentMemorySyncLast.Load(runtimeID); ok && now.Sub(last.(time.Time)) < agentMemorySyncInterval {
-		return
-	}
-	agentMemorySyncLast.Store(runtimeID, now)
-	var rid pgtype.UUID
-	if err := rid.Scan(runtimeID); err != nil {
-		return
-	}
-	qctx, cancel := context.WithTimeout(ctx, heartbeatHasPendingTimeout)
-	keys, err := h.Queries.ListAgentMemorySyncKeys(qctx, rid)
-	cancel()
-	if err != nil {
-		if !isUndefinedTable(err) && !errors.Is(err, context.DeadlineExceeded) {
-			slog.Warn("agent memory sync: list keys failed", "runtime_id", runtimeID, "error", err)
-		}
-		return
-	}
-	if len(keys) == 0 {
-		return
-	}
-	if len(keys) > runtimeLocalMemoryMaxReadKeys {
-		keys = keys[:runtimeLocalMemoryMaxReadKeys]
-	}
-	if _, err := h.LocalMemoryStore.Create(ctx, runtimeID, "", RuntimeLocalMemoryKindRead, keys); err != nil {
-		slog.Warn("agent memory sync: enqueue read failed", "runtime_id", runtimeID, "error", err)
-	}
-}
-
-// applyAgentMemorySync refreshes auto-synced files from a completed read on
-// their source runtime, whoever requested the read.
-func (h *Handler) applyAgentMemorySync(ctx context.Context, runtimeID string, files []RuntimeLocalMemoryFile) {
-	var rid pgtype.UUID
-	if err := rid.Scan(runtimeID); err != nil {
-		return
-	}
-	for _, f := range files {
-		rows, err := h.Queries.ApplyAgentMemorySync(ctx, db.ApplyAgentMemorySyncParams{Content: f.Content, RuntimeID: rid, SourcePath: f.Key})
-		if err != nil {
-			if !isUndefinedTable(err) {
-				slog.Warn("agent memory sync: apply failed", "runtime_id", runtimeID, "key", f.Key, "error", err)
-			}
-			return
-		}
-		if len(rows) > 0 {
-			slog.Debug("agent memory sync applied", "runtime_id", runtimeID, "key", f.Key, "files", len(rows))
-		}
-	}
 }

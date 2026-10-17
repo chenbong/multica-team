@@ -173,12 +173,32 @@ describe("enabled flag", () => {
   });
 });
 
-describe("auto sync flag", () => {
-  it("is sent only when on and counts toward dirty tracking", () => {
-    const off = [file("claude/CLAUDE.md", "x", { source: "runtime", sourceRuntimeId: "rt", sourcePath: "~/.claude/CLAUDE.md" })];
-    const on = [{ ...off[0]!, autoSync: true }];
-    expect(draftToRequest(off)[0]).not.toHaveProperty("auto_sync");
-    expect(draftToRequest(on)[0]).toMatchObject({ auto_sync: true });
-    expect(draftSignature(on)).not.toBe(draftSignature(off));
+describe("runtime-imported files", () => {
+  it("round-trip as plain copies, without any sync flag", () => {
+    const [f] = draftFromServer([
+      {
+        id: "1",
+        path: "claude/CLAUDE.md",
+        content: "x",
+        source: "runtime",
+        source_runtime_id: "rt",
+        source_path: "~/.claude/CLAUDE.md",
+        enabled: true,
+        auto_sync: true,
+        size_bytes: 1,
+        updated_by: null,
+        created_at: "",
+        updated_at: "",
+      } as unknown as Parameters<typeof draftFromServer>[0][number],
+    ]);
+    const [req] = draftToRequest([f!]);
+    expect(req).toEqual({
+      path: "claude/CLAUDE.md",
+      content: "x",
+      source: "runtime",
+      source_runtime_id: "rt",
+      source_path: "~/.claude/CLAUDE.md",
+      enabled: true,
+    });
   });
 });

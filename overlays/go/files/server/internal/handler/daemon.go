@@ -1520,7 +1520,6 @@ func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, suppor
 		}
 	}
 
-	h.maybeEnqueueAgentMemorySync(ctx, runtimeID)
 	ack.PendingLocalMemory = h.popPendingLocalMemory(ctx, runtimeID)
 
 	return ack, m, nil

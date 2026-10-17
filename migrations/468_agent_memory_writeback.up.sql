@@ -1,4 +1,4 @@
--- Agent memory write-back and source sync (team migration, follows 467).
+-- Agent memory write-back (team migration, follows 467).
 -- Re-run on every start, so every statement is idempotent.
 
 -- Files can now also be created by the agent itself (accepted write-back).
@@ -6,24 +6,25 @@ ALTER TABLE agent_memory_file DROP CONSTRAINT IF EXISTS agent_memory_file_source
 ALTER TABLE agent_memory_file ADD CONSTRAINT agent_memory_file_source_check
     CHECK (source IN ('manual', 'upload', 'runtime', 'agent'));
 
--- auto_sync keeps a runtime-imported file mirrored from its source file on
--- that machine. sync_owner_id is the user who turned it on; sync only runs
--- while that user still owns the source runtime.
-ALTER TABLE agent_memory_file ADD COLUMN IF NOT EXISTS auto_sync BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE agent_memory_file ADD COLUMN IF NOT EXISTS sync_owner_id UUID;
-ALTER TABLE agent_memory_file ADD COLUMN IF NOT EXISTS synced_at TIMESTAMPTZ;
-CREATE INDEX IF NOT EXISTS agent_memory_file_sync_idx
-    ON agent_memory_file (source_runtime_id) WHERE auto_sync;
+-- An earlier draft of this migration mirrored runtime-imported files from
+-- their source machine. That was dropped (the platform is the only source of
+-- truth); remove its columns where the draft already ran.
+DROP INDEX IF EXISTS agent_memory_file_sync_idx;
+ALTER TABLE agent_memory_file DROP COLUMN IF EXISTS synced_at;
+ALTER TABLE agent_memory_file DROP COLUMN IF EXISTS sync_owner_id;
+ALTER TABLE agent_memory_file DROP COLUMN IF EXISTS auto_sync;
 
 -- Per-agent write-back policy. A missing row means the defaults below.
 CREATE TABLE IF NOT EXISTS agent_memory_setting (
     agent_id UUID PRIMARY KEY REFERENCES agent(id) ON DELETE CASCADE,
     writeback TEXT NOT NULL DEFAULT 'review',
-    capture_runtime_memory BOOLEAN NOT NULL DEFAULT true,
+    capture_runtime_memory BOOLEAN NOT NULL DEFAULT false,
     updated_by UUID,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT agent_memory_setting_writeback_check CHECK (writeback IN ('off', 'review', 'auto'))
 );
+-- Capturing the runtime's own memory is opt-in (an earlier draft had it on).
+ALTER TABLE agent_memory_setting ALTER COLUMN capture_runtime_memory SET DEFAULT false;
 
 -- Memory changes reported by the daemon after a run. At most one pending
 -- proposal per (agent, path): a newer one supersedes the older.

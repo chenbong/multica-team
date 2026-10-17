@@ -1,4 +1,4 @@
--- Agent memory write-back and source sync (team migration 468_agent_memory_writeback).
+-- Agent memory write-back (team migration 468_agent_memory_writeback).
 
 -- name: GetAgentMemorySetting :one
 SELECT agent_id, writeback, capture_runtime_memory, updated_by, updated_at
@@ -52,26 +52,6 @@ SELECT count(*) FROM agent_memory_proposal WHERE agent_id = $1 AND status = 'pen
 
 -- name: DeleteAgentMemoryFile :exec
 DELETE FROM agent_memory_file WHERE agent_id = $1 AND path = $2;
-
--- name: ListAgentMemorySyncKeys :many
-SELECT DISTINCT f.source_path
-FROM agent_memory_file f
-JOIN agent_runtime r ON r.id = f.source_runtime_id
-WHERE f.auto_sync AND f.source_runtime_id = $1 AND f.source_path <> ''
-  AND f.sync_owner_id IS NOT NULL AND r.owner_id = f.sync_owner_id
-ORDER BY f.source_path
-LIMIT 32;
-
--- name: ApplyAgentMemorySync :many
-UPDATE agent_memory_file f
-SET content = @content::text,
-    updated_at = CASE WHEN f.content IS DISTINCT FROM @content::text THEN now() ELSE f.updated_at END,
-    synced_at = now()
-FROM agent_runtime r
-WHERE r.id = f.source_runtime_id
-  AND f.auto_sync AND f.source_runtime_id = @runtime_id AND f.source_path = @source_path::text
-  AND f.sync_owner_id IS NOT NULL AND r.owner_id = f.sync_owner_id
-RETURNING f.agent_id, f.path;
 
 -- name: LockAgentMemory :exec
 -- Serializes every writer of one agent's memory set for the transaction.

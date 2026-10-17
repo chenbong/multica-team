@@ -93,9 +93,6 @@ type AgentMemoryFile struct {
 	UpdatedBy       pgtype.UUID        `json:"updated_by"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
-	AutoSync        bool               `json:"auto_sync"`
-	SyncOwnerID     pgtype.UUID        `json:"sync_owner_id"`
-	SyncedAt        pgtype.Timestamptz `json:"synced_at"`
 }
 
 type AgentMemoryProposal struct {
