@@ -226,6 +226,25 @@ type AgentData struct {
 	// daemon decodes provider-specific fields (e.g. openclaw mode +
 	// gateway endpoint, see issue #3260); other backends ignore it.
 	RuntimeConfig json.RawMessage `json:"runtime_config,omitempty"`
+	// Memory is the agent's memory file set (multica-team overlay). It is
+	// written under .multica/memory/ and rendered into the runtime brief.
+	Memory []AgentMemoryFileData `json:"memory,omitempty"`
+	// MemoryWriteback, when set and not "off", asks the daemon to report
+	// memory edits after the run (memory_writeback.go).
+	MemoryWriteback *AgentMemoryWritebackData `json:"memory_writeback,omitempty"`
+}
+
+// AgentMemoryWritebackData is the agent's write-back policy for this task.
+type AgentMemoryWritebackData struct {
+	Mode           string `json:"mode"`
+	CaptureRuntime bool   `json:"capture_runtime"`
+}
+
+// AgentMemoryFileData is one agent memory file from the claim payload.
+type AgentMemoryFileData struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Source  string `json:"source,omitempty"`
 }
 
 // DisabledRuntimeSkillData is the task-wire identity of one runtime-local

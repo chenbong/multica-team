@@ -837,6 +837,139 @@ PORTED_CHANGES = {
 for _rel, _replacements in PORTED_CHANGES.items():
     CHANGES[_rel] = _replacements + CHANGES.get(_rel, [])
 
+# ---------------------------------------------------------------------------
+# Agent memory tab (multica-team overlay). The components live in web-direct
+# (tabs/memory-tab.tsx, tabs/memory-runtime-import-dialog.tsx,
+# tabs/agent-memory.ts, core/types/agent-memory.ts); these anchors only wire
+# them into the agent page, the API client and the agent locales.
+# ---------------------------------------------------------------------------
+AGENT_MEMORY_CLIENT_METHODS = '''  /** Agent memory files (owner or workspace owner/admin; agent actors get 403). */
+  async getAgentMemory(id: string): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory`);
+  }
+
+  /** Replaces the agent's memory set; files missing from `files` are deleted. */
+  async updateAgentMemory(id: string, data: UpdateAgentMemoryRequest): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Starts a memory list/read request on one of the caller's runtime machines. */
+  async initiateLocalMemoryRequest(
+    runtimeId: string,
+    data: CreateRuntimeLocalMemoryRequest,
+  ): Promise<RuntimeLocalMemoryRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/local-memory`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getLocalMemoryRequest(runtimeId: string, requestId: string): Promise<RuntimeLocalMemoryRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/local-memory/${requestId}`);
+  }
+
+  /** Sets how the agent's own memory edits come back after a run. */
+  async updateAgentMemorySettings(id: string, data: UpdateAgentMemorySettingsRequest): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory/settings`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async listAgentMemoryProposals(id: string, status = "pending"): Promise<AgentMemoryProposalsResponse> {
+    return this.fetch(`/api/agents/${id}/memory/proposals?status=${encodeURIComponent(status)}`);
+  }
+
+  async acceptAgentMemoryProposal(id: string, proposalId: string): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory/proposals/${proposalId}/accept`, { method: "POST" });
+  }
+
+  async rejectAgentMemoryProposal(id: string, proposalId: string): Promise<AgentMemoryResponse> {
+    return this.fetch(`/api/agents/${id}/memory/proposals/${proposalId}/reject`, { method: "POST" });
+  }
+
+  async restoreAgent(id: string): Promise<Agent> {'''
+
+AGENT_OVERVIEW_PANE = "packages/views/agents/components/agent-overview-pane.tsx"
+CHANGES.setdefault(AGENT_OVERVIEW_PANE, []).extend([
+    ('import { SkillsTab } from "./tabs/skills-tab";\n',
+     'import { SkillsTab } from "./tabs/skills-tab";\nimport { MemoryTab } from "./tabs/memory-tab";\n'),
+    ('  | "skills"\n  | "mcp_config"\n', '  | "skills"\n  | "memory"\n  | "mcp_config"\n'),
+    ('    | "skills"\n    | "mcp_config"\n', '    | "skills"\n    | "memory"\n    | "mcp_config"\n'),
+    ('  { id: "skills", labelKey: "skills" },\n',
+     '  { id: "skills", labelKey: "skills" },\n  { id: "memory", labelKey: "memory" },\n'),
+    ('      if (tab.id === "integrations") return integrationsConfigured;\n',
+     '      if (tab.id === "integrations") return integrationsConfigured;\n'
+     '      // Memory can hold notes copied from the owner\'s machine; the\n'
+     '      // endpoint admits the agent owner or a workspace owner/admin, the\n'
+     '      // same rule canEdit encodes.\n'
+     '      if (tab.id === "memory") return canEdit;\n'),
+    ('    agent.owner_id,\n    composioMCPAppsEnabled,\n',
+     '    agent.owner_id,\n    canEdit,\n    composioMCPAppsEnabled,\n'),
+    ('                  {effectiveView === "mcp_config" && (\n',
+     '                  {effectiveView === "memory" && (\n'
+     '                    <MemoryTab\n'
+     '                      agent={agent}\n'
+     '                      runtime={runtime}\n'
+     '                      onDirtyChange={setActiveDirty}\n'
+     '                    />\n'
+     '                  )}\n'
+     '                  {effectiveView === "mcp_config" && (\n'),
+])
+
+CHANGES.setdefault("packages/views/agents/components/agent-overview-pane.test.tsx", []).extend([
+    ('vi.mock("./tabs/env-tab", () => ({\n',
+     'vi.mock("./tabs/memory-tab", () => ({\n  MemoryTab: () => <div>memory-tab</div>,\n}));\n'
+     'vi.mock("./tabs/env-tab", () => ({\n'),
+    ('describe("AgentOverviewPane horizontal alignment", () => {\n',
+     '''describe("AgentOverviewPane Memory tab visibility", () => {
+  it("shows the Memory tab to someone who can manage the agent", () => {
+    renderPane([makeRuntime("claude")]);
+    openCapabilities();
+    fireEvent.click(screen.getByRole("tab", { name: /^Memory$/i }));
+    expect(screen.getByText("memory-tab")).toBeInTheDocument();
+  });
+
+  it("hides the Memory tab from users who cannot manage the agent", () => {
+    renderPane([makeRuntime("claude")], { canEdit: false });
+    openCapabilities();
+    expect(screen.queryByRole("tab", { name: /^Memory$/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("AgentOverviewPane horizontal alignment", () => {
+'''),
+])
+
+CHANGES["packages/core/api/client.ts"].extend([
+    ('import { configStore } from "../config";',
+     'import { configStore } from "../config";\n'
+     'import type {\n'
+     '  AgentMemoryProposalsResponse,\n'
+     '  AgentMemoryResponse,\n'
+     '  CreateRuntimeLocalMemoryRequest,\n'
+     '  RuntimeLocalMemoryRequest,\n'
+     '  UpdateAgentMemoryRequest,\n'
+     '  UpdateAgentMemorySettingsRequest,\n'
+     '} from "../types/agent-memory";'),
+    ('  async restoreAgent(id: string): Promise<Agent> {', AGENT_MEMORY_CLIENT_METHODS),
+])
+
+# Tab label + tab_body.memory strings for every agents.json locale (the
+# locale parity test requires all five). Kept as data next to this script.
+AGENT_MEMORY_LOCALES = json.loads((HERE / "agent-memory-locales.json").read_text(encoding="utf-8"))
+_RUNTIME_CONFIG_TAB = {"en": "Routing", "zh-Hans": "路由", "ja": "ルーティング", "ko": "라우팅", "fr": "Routage"}
+for _locale, _strings in AGENT_MEMORY_LOCALES.items():
+    _anchor = '    "runtime_config": ' + json.dumps(_RUNTIME_CONFIG_TAB[_locale], ensure_ascii=False) + ',\n'
+    CHANGES.setdefault(f"packages/views/locales/{_locale}/agents.json", []).extend([
+        (_anchor, _anchor + '    "memory": ' + json.dumps(_strings["tab"], ensure_ascii=False) + ',\n'),
+        ('  "tab_body": {\n    "common": {\n',
+         '  "tab_body": {\n    "memory": ' + json.dumps(_strings["body"], ensure_ascii=False) + ',\n    "common": {\n'),
+    ])
+
 # Remove the optional attribution survey without writing questionnaire answers.
 CHANGES["packages/views/layout/dashboard-layout.tsx"] = [
     ('import { SourceBackfillModal } from "../onboarding";\n', ''),
