@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import runpy
 import subprocess
 import tempfile
@@ -197,6 +198,62 @@ class FrontendPatches(unittest.TestCase):
         for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
             labels = json.loads((self.target / f"packages/views/locales/{locale}/layout.json").read_text())
             self.assertEqual(set(labels["sidebar"]["quick_links"]), {"title", "mobile_control", "loading", "unavailable", "copied", "copy_failed", "model_trace", "quickstart_wishlist", "official_docs"})
+
+    def test_custom_apps_mount_after_navigation_and_stay_off_the_api(self):
+        self.apply()
+        sidebar = (self.target / "packages/views/layout/app-sidebar.tsx").read_text()
+        content = sidebar[sidebar.index("<SidebarContent"):sidebar.index("</SidebarContent>")]
+        self.assertEqual(sidebar.count("<CustomAppsNav "), 1)
+        self.assertLess(content.index("aiTeamNav.map"), content.index("<CustomAppsNav "))
+        # "My dashboard" is the last item of the Work group, before the AI-team group.
+        self.assertEqual(sidebar.count("<CustomDashboardNavItem "), 1)
+        self.assertLess(content.index("workNav.map"), content.index("<CustomDashboardNavItem "))
+        self.assertLess(content.index("<CustomDashboardNavItem "), content.index("$.sidebar.ai_team_group"))
+        self.assertIn('import { CustomAppsNav, CustomDashboardNavItem } from "./custom-apps-nav";', sidebar)
+        index = (self.target / "packages/views/layout/index.ts").read_text()
+        # POPOs lists only the viewer's own pages: no shared app list, no
+        # framed-app route, no server-side list fetch.
+        self.assertNotIn("CustomAppPage", index)
+        proxy = (self.target / "apps/web/proxy.ts").read_text()
+        self.assertNotIn("/api/custom-apps", proxy)
+        for gone in ("packages/views/layout/custom-apps.ts", "packages/views/layout/custom-app-page.tsx",
+                     "apps/web/app/api/custom-apps/route.ts",
+                     "apps/web/app/[workspaceSlug]/(dashboard)/apps/[key]/page.tsx"):
+            self.assertFalse((ROOT / "overlays/web-direct" / gone).exists(), gone)
+        for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
+            labels = json.loads((self.target / f"packages/views/locales/{locale}/layout.json").read_text())
+            if locale == "en":
+                expected = set(labels["sidebar"]["custom_apps"])
+                self.assertTrue({"title", "my_dashboard", "add_page", "section_title", "linked_issues", "unbind",
+                                 "resize", "remove_from_dashboard", "reload_loop", "url_placeholder",
+                                 "remove_from_sidebar"} <= expected)
+                self.assertFalse({"recommended", "restore_hidden", "not_found"} & expected)
+            self.assertEqual(labels["sidebar"]["custom_apps"]["title"], "POPOs", locale)
+            self.assertEqual(set(labels["sidebar"]["custom_apps"]), expected, locale)
+        self.assertIn('export { CustomDashboardPage } from "./custom-dashboard-page";', index)
+        self.assertIn('export { CustomPageView } from "./custom-page-view";', index)
+        client = (self.target / "packages/core/api/client.ts").read_text()
+        self.assertIn("async setIssueMetadataKey(", client)
+        self.assertIn("async deleteIssueMetadataKey(", client)
+        detail = (self.target / "packages/views/issues/components/issue-detail.tsx").read_text()
+        self.assertEqual(detail.count("<IssuePagesSection issue={issue} />"), 1)
+        self.assertLess(detail.index("<PluginPanelSection issueId={issue.id} />"), detail.index("<IssuePagesSection "))
+        for rel in ("packages/views/layout/custom-apps-nav.tsx",
+                    "packages/views/layout/custom-pages.ts", "packages/views/layout/custom-dashboard-page.tsx",
+                    "packages/views/layout/custom-page-view.tsx", "packages/views/layout/add-page-dialog.tsx",
+                    "packages/views/layout/linked-issues.tsx", "packages/views/issues/components/issue-pages-section.tsx",
+                    "packages/views/layout/page-frame.tsx",
+                    "apps/web/app/[workspaceSlug]/(dashboard)/apps/page.tsx",
+                    "apps/web/app/[workspaceSlug]/(dashboard)/apps/view/page.tsx"):
+            source = (ROOT / "overlays/web-direct" / rel).read_text()
+            if rel != "packages/views/layout/custom-pages.ts":
+                self.assertNotIn("@multica/core/api", source, rel)
+            else:
+                # Bindings use only upstream issue endpoints; nothing else is sent.
+                self.assertEqual(set(re.findall(r"\bapi\.(\w+)\(", source)),
+                                 {"listIssues", "setIssueMetadataKey", "deleteIssueMetadataKey"})
+            self.assertNotIn("postMessage", source, rel)
+            self.assertNotIn("addEventListener(\"message\"", source, rel)
 
     def test_upstream_checkout_is_rejected(self):
         result = subprocess.run(
