@@ -15,6 +15,8 @@ export interface AgentMemoryFile {
   /** Runtime-imported file kept in sync with its source file. */
   auto_sync?: boolean;
   synced_at?: string | null;
+  /** False when the source runtime's Multica is too old to sync. */
+  sync_supported?: boolean;
   size_bytes: number;
   updated_by: string | null;
   created_at: string;
@@ -40,6 +42,10 @@ export interface AgentMemoryResponse {
   limits: AgentMemoryLimits;
   settings?: AgentMemorySettings;
   pending_proposals?: number;
+  /** Fingerprint of the stored set; send back as base_version when saving. */
+  version?: string;
+  /** False when the agent's runtime is too old to send memory edits back. */
+  runtime_supports_writeback?: boolean;
 }
 
 export interface UpdateAgentMemorySettingsRequest {
@@ -83,6 +89,8 @@ export interface AgentMemoryFileInput {
 
 export interface UpdateAgentMemoryRequest {
   files: AgentMemoryFileInput[];
+  /** Refuse the save (409) if the stored set changed since this version. */
+  base_version?: string;
 }
 
 export type RuntimeLocalMemoryKind = "list" | "read";

@@ -19,6 +19,13 @@ const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 
 vi.mock("@multica/core/api", () => ({
+  ApiError: class ApiError extends Error {
+    status: number;
+    constructor(message: string, status: number) {
+      super(message);
+      this.status = status;
+    }
+  },
   api: {
     getAgentMemory,
     updateAgentMemory,
@@ -289,5 +296,42 @@ describe("MemoryTab", () => {
     expect(accept).toBeEnabled();
     await user.click(screen.getByRole("button", { name: /new file/i }));
     expect(screen.getByRole("button", { name: "Accept the change to b.md" })).toBeDisabled();
+  });
+
+  it("sends the loaded version and explains a conflicting save", async () => {
+    const user = userEvent.setup();
+    const { ApiError } = await import("@multica/core/api");
+    getAgentMemory.mockResolvedValue({ agent_id: "agent-1", files: [serverFile("a.md", "one")], limits, version: "v1" });
+    updateAgentMemory.mockRejectedValue(new (ApiError as unknown as new (m: string, s: number) => Error)("changed", 409));
+    renderTab();
+    const editor = await screen.findByRole("textbox", { name: /a\.md/ });
+    await user.type(editor, "!");
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() =>
+      expect(updateAgentMemory).toHaveBeenCalledWith("agent-1", expect.objectContaining({ base_version: "v1" })),
+    );
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/changed after the page was loaded/)));
+  });
+
+  it("warns when the runtime is too old for write-back or sync", async () => {
+    getAgentMemory.mockResolvedValue({
+      agent_id: "agent-1",
+      files: [
+        {
+          ...serverFile("claude/CLAUDE.md", "x", "runtime"),
+          source_runtime_id: "rt-1",
+          source_path: "~/.claude/CLAUDE.md",
+          auto_sync: true,
+          sync_supported: false,
+        },
+      ],
+      limits,
+      settings: { writeback: "review", capture_runtime_memory: true },
+      pending_proposals: 0,
+      runtime_supports_writeback: false,
+    });
+    renderTab();
+    expect(await screen.findByText(/edits from runs are not sent back/)).toBeInTheDocument();
+    expect(screen.getByText(/cannot sync/)).toBeInTheDocument();
   });
 });

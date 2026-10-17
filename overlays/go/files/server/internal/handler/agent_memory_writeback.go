@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/middleware"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -357,6 +358,10 @@ func (h *Handler) resolveAgentMemoryProposal(w http.ResponseWriter, r *http.Requ
 	}
 	defer tx.Rollback(r.Context())
 	qtx := h.Queries.WithTx(tx)
+	if err := qtx.LockAgentMemory(r.Context(), agent.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve proposal")
+		return
+	}
 	p, err := qtx.GetAgentMemoryProposalForUpdate(r.Context(), db.GetAgentMemoryProposalForUpdateParams{ID: proposalID, AgentID: agent.ID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -423,10 +428,66 @@ type DaemonAgentMemoryChangesResponse struct {
 	Skipped  int    `json:"skipped"`
 }
 
+// agentMemoryReportWindow bounds how long after a run ended its memory
+// changes are still accepted. The daemon reports before it marks the task
+// complete, so this only covers a slow report racing the completion.
+const agentMemoryReportWindow = 10 * time.Minute
+
+// authorizeAgentMemoryReport admits only the daemon that ran the task: the
+// caller must be the task's runtime — its daemon token, or the PAT of the
+// runtime's owner, which is what a local daemon signs in with — never an
+// agent's task token and never another workspace member. The task must be
+// running or have just ended.
+func (h *Handler) authorizeAgentMemoryReport(w http.ResponseWriter, r *http.Request) (db.AgentTaskQueue, bool) {
+	task, wsID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, chi.URLParam(r, "taskId"))
+	if !ok {
+		return db.AgentTaskQueue{}, false
+	}
+	ctx := r.Context()
+	if !task.RuntimeID.Valid {
+		writeError(w, http.StatusForbidden, "this task has no runtime")
+		return db.AgentTaskQueue{}, false
+	}
+	rt, err := h.Queries.GetAgentRuntime(ctx, task.RuntimeID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusForbidden, "this task's runtime no longer exists")
+			return db.AgentTaskQueue{}, false
+		}
+		writeError(w, http.StatusInternalServerError, "failed to load runtime")
+		return db.AgentTaskQueue{}, false
+	}
+	if daemonID := middleware.DaemonIDFromContext(ctx); daemonID != "" {
+		if daemonID != rt.DaemonID.String && daemonID != rt.LegacyDaemonID.String {
+			writeError(w, http.StatusForbidden, "only the daemon that ran this task can report its memory changes")
+			return db.AgentTaskQueue{}, false
+		}
+	} else {
+		userID := requestUserID(r)
+		if actorType, _ := h.resolveActor(r, userID, wsID); actorType == "agent" {
+			writeError(w, http.StatusForbidden, "agents may not report memory changes")
+			return db.AgentTaskQueue{}, false
+		}
+		if userID == "" || !rt.OwnerID.Valid || uuidToString(rt.OwnerID) != userID {
+			writeError(w, http.StatusForbidden, "only the daemon that ran this task can report its memory changes")
+			return db.AgentTaskQueue{}, false
+		}
+	}
+	switch {
+	case task.Status == "running":
+	case task.CompletedAt.Valid && time.Since(task.CompletedAt.Time) <= agentMemoryReportWindow:
+	default:
+		writeError(w, http.StatusConflict, "memory changes are only accepted while the task is finishing")
+		return db.AgentTaskQueue{}, false
+	}
+	return task, true
+}
+
 // ReportAgentMemoryChanges records the memory changes of a finished run as
-// proposals and, in auto mode, applies the ones without conflicts.
+// proposals and, in auto mode, applies the ones without conflicts. Each task
+// reports once.
 func (h *Handler) ReportAgentMemoryChanges(w http.ResponseWriter, r *http.Request) {
-	task, ok := h.requireDaemonTaskAccess(w, r, chi.URLParam(r, "taskId"))
+	task, ok := h.authorizeAgentMemoryReport(w, r)
 	if !ok {
 		return
 	}
@@ -459,6 +520,19 @@ func (h *Handler) ReportAgentMemoryChanges(w http.ResponseWriter, r *http.Reques
 	}
 	defer tx.Rollback(ctx)
 	qtx := h.Queries.WithTx(tx)
+	if err := qtx.LockAgentMemory(ctx, task.AgentID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record memory changes")
+		return
+	}
+	recorded, err := qtx.RecordAgentMemoryReport(ctx, db.RecordAgentMemoryReportParams{TaskID: task.ID, AgentID: task.AgentID})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record memory changes")
+		return
+	}
+	if recorded == 0 {
+		writeError(w, http.StatusConflict, "memory changes for this task were already reported")
+		return
+	}
 	current, err := agentMemoryFilesByPath(ctx, qtx, task.AgentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load agent memory")

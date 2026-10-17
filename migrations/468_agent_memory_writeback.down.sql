@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS agent_memory_report;
 DROP TABLE IF EXISTS agent_memory_proposal;
 DROP TABLE IF EXISTS agent_memory_setting;
 DROP INDEX IF EXISTS agent_memory_file_sync_idx;

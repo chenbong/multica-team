@@ -25,6 +25,13 @@ func reportAgentMemoryChanges(t *testing.T, taskID string, changes []DaemonAgent
 	return resp
 }
 
+// runningMemoryTask is a task that just ran on runtimeID and may report its
+// memory changes once.
+func runningMemoryTask(t *testing.T, agentID, runtimeID, issueID string) string {
+	t.Helper()
+	return dbfx.Task(t, agentID, testutil.Cols{"runtime_id": runtimeID, "issue_id": issueID, "status": "running", "started_at": testutil.Raw("now()")})
+}
+
 func callAgentMemoryRoute(t *testing.T, handler func(http.ResponseWriter, *http.Request), method, path string, body any, params ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	w := httptest.NewRecorder()
@@ -63,9 +70,9 @@ func TestAgentMemoryWritebackReviewAutoAndOff(t *testing.T) {
 		t.Skip("database not available")
 	}
 	ctx := context.Background()
-	runtimeID := createClaimReclaimRuntime(t, ctx, "Agent memory writeback runtime")
+	runtimeID := dbfx.Runtime(t, "Agent memory writeback runtime", testutil.Cols{"daemon_id": "agent-memory-daemon"})
 	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Agent memory writeback agent")
-	taskID := dbfx.Task(t, agentID, testutil.Cols{"runtime_id": runtimeID, "issue_id": issueID})
+	run := func() string { return runningMemoryTask(t, agentID, runtimeID, issueID) }
 	if w := callAgentMemory(t, testUserID, http.MethodPut, agentID, map[string]any{"files": []map[string]any{
 		{"path": "a.md", "content": "one"},
 		{"path": "gone.md", "content": "bye"},
@@ -74,7 +81,7 @@ func TestAgentMemoryWritebackReviewAutoAndOff(t *testing.T) {
 	}
 
 	// Review mode (default): nothing is applied, every change waits.
-	resp := reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{
+	resp := reportAgentMemoryChanges(t, run(), []DaemonAgentMemoryChange{
 		{Path: "a.md", Action: "upsert", Content: "two", BaseContent: strPtr("one"), Origin: "agent"},
 		{Path: "new.md", Action: "upsert", Content: "fresh", Origin: "agent"},
 		{Path: "gone.md", Action: "delete", BaseContent: strPtr("bye"), Origin: "agent"},
@@ -123,8 +130,8 @@ func TestAgentMemoryWritebackReviewAutoAndOff(t *testing.T) {
 	}
 
 	// A newer proposal for the same path supersedes the older one.
-	reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{{Path: "b.md", Action: "upsert", Content: "v1", Origin: "agent"}})
-	reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{{Path: "b.md", Action: "upsert", Content: "v2", Origin: "agent"}})
+	reportAgentMemoryChanges(t, run(), []DaemonAgentMemoryChange{{Path: "b.md", Action: "upsert", Content: "v1", Origin: "agent"}})
+	reportAgentMemoryChanges(t, run(), []DaemonAgentMemoryChange{{Path: "b.md", Action: "upsert", Content: "v2", Origin: "agent"}})
 	if pending := listMemoryProposals(t, agentID, "pending"); len(pending) != 1 || pending[0].Content != "v2" {
 		t.Fatalf("supersede: %+v", pending)
 	}
@@ -135,7 +142,7 @@ func TestAgentMemoryWritebackReviewAutoAndOff(t *testing.T) {
 		map[string]any{"writeback": "auto", "capture_runtime_memory": false}, "id", agentID); w.Code != http.StatusOK {
 		t.Fatalf("settings: %d %s", w.Code, w.Body.String())
 	}
-	resp = reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{
+	resp = reportAgentMemoryChanges(t, run(), []DaemonAgentMemoryChange{
 		{Path: "c.md", Action: "upsert", Content: "auto", Origin: "agent"},
 		{Path: "a.md", Action: "upsert", Content: "three", BaseContent: strPtr("stale"), Origin: "agent"},
 		{Path: "auto/MEMORY.md", Action: "upsert", Content: "native", Origin: "runtime"},
@@ -165,7 +172,7 @@ func TestAgentMemoryWritebackReviewAutoAndOff(t *testing.T) {
 	// Off: reports are ignored and the claim carries no policy.
 	callAgentMemoryRoute(t, testHandler.UpdateAgentMemorySettings, http.MethodPut, "/api/agents/"+agentID+"/memory/settings",
 		map[string]any{"writeback": "off"}, "id", agentID)
-	if resp := reportAgentMemoryChanges(t, taskID, []DaemonAgentMemoryChange{{Path: "d.md", Action: "upsert", Content: "x", Origin: "agent"}}); resp.Proposed != 0 || resp.Skipped != 1 {
+	if resp := reportAgentMemoryChanges(t, run(), []DaemonAgentMemoryChange{{Path: "d.md", Action: "upsert", Content: "x", Origin: "agent"}}); resp.Proposed != 0 || resp.Skipped != 1 {
 		t.Fatalf("off report = %+v", resp)
 	}
 	if wb := testHandler.agentMemoryWritebackForClaim(ctx, parseUUID(agentID)); wb != nil {
@@ -216,5 +223,107 @@ func TestAgentMemorySourceSync(t *testing.T) {
 	}
 	if resp.Settings.Writeback != "review" {
 		t.Fatalf("default settings = %+v", resp.Settings)
+	}
+}
+
+func TestAgentMemoryReportAuthorization(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	runtimeID := dbfx.Runtime(t, "Agent memory report auth runtime", testutil.Cols{"daemon_id": "agent-memory-daemon"})
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Agent memory report auth agent")
+	change := []DaemonAgentMemoryChange{{Path: "x.md", Action: "upsert", Content: "x", Origin: "agent"}}
+	call := func(req *http.Request, taskID string) int {
+		t.Helper()
+		w := httptest.NewRecorder()
+		testHandler.ReportAgentMemoryChanges(w, withURLParams(req, "taskId", taskID))
+		return w.Code
+	}
+	body := DaemonAgentMemoryChangesRequest{Changes: change}
+	path := func(taskID string) string { return "/api/daemon/tasks/" + taskID + "/memory-changes" }
+
+	// Another workspace member's PAT is refused, even with a valid task id.
+	taskID := runningMemoryTask(t, agentID, runtimeID, issueID)
+	memberID := createRuntimeLocalSkillTestMember(t, "member")
+	if code := call(newRequestAsUser(memberID, http.MethodPost, path(taskID), body), taskID); code != http.StatusForbidden {
+		t.Fatalf("other member: want 403, got %d", code)
+	}
+	// So is a different daemon.
+	if code := call(newDaemonTokenRequest(http.MethodPost, path(taskID), body, testWorkspaceID, "someone-elses-daemon"), taskID); code != http.StatusForbidden {
+		t.Fatalf("other daemon: want 403, got %d", code)
+	}
+	// The runtime owner's PAT (how a local daemon signs in) is accepted once.
+	if code := call(newRequestAsUser(testUserID, http.MethodPost, path(taskID), body), taskID); code != http.StatusOK {
+		t.Fatalf("runtime owner: want 200, got %d", code)
+	}
+	if code := call(newDaemonTokenRequest(http.MethodPost, path(taskID), body, testWorkspaceID, "agent-memory-daemon"), taskID); code != http.StatusConflict {
+		t.Fatalf("replay: want 409, got %d", code)
+	}
+	// A run that ended long ago cannot report any more.
+	old := dbfx.Task(t, agentID, testutil.Cols{"runtime_id": runtimeID, "issue_id": issueID, "status": "completed",
+		"started_at": testutil.Raw("now() - interval '2 hours'"), "completed_at": testutil.Raw("now() - interval '1 hour'")})
+	if code := call(newDaemonTokenRequest(http.MethodPost, path(old), body, testWorkspaceID, "agent-memory-daemon"), old); code != http.StatusConflict {
+		t.Fatalf("stale task: want 409, got %d", code)
+	}
+	if n := dbfx.Count(t, `SELECT count(*) FROM agent_memory_proposal WHERE agent_id = $1`, agentID); n != 1 {
+		t.Fatalf("want exactly one proposal from the one accepted report, got %d", n)
+	}
+}
+
+func TestAgentMemorySaveRefusesStaleVersion(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	agentID := createAgentMemoryTestAgent(t, testUserID)
+	put := func(body map[string]any) (*httptest.ResponseRecorder, AgentMemoryResponse) {
+		t.Helper()
+		w := callAgentMemory(t, testUserID, http.MethodPut, agentID, body)
+		var resp AgentMemoryResponse
+		json.NewDecoder(strings.NewReader(w.Body.String())).Decode(&resp)
+		return w, resp
+	}
+	w, first := put(map[string]any{"files": []map[string]any{{"path": "a.md", "content": "one"}}})
+	if w.Code != http.StatusOK || first.Version == "" {
+		t.Fatalf("seed: %d %+v", w.Code, first)
+	}
+	// Another writer (a run, a sync, another tab) changes the set.
+	w, second := put(map[string]any{"files": []map[string]any{{"path": "a.md", "content": "two"}}, "base_version": first.Version})
+	if w.Code != http.StatusOK || second.Version == first.Version {
+		t.Fatalf("save from the current version: %d %+v", w.Code, second)
+	}
+	// A save from the page loaded before that change is refused.
+	if w, _ := put(map[string]any{"files": []map[string]any{{"path": "a.md", "content": "stale page"}}, "base_version": first.Version}); w.Code != http.StatusConflict {
+		t.Fatalf("stale save: want 409, got %d", w.Code)
+	}
+	if got := memoryContent(t, agentID); got["a.md"] != "two" {
+		t.Fatalf("stale save changed memory: %v", got)
+	}
+	// Re-saving identical content keeps the version stable.
+	if _, again := put(map[string]any{"files": []map[string]any{{"path": "a.md", "content": "two"}}, "base_version": second.Version}); again.Version != second.Version {
+		t.Fatalf("unchanged save moved the version: %s -> %s", second.Version, again.Version)
+	}
+}
+
+func TestAgentMemoryReportsRuntimeSupport(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	oldRuntime := dbfx.Runtime(t, "agent-memory-old-daemon", testutil.Cols{"metadata": testutil.Raw(`'{"capabilities":["skill-bundles-v1"]}'::jsonb`)})
+	newRuntime := dbfx.Runtime(t, "agent-memory-new-daemon", testutil.Cols{"metadata": testutil.Raw(`'{"capabilities":["agent-memory-v1"]}'::jsonb`)})
+	agentID := dbfx.Agent(t, "agent-memory-support-agent", oldRuntime, testutil.Cols{"owner_id": testUserID})
+	if w := callAgentMemory(t, testUserID, http.MethodPut, agentID, map[string]any{"files": []map[string]any{
+		{"path": "imported.md", "content": "x", "source": "runtime", "source_runtime_id": newRuntime, "source_path": "~/.claude/CLAUDE.md"},
+	}}); w.Code != http.StatusOK {
+		t.Fatalf("seed: %d %s", w.Code, w.Body.String())
+	}
+	w := callAgentMemory(t, testUserID, http.MethodGet, agentID, nil)
+	var resp AgentMemoryResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.RuntimeSupportsWriteback == nil || *resp.RuntimeSupportsWriteback {
+		t.Fatalf("old daemon runtime should report no write-back support: %+v", resp.RuntimeSupportsWriteback)
+	}
+	if len(resp.Files) != 1 || resp.Files[0].SyncSupported == nil || !*resp.Files[0].SyncSupported {
+		t.Fatalf("new daemon source runtime should support sync: %+v", resp.Files)
 	}
 }

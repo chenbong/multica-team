@@ -29,12 +29,14 @@ export function MemoryWritebackPanel({
   settings,
   pendingCount,
   dirty,
+  runtimeSupportsWriteback,
   onServerResponse,
 }: {
   agentId: string;
   settings: AgentMemorySettings;
   pendingCount: number;
   dirty: boolean;
+  runtimeSupportsWriteback?: boolean;
   onServerResponse: (resp: AgentMemoryResponse, opts?: { settingsOnly?: boolean }) => void;
 }) {
   const { t } = useT("agents");
@@ -134,6 +136,11 @@ export function MemoryWritebackPanel({
         </div>
       </div>
       <p className="text-caption text-muted-foreground">{modeHint}</p>
+      {settings.writeback !== "off" && runtimeSupportsWriteback === false && (
+        <p role="note" className="rounded-md bg-warning/10 px-2 py-1.5 text-caption text-warning">
+          {t(($) => $.tab_body.memory.writeback.runtime_unsupported)}
+        </p>
+      )}
       {settings.writeback !== "off" && (
         <label className="flex items-center gap-2 text-caption">
           <Switch

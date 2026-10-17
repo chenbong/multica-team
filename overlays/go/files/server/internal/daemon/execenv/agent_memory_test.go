@@ -83,7 +83,7 @@ func TestWriteAgentMemoryFilesUsesManifest(t *testing.T) {
 		{Path: "keep.md", Content: "overwrite?"},
 		{Path: "/abs.md", Content: "no"},
 		{Path: "../../escape.md", Content: "no"},
-	}, manifest)
+	}, false, manifest)
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -118,5 +118,35 @@ func TestWriteAgentMemoryWritebackGuidance(t *testing.T) {
 	writeAgentMemory(&auto, TaskContextForEnv{AgentMemoryWriteback: "auto", AgentMemory: []MemoryFileContextForEnv{{Path: "a.md", Content: "x"}}})
 	if out := auto.String(); !strings.Contains(out, "automatically") || !strings.Contains(out, "### `a.md`") {
 		t.Fatalf("auto guidance = %q", out)
+	}
+}
+
+func TestWriteAgentMemoryFilesResetsManagedDir(t *testing.T) {
+	workDir := t.TempDir()
+	root := filepath.Join(workDir, ".multica", "memory")
+	// Leftovers of a previous run in the same (reused) issue workdir.
+	for rel, content := range map[string]string{"learned.md": "stale agent file", "a.md": "stale copy"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeAgentMemoryFiles(workDir, []MemoryFileContextForEnv{{Path: "a.md", Content: "fresh"}}, true, &sidecarManifest{}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "a.md")); string(got) != "fresh" {
+		t.Fatalf("a.md = %q, want the delivered content", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "learned.md")); !os.IsNotExist(err) {
+		t.Fatalf("stale agent-created file survived the reset: %v", err)
+	}
+	// With no memory at all the leftovers are still cleared.
+	if err := writeAgentMemoryFiles(workDir, nil, true, &sidecarManifest{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("memory dir should be gone when nothing is delivered: %v", err)
 	}
 }

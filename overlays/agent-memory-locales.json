@@ -107,8 +107,11 @@
         "accepted_toast": "Accepted the change to {{path}}",
         "rejected_toast": "Rejected the change to {{path}}",
         "resolve_failed": "Could not apply the review",
-        "load_failed": "Could not load memory changes"
-      }
+        "load_failed": "Could not load memory changes",
+        "runtime_unsupported": "This agent's runtime runs an older Multica version: memory is still delivered, but edits from runs are not sent back. Upgrade that machine's CLI/daemon."
+      },
+      "save_conflict_toast": "This agent's memory changed after the page was loaded (a run, a sync or another tab saved it). Reload to see the latest, then reapply your edits.",
+      "sync_unsupported": "That machine runs an older Multica version that cannot sync. Upgrade its CLI/daemon."
     }
   },
   "zh-Hans": {
@@ -219,8 +222,11 @@
         "accepted_toast": "已接受对 {{path}} 的修改",
         "rejected_toast": "已拒绝对 {{path}} 的修改",
         "resolve_failed": "审核操作失败",
-        "load_failed": "无法加载待审核的修改"
-      }
+        "load_failed": "无法加载待审核的修改",
+        "runtime_unsupported": "这个智能体所在运行时的 Multica 版本较旧：记忆仍会下发，但运行中的修改不会写回。请升级该机器的 CLI/daemon。"
+      },
+      "save_conflict_toast": "页面打开后，这个智能体的记忆被修改过（可能是某次运行、同步或其他标签页保存的）。请刷新查看最新内容，再重新做你的修改。",
+      "sync_unsupported": "该机器上的 Multica 版本较旧，不支持同步，请升级它的 CLI/daemon。"
     }
   },
   "ja": {
@@ -331,8 +337,11 @@
         "accepted_toast": "{{path}} の変更を承認しました",
         "rejected_toast": "{{path}} の変更を却下しました",
         "resolve_failed": "レビューを適用できませんでした",
-        "load_failed": "変更を読み込めませんでした"
-      }
+        "load_failed": "変更を読み込めませんでした",
+        "runtime_unsupported": "このエージェントのランタイムは古い Multica です。メモリは配信されますが、実行中の編集は戻されません。そのマシンの CLI/daemon を更新してください。"
+      },
+      "save_conflict_toast": "ページを開いた後にこのエージェントのメモリが変更されました（実行、同期、または別のタブによる保存）。再読み込みして最新の内容を確認してから、編集をやり直してください。",
+      "sync_unsupported": "そのマシンの Multica は古く、同期に対応していません。CLI/daemon を更新してください。"
     }
   },
   "ko": {
@@ -443,8 +452,11 @@
         "accepted_toast": "{{path}} 변경을 승인했습니다",
         "rejected_toast": "{{path}} 변경을 거절했습니다",
         "resolve_failed": "검토를 적용하지 못했습니다",
-        "load_failed": "변경 사항을 불러오지 못했습니다"
-      }
+        "load_failed": "변경 사항을 불러오지 못했습니다",
+        "runtime_unsupported": "이 에이전트의 런타임은 오래된 Multica 버전입니다. 메모리는 전달되지만 실행 중 편집은 돌아오지 않습니다. 해당 머신의 CLI/daemon을 업그레이드하세요."
+      },
+      "save_conflict_toast": "페이지를 연 뒤 이 에이전트의 메모리가 변경되었습니다(실행, 동기화 또는 다른 탭에서 저장). 새로고침해 최신 내용을 확인한 뒤 다시 편집하세요.",
+      "sync_unsupported": "해당 머신의 Multica 버전이 오래되어 동기화를 지원하지 않습니다. CLI/daemon을 업그레이드하세요."
     }
   },
   "fr": {
@@ -555,8 +567,11 @@
         "accepted_toast": "Modification de {{path}} acceptée",
         "rejected_toast": "Modification de {{path}} refusée",
         "resolve_failed": "Impossible d'appliquer la revue",
-        "load_failed": "Impossible de charger les modifications"
-      }
+        "load_failed": "Impossible de charger les modifications",
+        "runtime_unsupported": "Le runtime de cet agent utilise une ancienne version de Multica : la mémoire est transmise, mais les modifications des exécutions ne reviennent pas. Mettez à jour le CLI/daemon de cette machine."
+      },
+      "save_conflict_toast": "La mémoire de cet agent a changé après l'ouverture de la page (une exécution, une synchro ou un autre onglet l'a enregistrée). Rechargez pour voir la dernière version, puis refaites vos modifications.",
+      "sync_unsupported": "Cette machine utilise une version de Multica trop ancienne pour synchroniser. Mettez à jour son CLI/daemon."
     }
   }
 }

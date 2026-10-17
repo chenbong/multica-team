@@ -14,7 +14,7 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@multica/core/api";
+import { ApiError, api } from "@multica/core/api";
 import type { Agent, AgentRuntime } from "@multica/core/types";
 import type { AgentMemoryLimits, AgentMemoryResponse, AgentMemorySettings } from "@multica/core/types/agent-memory";
 import { Badge } from "@multica/ui/components/ui/badge";
@@ -74,13 +74,17 @@ export function MemoryTab({
   // Write-back policy and review queue; absent on servers without migration 468.
   const [settings, setSettings] = useState<AgentMemorySettings | null>(null);
   const [pendingProposals, setPendingProposals] = useState(0);
+  const [version, setVersion] = useState<string | undefined>(undefined);
+  const [runtimeSupportsWriteback, setRuntimeSupportsWriteback] = useState<boolean | undefined>(undefined);
   const uploadRef = useRef<HTMLInputElement>(null);
 
   const applyServerResponse = useCallback(
     (resp: AgentMemoryResponse, opts?: { settingsOnly?: boolean; keepPath?: string }) => {
       setSettings(resp.settings ?? null);
       setPendingProposals(resp.pending_proposals ?? 0);
+      setRuntimeSupportsWriteback(resp.runtime_supports_writeback);
       if (opts?.settingsOnly) return;
+      setVersion(resp.version);
       const files = draftFromServer(resp.files);
       setLimits(resp.limits ?? DEFAULT_MEMORY_LIMITS);
       setBaseline(files);
@@ -217,12 +221,19 @@ export function MemoryTab({
     setSaving(true);
     const keepPath = selected?.path;
     try {
-      const resp = await api.updateAgentMemory(agent.id, { files: draftToRequest(draft) });
+      const resp = await api.updateAgentMemory(agent.id, {
+        files: draftToRequest(draft),
+        ...(version ? { base_version: version } : {}),
+      });
       applyServerResponse(resp, { keepPath });
       toast.success(t(($) => $.tab_body.memory.saved_toast));
     } catch (err) {
       toast.error(
-        err instanceof Error && err.message ? err.message : t(($) => $.tab_body.memory.save_failed_toast),
+        err instanceof ApiError && err.status === 409
+          ? t(($) => $.tab_body.memory.save_conflict_toast)
+          : err instanceof Error && err.message
+            ? err.message
+            : t(($) => $.tab_body.memory.save_failed_toast),
       );
     } finally {
       setSaving(false);
@@ -273,6 +284,7 @@ export function MemoryTab({
           settings={settings}
           pendingCount={pendingProposals}
           dirty={dirty}
+          runtimeSupportsWriteback={runtimeSupportsWriteback}
           onServerResponse={(resp, opts) => applyServerResponse(resp, { ...opts, keepPath: selected?.path })}
         />
       )}
@@ -446,6 +458,11 @@ export function MemoryTab({
                     {selected.autoSync && selected.syncedAt
                       ? " · " + t(($) => $.tab_body.memory.synced_at, { time: new Date(selected.syncedAt).toLocaleString() })
                       : ""}
+                    {selected.syncSupported === false && (
+                      <span role="note" className="block text-warning">
+                        {t(($) => $.tab_body.memory.sync_unsupported)}
+                      </span>
+                    )}
                   </span>
                 </label>
               )}

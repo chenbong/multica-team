@@ -157,6 +157,7 @@ type TaskContextForEnv struct {
 	AgentSkills                   []SkillContextForEnv
 	AgentMemory                   []MemoryFileContextForEnv // agent memory files (multica-team overlay, agent_memory.go)
 	AgentMemoryWriteback          string                    // "review" / "auto" when edits are reported back; "" otherwise
+	agentMemoryInUserDir          bool                      // set by Prepare/Reuse for local_directory / worktree tasks (user-owned .multica/memory)
 	DisabledRuntimeSkills         []RuntimeSkillRefForEnv
 	Repos                         []RepoContextForEnv     // workspace repos available for checkout
 	ProjectID                     string                  // active project for this task, when present
@@ -601,6 +602,7 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		}()
 	}
 
+	params.Task.agentMemoryInUserDir = params.LocalWorkDir != "" || params.LocalWorktree != nil
 	if err := writeContextFiles(workDir, params.Provider, params.Task, manifest); err != nil {
 		return nil, fmt.Errorf("execenv: write context files: %w", err)
 	}
@@ -900,6 +902,7 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	// legacy local_directory Reuse fallback — skip the persist in that
 	// case to avoid creating a stray manifest at the filesystem root.
 	manifest := &sidecarManifest{}
+	params.Task.agentMemoryInUserDir = params.LocalDirectory
 	if err := writeContextFiles(params.WorkDir, params.Provider, params.Task, manifest); err != nil {
 		logger.Warn("execenv: refresh context files failed", "error", err)
 	}

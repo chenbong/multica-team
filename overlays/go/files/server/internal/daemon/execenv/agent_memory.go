@@ -3,6 +3,7 @@ package execenv
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -54,13 +55,23 @@ func cleanAgentMemoryPath(raw string) (string, bool) {
 }
 
 // writeAgentMemoryFiles writes each memory file under .multica/memory/.
-// A path that already exists (user content in a local_directory workdir) is
-// left untouched; the brief still carries the inlined copy.
-func writeAgentMemoryFiles(workDir string, files []MemoryFileContextForEnv, manifest *sidecarManifest) error {
+//
+// In a daemon-managed workdir the directory is Multica's alone, so it is
+// reset first: a reused issue workdir still holds the previous run's copies,
+// including files the agent created, and keeping them would hand the agent
+// stale memory and make write-back report them as fresh edits. In a user's
+// own directory (local_directory / worktree) an existing path is left
+// untouched; the brief still carries the inlined copy.
+func writeAgentMemoryFiles(workDir string, files []MemoryFileContextForEnv, reset bool, manifest *sidecarManifest) error {
+	root := filepath.Join(workDir, filepath.FromSlash(AgentMemoryRelDir))
+	if reset {
+		if err := os.RemoveAll(root); err != nil {
+			return fmt.Errorf("reset memory dir: %w", err)
+		}
+	}
 	if len(files) == 0 {
 		return nil
 	}
-	root := filepath.Join(workDir, filepath.FromSlash(AgentMemoryRelDir))
 	for _, f := range files {
 		rel, ok := cleanAgentMemoryPath(f.Path)
 		if !ok {

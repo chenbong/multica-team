@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // Agent memory (multica-team overlay).
@@ -73,10 +76,13 @@ type AgentMemoryFileResponse struct {
 	Enabled         bool    `json:"enabled"`
 	AutoSync        bool    `json:"auto_sync"`
 	SyncedAt        *string `json:"synced_at"`
-	SizeBytes       int     `json:"size_bytes"`
-	UpdatedBy       *string `json:"updated_by"`
-	CreatedAt       string  `json:"created_at"`
-	UpdatedAt       string  `json:"updated_at"`
+	// SyncSupported reports whether the source runtime's daemon can sync
+	// (nil for files that were not imported from a runtime).
+	SyncSupported *bool   `json:"sync_supported,omitempty"`
+	SizeBytes     int     `json:"size_bytes"`
+	UpdatedBy     *string `json:"updated_by"`
+	CreatedAt     string  `json:"created_at"`
+	UpdatedAt     string  `json:"updated_at"`
 }
 
 type AgentMemoryResponse struct {
@@ -85,6 +91,12 @@ type AgentMemoryResponse struct {
 	Limits           AgentMemoryLimits         `json:"limits"`
 	Settings         AgentMemorySettings       `json:"settings"`
 	PendingProposals int64                     `json:"pending_proposals"`
+	// Version identifies the stored set; send it back as base_version so a
+	// save made from a stale page is refused instead of undoing newer changes.
+	Version string `json:"version"`
+	// RuntimeSupportsWriteback is false when the agent's runtime runs a
+	// daemon too old to report memory edits (nil when unknown).
+	RuntimeSupportsWriteback *bool `json:"runtime_supports_writeback,omitempty"`
 }
 
 type AgentMemoryFileInput struct {
@@ -102,6 +114,9 @@ type AgentMemoryFileInput struct {
 
 type UpdateAgentMemoryRequest struct {
 	Files []AgentMemoryFileInput `json:"files"`
+	// BaseVersion is the Version the client edited. When set and the stored
+	// set has changed since, the save is refused with 409.
+	BaseVersion string `json:"base_version,omitempty"`
 }
 
 // AgentMemoryFileData is the claim-payload shape the daemon receives.
@@ -292,9 +307,29 @@ func (h *Handler) agentMemoryResponse(ctx context.Context, agent db.Agent) (Agen
 	if err != nil {
 		return AgentMemoryResponse{}, err
 	}
+	caps := map[pgtype.UUID]*bool{}
+	supports := func(runtimeID pgtype.UUID) *bool {
+		if !runtimeID.Valid {
+			return nil
+		}
+		if v, ok := caps[runtimeID]; ok {
+			return v
+		}
+		var v *bool
+		if rt, err := h.Queries.GetAgentRuntime(ctx, runtimeID); err == nil {
+			ok := runtimeHasCapability(rt.Metadata, protocol.DaemonCapabilityAgentMemoryV1)
+			v = &ok
+		}
+		caps[runtimeID] = v
+		return v
+	}
 	files := make([]AgentMemoryFileResponse, 0, len(rows))
 	for _, f := range rows {
-		files = append(files, agentMemoryFileToResponse(f))
+		resp := agentMemoryFileToResponse(f)
+		if f.Source == AgentMemorySourceRuntime {
+			resp.SyncSupported = supports(f.SourceRuntimeID)
+		}
+		files = append(files, resp)
 	}
 	settings, err := h.loadAgentMemorySettings(ctx, agent.ID)
 	if err != nil {
@@ -305,11 +340,13 @@ func (h *Handler) agentMemoryResponse(ctx context.Context, agent db.Agent) (Agen
 		return AgentMemoryResponse{}, err
 	}
 	return AgentMemoryResponse{
-		AgentID:          uuidToString(agent.ID),
-		Files:            files,
-		Limits:           agentMemoryLimits(),
-		Settings:         settings,
-		PendingProposals: pending,
+		AgentID:                  uuidToString(agent.ID),
+		Files:                    files,
+		Limits:                   agentMemoryLimits(),
+		Settings:                 settings,
+		PendingProposals:         pending,
+		Version:                  agentMemoryVersion(rows),
+		RuntimeSupportsWriteback: supports(agent.RuntimeID),
 	}, nil
 }
 
@@ -363,6 +400,21 @@ func (h *Handler) UpdateAgentMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	qtx := h.Queries.WithTx(tx)
+	if err := qtx.LockAgentMemory(r.Context(), agent.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save agent memory")
+		return
+	}
+	if req.BaseVersion != "" {
+		current, err := qtx.ListAgentMemoryFiles(r.Context(), agent.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save agent memory")
+			return
+		}
+		if agentMemoryVersion(current) != req.BaseVersion {
+			writeError(w, http.StatusConflict, "this agent's memory changed after the page was loaded (a run, a sync or another tab saved it); reload to see the latest before saving")
+			return
+		}
+	}
 
 	syncOwners, err := h.resolveAgentMemorySyncOwners(r.Context(), agent.ID, member, files)
 	if err != nil {
@@ -512,4 +564,18 @@ func markdownFence(s string) string {
 		return "```"
 	}
 	return strings.Repeat("`", longest+1)
+}
+
+// agentMemoryVersion fingerprints the stored set: every field a save can
+// change. Sync bookkeeping (synced_at) is left out, so an unchanged re-read
+// of a source file does not invalidate open pages.
+func agentMemoryVersion(rows []db.AgentMemoryFile) string {
+	sorted := append([]db.AgentMemoryFile(nil), rows...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	h := sha256.New()
+	for _, f := range sorted {
+		fmt.Fprintf(h, "%d:%s\x00%d:%s\x00%s\x00%s\x00%s\x00%t\x00%t\x00",
+			len(f.Path), f.Path, len(f.Content), f.Content, f.Source, uuidToString(f.SourceRuntimeID), f.SourcePath, f.Enabled, f.AutoSync)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }

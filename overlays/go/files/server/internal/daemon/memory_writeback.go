@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -51,7 +52,12 @@ type memoryWriteback struct {
 	workDir   string
 	delivered map[string]string
 	nativeDir string // "" when runtime memory is not captured
-	logger    *slog.Logger
+	// What was on disk when the agent launched. Changes are diffed against
+	// this, not against the delivered set, so a file the run did not touch
+	// is never reported — whatever stale or user-owned bytes it holds.
+	launchCopies map[string]string
+	launchNative map[string]string
+	logger       *slog.Logger
 }
 
 var claudeProjectKeyUnsafe = regexp.MustCompile(`[^a-zA-Z0-9]`)
@@ -93,13 +99,29 @@ func newMemoryWriteback(task Task, provider, workDir string, managedWorkDir bool
 		wb.nativeDir = claudeProjectMemoryDir(workDir)
 		wb.seedNative()
 	}
+	wb.launchCopies = readMemoryTree(wb.copiesDir(), 7)
+	if wb.nativeDir != "" {
+		wb.launchNative = readMemoryTree(wb.nativeDir, 2)
+	}
 	return wb
 }
 
-// seedNative copies the accepted auto/ files into the runtime's memory dir.
-// Existing files are never overwritten.
+func (wb *memoryWriteback) copiesDir() string {
+	return filepath.Join(wb.workDir, filepath.FromSlash(execenv.AgentMemoryRelDir))
+}
+
+// seedNative makes the runtime's memory dir hold exactly the accepted auto/
+// files. The dir is keyed by the task workdir, which Multica owns and reuses
+// for every run of the same issue, so it is reset first: left alone, the
+// previous run's (possibly rejected or since-edited) memory would outrank
+// what the owner accepted.
 func (wb *memoryWriteback) seedNative() {
 	if wb.nativeDir == "" {
+		return
+	}
+	if err := os.RemoveAll(wb.nativeDir); err != nil {
+		wb.logger.Warn("memory write-back: reset runtime memory dir failed; not capturing runtime memory", "error", err)
+		wb.nativeDir = ""
 		return
 	}
 	for p, content := range wb.delivered {
@@ -185,25 +207,30 @@ func (wb *memoryWriteback) base(p string) *string {
 	return nil
 }
 
-// collect diffs the run's memory against what was delivered.
+// collect diffs the run's memory against what was on disk at launch. The
+// base sent with each change is the delivered (platform) content, which the
+// server compares with the stored file to detect concurrent edits.
 func (wb *memoryWriteback) collect() []agentMemoryChange {
 	byPath := map[string]agentMemoryChange{}
-	copies := readMemoryTree(filepath.Join(wb.workDir, filepath.FromSlash(execenv.AgentMemoryRelDir)), 7)
+	copies := readMemoryTree(wb.copiesDir(), 7)
 	for p, content := range copies {
-		if prev, ok := wb.delivered[p]; ok && prev == content {
+		if prev, ok := wb.launchCopies[p]; ok && prev == content {
 			continue
 		}
 		byPath[p] = agentMemoryChange{Path: p, Action: "upsert", Content: content, BaseContent: wb.base(p), Origin: "agent"}
 	}
-	for p := range wb.delivered {
+	for p := range wb.launchCopies {
 		if _, ok := copies[p]; !ok {
+			if _, delivered := wb.delivered[p]; !delivered {
+				continue // a file Multica did not deliver is not memory to delete
+			}
 			byPath[p] = agentMemoryChange{Path: p, Action: "delete", BaseContent: wb.base(p), Origin: "agent"}
 		}
 	}
 	if wb.nativeDir != "" {
 		for rel, content := range readMemoryTree(wb.nativeDir, 2) {
 			p := memoryWritebackAutoPrefix + rel
-			if prev, ok := wb.delivered[p]; ok && prev == content {
+			if prev, ok := wb.launchNative[rel]; ok && prev == content {
 				continue
 			}
 			if strings.TrimSpace(content) == "" {
@@ -252,4 +279,66 @@ func (wb *memoryWriteback) report(ctx context.Context, client *Client, taskID st
 // ReportAgentMemoryChanges posts a run's memory changes for review.
 func (c *Client) ReportAgentMemoryChanges(ctx context.Context, taskID string, changes []agentMemoryChange, resp any) error {
 	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/memory-changes", taskID), map[string]any{"changes": changes}, resp)
+}
+
+// memoryCopiesAtLaunch records which entries under .multica/memory/ existed
+// when the agent launched (Multica's copies plus anything the user had).
+func memoryCopiesAtLaunch(workDir string) map[string]bool {
+	root := filepath.Join(workDir, filepath.FromSlash(execenv.AgentMemoryRelDir))
+	out := map[string]bool{}
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if rel, rerr := filepath.Rel(root, p); rerr == nil && rel != "." {
+			out[filepath.ToSlash(rel)] = true
+		}
+		return nil
+	})
+	return out
+}
+
+// removeAgentCreatedMemory deletes the files and folders the run created
+// under .multica/memory/ in a user's own directory (local_directory or
+// worktree). Multica's own copies are removed by the sidecar cleanup; these
+// are the agent's additions, which would otherwise stay in the user's tree
+// and, in worktree mode, be committed into the delivered branch. Entries that
+// existed at launch are left alone.
+func removeAgentCreatedMemory(workDir string, atLaunch map[string]bool) error {
+	if atLaunch == nil {
+		return nil
+	}
+	root := filepath.Join(workDir, filepath.FromSlash(execenv.AgentMemoryRelDir))
+	var created []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil || rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if atLaunch[rel] {
+			return nil
+		}
+		created = append(created, p)
+		if d.IsDir() {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, p := range created {
+		if err := os.RemoveAll(p); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

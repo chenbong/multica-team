@@ -191,7 +191,7 @@ func writeContextFiles(workDir, provider string, ctx TaskContextForEnv, manifest
 
 	// Agent memory files (multica-team overlay). The brief inlines them as
 	// well, so a collision with a pre-existing user file is tolerated.
-	if err := writeAgentMemoryFiles(workDir, ctx.AgentMemory, manifest); err != nil {
+	if err := writeAgentMemoryFiles(workDir, ctx.AgentMemory, !ctx.agentMemoryInUserDir, manifest); err != nil {
 		return fmt.Errorf("write agent memory: %w", err)
 	}
 

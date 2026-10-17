@@ -72,3 +72,12 @@ WHERE r.id = f.source_runtime_id
   AND f.auto_sync AND f.source_runtime_id = @runtime_id AND f.source_path = @source_path::text
   AND f.sync_owner_id IS NOT NULL AND r.owner_id = f.sync_owner_id
 RETURNING f.agent_id, f.path;
+
+-- name: LockAgentMemory :exec
+-- Serializes every writer of one agent's memory set for the transaction.
+SELECT pg_advisory_xact_lock(hashtextextended('agent_memory:' || @agent_id::uuid::text, 0));
+
+-- name: RecordAgentMemoryReport :execrows
+INSERT INTO agent_memory_report (task_id, agent_id)
+VALUES ($1, $2)
+ON CONFLICT (task_id) DO NOTHING;

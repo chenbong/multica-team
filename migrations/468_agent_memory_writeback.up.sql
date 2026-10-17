@@ -49,3 +49,11 @@ CREATE TABLE IF NOT EXISTS agent_memory_proposal (
 );
 CREATE INDEX IF NOT EXISTS agent_memory_proposal_agent_idx
     ON agent_memory_proposal (agent_id, status, created_at DESC);
+
+-- One write-back report per task: a run reports its memory changes once,
+-- right after it finishes, and later replays are refused.
+CREATE TABLE IF NOT EXISTS agent_memory_report (
+    task_id UUID PRIMARY KEY,
+    agent_id UUID NOT NULL REFERENCES agent(id) ON DELETE CASCADE,
+    reported_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

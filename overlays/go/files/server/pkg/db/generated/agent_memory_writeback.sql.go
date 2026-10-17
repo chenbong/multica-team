@@ -286,3 +286,32 @@ func (q *Queries) ApplyAgentMemorySync(ctx context.Context, arg ApplyAgentMemory
 	}
 	return items, nil
 }
+
+const lockAgentMemory = `-- name: LockAgentMemory :exec
+SELECT pg_advisory_xact_lock(hashtextextended('agent_memory:' || $1::uuid::text, 0))
+`
+
+// Serializes every writer of one agent's memory set for the transaction.
+func (q *Queries) LockAgentMemory(ctx context.Context, agentID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, lockAgentMemory, agentID)
+	return err
+}
+
+const recordAgentMemoryReport = `-- name: RecordAgentMemoryReport :execrows
+INSERT INTO agent_memory_report (task_id, agent_id)
+VALUES ($1, $2)
+ON CONFLICT (task_id) DO NOTHING
+`
+
+type RecordAgentMemoryReportParams struct {
+	TaskID  pgtype.UUID `json:"task_id"`
+	AgentID pgtype.UUID `json:"agent_id"`
+}
+
+func (q *Queries) RecordAgentMemoryReport(ctx context.Context, arg RecordAgentMemoryReportParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordAgentMemoryReport, arg.TaskID, arg.AgentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

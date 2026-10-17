@@ -8361,9 +8361,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// this pass Finalize would auto-commit the sidecars Prepare just wrote and
 	// deliver a branch whose only content is Multica's own runtime files — or,
 	// in place, leave them behind in the user's tree.
+	// Set at agent launch (multica-team overlay, memory_writeback.go): what
+	// .multica/memory/ held then, so the cleanup below can drop what the
+	// agent added there without touching the user's own files.
+	var memoryAtLaunch map[string]bool
 	if env.LocalDirectory || env.LocalWorktree != nil {
 		defer func() {
 			var cleanupErr error
+			if cerr := removeAgentCreatedMemory(env.WorkDir, memoryAtLaunch); cerr != nil {
+				cleanupErr = cerr
+				d.logger.Warn("execenv: cleanup agent memory files failed", "error", cerr)
+			}
 			if cerr := execenv.CleanupRuntimeConfig(env.WorkDir, provider); cerr != nil {
 				cleanupErr = cerr
 				d.logger.Warn("execenv: cleanup runtime config failed", "error", cerr)
@@ -8672,6 +8680,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Agent memory write-back (memory_writeback.go): snapshot what was
 	// delivered and seed the runtime's own memory dir before launch.
 	memWriteback := newMemoryWriteback(task, provider, env.WorkDir, !env.LocalDirectory && env.LocalWorktree == nil, taskLog)
+	if env.LocalDirectory || env.LocalWorktree != nil {
+		memoryAtLaunch = memoryCopiesAtLaunch(env.WorkDir)
+	}
 
 	taskStart := time.Now()
 

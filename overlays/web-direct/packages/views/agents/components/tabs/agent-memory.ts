@@ -101,6 +101,8 @@ export interface DraftMemoryFile {
   /** Runtime files only: keep mirroring the source file on that machine. */
   autoSync?: boolean;
   syncedAt?: string;
+  /** False when the source runtime cannot sync (read-only, from the server). */
+  syncSupported?: boolean;
 }
 
 let nextLocalId = 0;
@@ -121,6 +123,7 @@ export function draftFromServer(files: AgentMemoryFile[]): DraftMemoryFile[] {
     enabled: f.enabled ?? true,
     autoSync: f.auto_sync ?? false,
     syncedAt: f.synced_at ?? undefined,
+    syncSupported: f.sync_supported,
   }));
 }
 
