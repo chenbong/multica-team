@@ -7,21 +7,27 @@ import { Input } from "@multica/ui/components/ui/input";
 import { Label } from "@multica/ui/components/ui/label";
 import { useWorkspaceSlug } from "@multica/core/paths";
 import { useT } from "../i18n";
-import { MAX_DASHBOARD_CARDS, frameableUrl, useDashboard } from "./custom-pages";
+import { MAX_DASHBOARD_CARDS, MAX_POPOS, frameableUrl, useDashboard, usePopos } from "./custom-pages";
 
-/** Adds a pasted page link to this browser's dashboard. */
+/** Adds a pasted page link to POPOs or to the dashboard (both in this browser only). */
 export function AddPageDialog({
+  target,
   open,
   onOpenChange,
   onAdded,
 }: {
+  target: "popos" | "dashboard";
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onAdded?: () => void;
+  onAdded?: (url: string) => void;
 }) {
   const { t } = useT("layout");
   const slug = useWorkspaceSlug();
-  const { add } = useDashboard(slug);
+  const dashboard = useDashboard(slug);
+  const popos = usePopos(slug);
+  const toPopos = target === "popos";
+  const add = (rawUrl: string, rawTitle?: string) =>
+    toPopos ? popos.add(rawUrl, rawTitle) : dashboard.add(rawUrl, rawTitle, "manual");
   const [url, setUrl] = useState("");
   const [title, setTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -37,11 +43,13 @@ export function AddPageDialog({
       setTitle("");
       setError(null);
       onOpenChange(false);
-      onAdded?.();
+      onAdded?.(frameableUrl(rawUrl)!);
     } else if (result === "exists") {
-      setError(t(($) => $.sidebar.custom_apps.exists));
+      setError(toPopos ? t(($) => $.sidebar.custom_apps.popos_exists) : t(($) => $.sidebar.custom_apps.exists));
     } else if (result === "full") {
-      setError(t(($) => $.sidebar.custom_apps.full, { count: MAX_DASHBOARD_CARDS }));
+      setError(toPopos
+        ? t(($) => $.sidebar.custom_apps.popos_full, { count: MAX_POPOS })
+        : t(($) => $.sidebar.custom_apps.full, { count: MAX_DASHBOARD_CARDS }));
     } else {
       setError(t(($) => $.sidebar.custom_apps.invalid_url));
     }
@@ -56,8 +64,10 @@ export function AddPageDialog({
       <DialogContent className="sm:max-w-md">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>{t(($) => $.sidebar.custom_apps.add_page)}</DialogTitle>
-            <DialogDescription>{t(($) => $.sidebar.custom_apps.add_page_hint)}</DialogDescription>
+            <DialogTitle>{toPopos ? t(($) => $.sidebar.custom_apps.popos_add) : t(($) => $.sidebar.custom_apps.add_page)}</DialogTitle>
+            <DialogDescription>
+              {toPopos ? t(($) => $.sidebar.custom_apps.popos_add_hint) : t(($) => $.sidebar.custom_apps.add_page_hint)}
+            </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="custom-page-url">{t(($) => $.sidebar.custom_apps.url_label)}</Label>

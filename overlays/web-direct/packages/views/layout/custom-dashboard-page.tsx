@@ -4,15 +4,21 @@ import { useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointer
 import { ArrowLeft, ArrowRight, ExternalLink, Link2, Maximize2, Plus, RotateCw, X } from "lucide-react";
 import { Button } from "@multica/ui/components/ui/button";
 import { useWorkspaceSlug } from "@multica/core/paths";
-import { AppLink } from "../navigation";
+import { AppLink, useNavigation } from "../navigation";
 import { useT } from "../i18n";
 import { PageHeader } from "./page-header";
 import { AddPageDialog } from "./add-page-dialog";
 import { LinkedIssues } from "./linked-issues";
 import { PageFrame } from "./page-frame";
 import {
+  CARD_SOURCES,
   MAX_DASHBOARD_CARDS,
   clampCardSize,
+  dashboardFilterPath,
+  filterCards,
+  parseDashboardFilter,
+  useCardsLinkedIssues,
+  type DashboardFilter,
   frameableUrl,
   pageViewPath,
   useDashboard,
@@ -38,7 +44,9 @@ function IconButton({ label, onClick, disabled, pressed, children }: {
   );
 }
 
-function Card({ card, index, total, slug }: { card: DashboardCard; index: number; total: number; slug: string }) {
+function Card({ card, index, total, slug, reorderable }: {
+  card: DashboardCard; index: number; total: number; slug: string; reorderable: boolean;
+}) {
   const { t } = useT("layout");
   const { update, remove, move } = useDashboard(slug);
   const [reloads, setReloads] = useState(0);
@@ -106,8 +114,8 @@ function Card({ card, index, total, slug }: { card: DashboardCard; index: number
           <Link2 />
         </IconButton>
         <IconButton label={t(($) => $.sidebar.custom_apps.refresh)} onClick={() => setReloads((n) => n + 1)}><RotateCw /></IconButton>
-        <IconButton label={t(($) => $.sidebar.custom_apps.move_left)} disabled={index === 0} onClick={() => move(card.id, -1)}><ArrowLeft /></IconButton>
-        <IconButton label={t(($) => $.sidebar.custom_apps.move_right)} disabled={index === total - 1} onClick={() => move(card.id, 1)}><ArrowRight /></IconButton>
+        <IconButton label={t(($) => $.sidebar.custom_apps.move_left)} disabled={!reorderable || index === 0} onClick={() => move(card.id, -1)}><ArrowLeft /></IconButton>
+        <IconButton label={t(($) => $.sidebar.custom_apps.move_right)} disabled={!reorderable || index === total - 1} onClick={() => move(card.id, 1)}><ArrowRight /></IconButton>
         <Button size="icon-xs" variant="ghost" nativeButton={false}
           aria-label={t(($) => $.sidebar.custom_apps.fullscreen)} title={t(($) => $.sidebar.custom_apps.fullscreen)}
           render={<AppLink href={pageViewPath(slug, card.url)} />}>
@@ -151,36 +159,112 @@ function Card({ card, index, total, slug }: { card: DashboardCard; index: number
   );
 }
 
-/** This browser's personal dashboard: several pages side by side, each sized by the viewer. */
+function Chip({ pressed, onClick, title, children }: { pressed: boolean; onClick: () => void; title?: string; children: React.ReactNode }) {
+  return (
+    <button type="button" aria-pressed={pressed} title={title} onClick={onClick}
+      className={`inline-flex max-w-64 items-center gap-1 rounded-full border px-2 py-0.5 text-caption transition-colors ${
+        pressed ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground"}`}>
+      {children}
+    </button>
+  );
+}
+
+const toggle = <T,>(list: T[], value: T) => (list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
+
+/**
+ * This browser's personal dashboard: several pages side by side, each sized by
+ * the viewer. Filterable by where a card was pinned from and by the issues its
+ * page is bound to; the filter lives in the URL so it survives navigation.
+ */
 export function CustomDashboardPage() {
   const { t } = useT("layout");
   const slug = useWorkspaceSlug();
+  const { searchParams, replace } = useNavigation();
   const { cards } = useDashboard(slug);
   const [adding, setAdding] = useState(false);
+  const linked = useCardsLinkedIssues(cards.map((card) => card.url));
+  const filter = parseDashboardFilter(searchParams);
   if (!slug) return null;
+
+  const filtering = filter.sources.length > 0 || filter.issueIds.length > 0;
+  const shown = filterCards(cards, filter, linked.byUrl);
+  const setFilter = (next: DashboardFilter) => replace(dashboardFilterPath(slug, next));
+  const sources = CARD_SOURCES.filter((source) => cards.some((card) => card.source === source));
+  // Selected issues stay listed even if no card links to them any more, so they can be cleared.
+  const issueOptions = [
+    ...linked.issues,
+    ...filter.issueIds.filter((id) => !linked.issues.some((issue) => issue.id === id))
+      .map((id) => ({ id, identifier: id.slice(0, 8), title: "" })),
+  ];
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader>
         <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{t(($) => $.sidebar.custom_apps.my_dashboard)}</h1>
-        <span className="text-caption text-muted-foreground">{cards.length}/{MAX_DASHBOARD_CARDS}</span>
+        <span className="text-caption text-muted-foreground">
+          {filtering ? `${shown.length}/${cards.length}` : `${cards.length}/${MAX_DASHBOARD_CARDS}`}
+        </span>
         <Button type="button" size="sm" variant="outline" disabled={cards.length >= MAX_DASHBOARD_CARDS} onClick={() => setAdding(true)}>
           <Plus />
           {t(($) => $.sidebar.custom_apps.add_page)}
         </Button>
       </PageHeader>
+      {cards.length > 0 ? (
+        <div role="group" aria-label={t(($) => $.sidebar.custom_apps.filter)}
+          className="flex shrink-0 flex-col gap-1.5 border-b px-4 py-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="w-14 shrink-0 text-caption text-muted-foreground">{t(($) => $.sidebar.custom_apps.filter_source)}</span>
+            {sources.map((source) => (
+              <Chip key={source} pressed={filter.sources.includes(source)}
+                onClick={() => setFilter({ ...filter, sources: toggle(filter.sources, source) })}>
+                {source === "popos"
+                  ? t(($) => $.sidebar.custom_apps.source_popos)
+                  : source === "issue"
+                    ? t(($) => $.sidebar.custom_apps.source_issue)
+                    : t(($) => $.sidebar.custom_apps.source_manual)}
+              </Chip>
+            ))}
+            {filtering ? (
+              <Button type="button" size="xs" variant="ghost" className="ml-auto" onClick={() => setFilter({ sources: [], issueIds: [] })}>
+                <X />
+                {t(($) => $.sidebar.custom_apps.filter_clear)}
+              </Button>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="w-14 shrink-0 text-caption text-muted-foreground">{t(($) => $.sidebar.custom_apps.filter_issue)}</span>
+            {issueOptions.length === 0 ? (
+              <span className="text-caption text-muted-foreground">
+                {linked.isLoading ? t(($) => $.sidebar.custom_apps.loading) : t(($) => $.sidebar.custom_apps.filter_no_issues)}
+              </span>
+            ) : issueOptions.map((issue) => (
+              <Chip key={issue.id} pressed={filter.issueIds.includes(issue.id)} title={issue.title || undefined}
+                onClick={() => setFilter({ ...filter, issueIds: toggle(filter.issueIds, issue.id) })}>
+                <span className="shrink-0">{issue.identifier}</span>
+                {issue.title ? <span className="truncate">{issue.title}</span> : null}
+              </Chip>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         {cards.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(($) => $.sidebar.custom_apps.dashboard_empty)}</p>
+        ) : shown.length === 0 && filter.issueIds.length > 0 && linked.isLoading ? (
+          <p className="text-sm text-muted-foreground">{t(($) => $.sidebar.custom_apps.loading)}</p>
+        ) : shown.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(($) => $.sidebar.custom_apps.filter_empty)}</p>
         ) : (
           <div className="flex flex-wrap items-start" style={{ gap: GAP_PX, marginRight: -GAP_PX }}>
-            {cards.map((card, index) => (
-              <Card key={card.id} card={card} index={index} total={cards.length} slug={slug} />
-            ))}
+            {shown.map((card) => {
+              const index = cards.indexOf(card);
+              // Reordering moves a card within the full list, so it is off while filtering.
+              return <Card key={card.id} card={card} index={index} total={cards.length} slug={slug} reorderable={!filtering} />;
+            })}
           </div>
         )}
       </div>
-      <AddPageDialog open={adding} onOpenChange={setAdding} />
+      <AddPageDialog target="dashboard" open={adding} onOpenChange={setAdding} />
     </div>
   );
 }

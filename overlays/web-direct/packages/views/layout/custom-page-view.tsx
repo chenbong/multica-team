@@ -8,15 +8,17 @@ import { useT } from "../i18n";
 import { PageHeader } from "./page-header";
 import { LinkedIssues } from "./linked-issues";
 import { PageFrame } from "./page-frame";
-import { MAX_DASHBOARD_CARDS, frameableUrl, pageTitle, useDashboard } from "./custom-pages";
+import { MAX_DASHBOARD_CARDS, frameableUrl, pageTitle, useDashboard, useLinkedIssues, usePopos } from "./custom-pages";
 
 /** One bound page, full size, with the issues it is bound to above it. */
 export function CustomPageView({ url }: { url: string }) {
   const { t } = useT("layout");
   const slug = useWorkspaceSlug();
   const { cards, add, removeUrl } = useDashboard(slug);
+  const { pages } = usePopos(slug);
   const [notice, setNotice] = useState<string | null>(null);
   const src = frameableUrl(url);
+  const { data: linked } = useLinkedIssues(src);
 
   if (!src || !slug) {
     return <p role="status" className="p-6 text-sm text-muted-foreground">{t(($) => $.sidebar.custom_apps.not_frameable)}</p>;
@@ -28,7 +30,9 @@ export function CustomPageView({ url }: { url: string }) {
       setNotice(null);
       return;
     }
-    const result = add(src);
+    // Source for the dashboard filter: a POPOs page, else an issue-bound one.
+    const poposPage = pages.find((page) => page.url === src);
+    const result = add(src, poposPage?.title, poposPage ? "popos" : linked?.length ? "issue" : "manual");
     setNotice(result === "full" ? t(($) => $.sidebar.custom_apps.full, { count: MAX_DASHBOARD_CARDS }) : null);
   };
 

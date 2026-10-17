@@ -15,7 +15,9 @@ vi.mock("@multica/core/paths", () => ({
   paths: { workspace: (slug: string) => ({ issueDetail: (id: string) => `/${slug}/issues/${id}` }) },
 }));
 vi.mock("./page-header", () => ({ PageHeader: ({ children }: { children: ReactNode }) => <header>{children}</header> }));
+const nav = vi.hoisted(() => ({ search: "", replace: vi.fn() }));
 vi.mock("../navigation", () => ({
+  useNavigation: () => ({ pathname: "/acme/apps", searchParams: new URLSearchParams(nav.search), replace: nav.replace, push: vi.fn() }),
   AppLink: ({ href, children, ...props }: { href: string; children?: ReactNode }) => <a href={href} {...props}>{children}</a>,
 }));
 
@@ -23,6 +25,10 @@ import {
   CARD_HEIGHT,
   CARD_WIDTH,
   addDashboardCard,
+  dashboardFilterPath,
+  filterCards,
+  parseDashboardFilter,
+  readPopos,
   canonicalPageUrl,
   pageIdForUrl,
   pageRef,
@@ -44,6 +50,8 @@ function renderWithQuery(ui: ReactElement) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  nav.search = "";
+  nav.replace.mockClear();
   api.listIssues.mockResolvedValue({ issues: [{ id: "i-1", identifier: "ZEPH-1", title: "日历需求" }], total: 1 });
   api.setIssueMetadataKey.mockResolvedValue(undefined);
   api.deleteIssueMetadataKey.mockResolvedValue(undefined);
@@ -169,7 +177,7 @@ describe("issue ↔ page binding", () => {
     const pin = screen.getByRole("button", { name: "加到我的看板 task-schedule-calendar" });
     expect(pin).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(pin);
-    expect(readDashboard("acme").map((card) => card.url)).toEqual([POPO]);
+    expect(readDashboard("acme").map((card) => [card.url, card.source])).toEqual([[POPO, "issue"]]);
     const pinned = screen.getByRole("button", { name: "已在我的看板，点击移出 task-schedule-calendar" });
     expect(pinned).toHaveAttribute("aria-pressed", "true");
     expect(pinned).toBeEnabled();
@@ -210,5 +218,65 @@ describe("reload loop guard", () => {
     }
     expect(document.querySelector("iframe")).not.toBeNull();
     now.mockRestore();
+  });
+});
+
+describe("dashboard filter", () => {
+  const LIVE = "https://charts.example.test/live";
+  const DOCS = "https://docs.example.test/";
+
+  it("round-trips through the URL and ignores junk", () => {
+    const filter = parseDashboardFilter(new URLSearchParams("source=popos,bogus,issue&issue=i-1,i-1,bad id,i-2"));
+    expect(filter).toEqual({ sources: ["popos", "issue"], issueIds: ["i-1", "i-2"] });
+    expect(dashboardFilterPath("acme", filter)).toBe("/acme/apps?source=popos,issue&issue=i-1,i-2");
+    expect(dashboardFilterPath("acme", { sources: [], issueIds: [] })).toBe("/acme/apps");
+  });
+
+  it("keeps cards of any selected source that are bound to any selected issue", () => {
+    addDashboardCard("acme", POPO, "日历", "popos");
+    addDashboardCard("acme", LIVE, "图表", "issue");
+    addDashboardCard("acme", DOCS, "文档");
+    const cards = readDashboard("acme");
+    expect(cards.map((card) => card.source)).toEqual(["popos", "issue", "manual"]);
+    const linked = new Map([[POPO, ["i-1"]], [LIVE, ["i-2"]]]);
+    const titles = (sources: string[], issueIds: string[]) =>
+      filterCards(cards, { sources: sources as never, issueIds }, linked).map((card) => card.title);
+    expect(titles([], [])).toEqual(["日历", "图表", "文档"]);
+    expect(titles(["popos"], [])).toEqual(["日历"]);
+    expect(titles([], ["i-1", "i-2"])).toEqual(["日历", "图表"]);
+    expect(titles(["manual"], ["i-1"])).toEqual([]);
+  });
+
+  it("filters the dashboard by source and by linked issue from the chips", async () => {
+    api.listIssues.mockImplementation(async ({ metadata }: { metadata: Record<string, string> }) => ({
+      issues: Object.values(metadata)[0] === POPO ? [{ id: "i-1", identifier: "ZEPH-1", title: "日历需求" }] : [],
+      total: 0,
+    }));
+    addDashboardCard("acme", POPO, "日历", "popos");
+    addDashboardCard("acme", LIVE, "图表", "manual");
+    const view = renderWithQuery(<CustomDashboardPage />);
+    fireEvent.click(screen.getByRole("button", { name: "POPOs" }));
+    expect(nav.replace).toHaveBeenLastCalledWith("/acme/apps?source=popos");
+    fireEvent.click(await screen.findByRole("button", { name: /ZEPH-1/ }));
+    expect(nav.replace).toHaveBeenLastCalledWith("/acme/apps?issue=i-1");
+
+    view.unmount();
+    nav.search = "issue=i-1";
+    renderWithQuery(<CustomDashboardPage />);
+    expect(await screen.findByRole("region", { name: "日历" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "图表" })).toBeNull();
+    expect(screen.getByRole("button", { name: /ZEPH-1/ })).toHaveAttribute("aria-pressed", "true");
+    // Reordering is off while a filter hides cards.
+    for (const button of screen.getAllByRole("button", { name: /前移|后移/ })) expect(button).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(nav.replace).toHaveBeenLastCalledWith("/acme/apps");
+  });
+});
+
+describe("POPOs list", () => {
+  it("is separate from the dashboard", () => {
+    expect(readPopos("acme")).toEqual([]);
+    addDashboardCard("acme", POPO);
+    expect(readPopos("acme")).toEqual([]);
   });
 });

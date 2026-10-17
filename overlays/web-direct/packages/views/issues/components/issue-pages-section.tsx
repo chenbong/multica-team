@@ -97,7 +97,7 @@ export function IssuePagesSection({ issue }: { issue: Pick<Issue, "id" | "worksp
                   <Button type="button" size="icon-xs" variant="ghost" aria-pressed={pinned}
                     aria-label={`${pinLabel} ${page.title}`} title={pinLabel}
                     className={pinned ? "text-primary" : "text-muted-foreground"}
-                    onClick={() => (pinned ? removeUrl(page.url) : add(page.url))}>
+                    onClick={() => (pinned ? removeUrl(page.url) : add(page.url, undefined, "issue"))}>
                     <Pin className={pinned ? "fill-current" : undefined} />
                   </Button>
                   <Button type="button" size="icon-xs" variant="ghost" disabled={unbind.isPending}

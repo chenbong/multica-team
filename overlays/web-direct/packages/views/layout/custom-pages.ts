@@ -1,5 +1,5 @@
-import { useCallback, useSyncExternalStore } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multica/core/api";
 import { issueKeys } from "@multica/core/issues/queries";
 import type { Issue } from "@multica/core/types";
@@ -13,7 +13,9 @@ import type { Issue } from "@multica/core/types";
  *   naturally, and the reverse lookup is the upstream issue-list metadata
  *   filter. Agents bind with the plain CLI:
  *     multica issue metadata set <issue> page.popo.<slug> https://<slug>.popo.baidu-int.com/
- * - The dashboard lives in this browser only (localStorage), per workspace.
+ * - POPOs (the viewer's own page list) and the dashboard are two separate
+ *   lists, both in this browser only (localStorage), per workspace. A POPOs
+ *   page reaches the dashboard only when the viewer pins it.
  * - The page itself is framed cross-origin and never talks to Multica.
  */
 export interface PageRef {
@@ -138,6 +140,43 @@ export function useLinkedIssues(url: string | null) {
   });
 }
 
+type LinkedIssue = Pick<Issue, "id" | "identifier" | "title">;
+
+const linkedIssuesQuery = (url: string) => {
+  const ref = pageRef(url)!;
+  return {
+    queryKey: linkedIssuesKey(ref.key, ref.url),
+    queryFn: async () => (await api.listIssues({ metadata: { [ref.key]: ref.url }, limit: 50 })).issues as LinkedIssue[],
+    staleTime: 30_000,
+  };
+};
+
+/**
+ * Issues bound to each of several pages (one upstream list call per page,
+ * shared with `useLinkedIssues`): which issues each card links to, and every
+ * such issue once, for the dashboard's issue filter.
+ */
+export function useCardsLinkedIssues(urls: string[]) {
+  const valid = urls.filter((url) => pageRef(url));
+  const results = useQueries({ queries: valid.map(linkedIssuesQuery) });
+  const stamp = results.map((r) => r.dataUpdatedAt).join(",");
+  return useMemo(() => {
+    const byUrl = new Map<string, string[]>();
+    const issues = new Map<string, LinkedIssue>();
+    valid.forEach((url, i) => {
+      const list = results[i]?.data ?? [];
+      byUrl.set(pageRef(url)!.url, list.map((issue) => issue.id));
+      for (const issue of list) issues.set(issue.id, issue);
+    });
+    return {
+      byUrl,
+      issues: [...issues.values()].sort((a, b) => a.identifier.localeCompare(b.identifier, undefined, { numeric: true })),
+      isLoading: results.some((r) => r.isLoading),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valid.join("\n"), stamp]);
+}
+
 export function usePageBinding(issue: Pick<Issue, "id" | "workspace_id">) {
   const queryClient = useQueryClient();
   const refresh = () => Promise.all([
@@ -166,12 +205,17 @@ export function usePageBinding(issue: Pick<Issue, "id" | "workspace_id">) {
 export const CARD_WIDTH = { min: 20, max: 100, default: 50 } as const;
 export const CARD_HEIGHT = { min: 160, max: 1600, default: 480 } as const;
 
+/** Where a card was pinned from; the dashboard filters on it. */
+export type CardSource = "popos" | "issue" | "manual";
+export const CARD_SOURCES: readonly CardSource[] = ["popos", "issue", "manual"];
+
 export interface DashboardCard {
   id: string;
   url: string;
   title: string;
   width: number;
   height: number;
+  source: CardSource;
 }
 export type AddCardResult = "added" | "exists" | "full" | "invalid";
 
@@ -198,7 +242,7 @@ function cardSize(card: { width?: unknown; height?: unknown }) {
   return clampCardSize(width, height);
 }
 
-const STORAGE_EVENT = "multica:custom-dashboard";
+const STORAGE_EVENT = "multica:custom-pages";
 const storageKey = (slug: string) => `multica:custom-dashboard:v1:${slug}`;
 const EMPTY: DashboardCard[] = [];
 const cache = new Map<string, { raw: string | null; cards: DashboardCard[] }>();
@@ -218,6 +262,8 @@ function parseCards(raw: string | null): DashboardCard[] {
         url,
         title: typeof card.title === "string" && card.title.trim() ? card.title.trim().slice(0, 60) : pageTitle(url),
         ...cardSize(card),
+        // Cards saved before sources existed count as added by hand.
+        source: CARD_SOURCES.includes(card.source as CardSource) ? card.source! : "manual",
       });
       if (cards.length >= MAX_DASHBOARD_CARDS) break;
     }
@@ -255,7 +301,7 @@ function subscribe(callback: () => void) {
   };
 }
 
-export function addDashboardCard(slug: string, rawUrl: string, title?: string): AddCardResult {
+export function addDashboardCard(slug: string, rawUrl: string, title?: string, source: CardSource = "manual"): AddCardResult {
   const url = canonicalPageUrl(rawUrl);
   if (!url) return "invalid";
   const cards = readDashboard(slug);
@@ -263,7 +309,7 @@ export function addDashboardCard(slug: string, rawUrl: string, title?: string): 
   if (cards.length >= MAX_DASHBOARD_CARDS) return "full";
   writeDashboard(slug, [...cards, {
     id: pageIdForUrl(url), url, title: title?.trim().slice(0, 60) || pageTitle(url),
-    width: CARD_WIDTH.default, height: CARD_HEIGHT.default,
+    width: CARD_WIDTH.default, height: CARD_HEIGHT.default, source,
   }]);
   return "added";
 }
@@ -296,6 +342,110 @@ export function useDashboard(slug: string | null) {
     [next[from], next[to]] = [next[to]!, next[from]!];
     writeDashboard(slug, next);
   }, [slug]);
-  const add = useCallback((url: string, title?: string) => (slug ? addDashboardCard(slug, url, title) : "invalid" as const), [slug]);
+  const add = useCallback((url: string, title?: string, source?: CardSource) =>
+    (slug ? addDashboardCard(slug, url, title, source) : "invalid" as const), [slug]);
   return { cards, add, update, remove, removeUrl, move };
+}
+
+// ---- POPOs: the viewer's own page list (this browser only) ----
+
+export const MAX_POPOS = 50;
+export interface PoposPage {
+  id: string;
+  url: string;
+  title: string;
+}
+
+const poposKey = (slug: string) => `multica:custom-popos:v1:${slug}`;
+const NO_POPOS: PoposPage[] = [];
+const poposCache = new Map<string, { raw: string | null; pages: PoposPage[] }>();
+
+export function readPopos(slug: string): PoposPage[] {
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(poposKey(slug));
+  } catch {
+    raw = null;
+  }
+  const hit = poposCache.get(slug);
+  if (hit && hit.raw === raw) return hit.pages;
+  const pages: PoposPage[] = [];
+  try {
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    for (const item of Array.isArray(list) ? list : []) {
+      const page = item as Partial<PoposPage>;
+      const url = canonicalPageUrl(page?.url);
+      if (!url || pages.some((p) => p.url === url)) continue;
+      pages.push({
+        id: pageIdForUrl(url),
+        url,
+        title: typeof page.title === "string" && page.title.trim() ? page.title.trim().slice(0, 60) : pageTitle(url),
+      });
+      if (pages.length >= MAX_POPOS) break;
+    }
+  } catch {
+    pages.length = 0;
+  }
+  const result = pages.length ? pages : NO_POPOS;
+  poposCache.set(slug, { raw, pages: result });
+  return result;
+}
+
+function writePopos(slug: string, pages: PoposPage[]) {
+  window.localStorage.setItem(poposKey(slug), JSON.stringify(pages));
+  window.dispatchEvent(new Event(STORAGE_EVENT));
+}
+
+export function addPoposPage(slug: string, rawUrl: string, title?: string): AddCardResult {
+  const url = canonicalPageUrl(rawUrl);
+  if (!url) return "invalid";
+  const pages = readPopos(slug);
+  if (pages.some((page) => page.url === url)) return "exists";
+  if (pages.length >= MAX_POPOS) return "full";
+  writePopos(slug, [...pages, { id: pageIdForUrl(url), url, title: title?.trim().slice(0, 60) || pageTitle(url) }]);
+  return "added";
+}
+
+export function usePopos(slug: string | null) {
+  const pages = useSyncExternalStore(subscribe, () => (slug ? readPopos(slug) : NO_POPOS), () => NO_POPOS);
+  const add = useCallback((url: string, title?: string) => (slug ? addPoposPage(slug, url, title) : "invalid" as const), [slug]);
+  const remove = useCallback((id: string) => {
+    if (slug) writePopos(slug, readPopos(slug).filter((page) => page.id !== id));
+  }, [slug]);
+  return { pages, add, remove };
+}
+
+// ---- Dashboard filter: ?source=popos,issue&issue=<id>,<id> ----
+
+export interface DashboardFilter {
+  sources: CardSource[];
+  issueIds: string[];
+}
+
+const ISSUE_ID = /^[0-9a-zA-Z-]{1,64}$/;
+
+export function parseDashboardFilter(params: URLSearchParams): DashboardFilter {
+  const list = (name: string) => (params.get(name) ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+  return {
+    sources: CARD_SOURCES.filter((source) => list("source").includes(source)),
+    issueIds: [...new Set(list("issue").filter((id) => ISSUE_ID.test(id)))].slice(0, 50),
+  };
+}
+
+export function dashboardFilterPath(workspaceSlug: string, filter: DashboardFilter): string {
+  const params = new URLSearchParams();
+  if (filter.sources.length) params.set("source", filter.sources.join(","));
+  if (filter.issueIds.length) params.set("issue", filter.issueIds.join(","));
+  const query = params.toString().replaceAll("%2C", ",");
+  return query ? `${dashboardPath(workspaceSlug)}?${query}` : dashboardPath(workspaceSlug);
+}
+
+/**
+ * Cards matching the filter: any selected source, and bound to any selected
+ * issue (`linked` maps a card URL to the ids of the issues bound to it).
+ */
+export function filterCards(cards: DashboardCard[], filter: DashboardFilter, linked: Map<string, string[]>): DashboardCard[] {
+  return cards.filter((card) =>
+    (!filter.sources.length || filter.sources.includes(card.source))
+    && (!filter.issueIds.length || (linked.get(card.url) ?? []).some((id) => filter.issueIds.includes(id))));
 }
