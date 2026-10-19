@@ -38,7 +38,7 @@ def load_config(path):
 def verify_output(target, config):
     auth = json.loads((target / "packages/views/locales/zh-Hans/auth.json").read_text())
     for section, field, key in (
-        ("signin", "title", "MULTICA_BRAND_NAME"),
+        ("signin", "title", "MULTICA_LOGIN_TITLE"),
         ("signin", "description", "MULTICA_LOGIN_DESCRIPTION"),
         ("common", "email_placeholder", "MULTICA_EMAIL_PLACEHOLDER"),
         ("verify", "title_link", "MULTICA_VERIFICATION_BOT_NAME"),

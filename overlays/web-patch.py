@@ -235,6 +235,13 @@ def login_support_labels(locale):
     return [('  "common": {', '  "login_links": ' + json.dumps(labels[locale], ensure_ascii=False) + ',\n  "common": {')]
 
 
+def login_heading_changes():
+    return [(
+        '          <CardTitle className="text-display-sm">\n            {t(($) => $.signin.title)}',
+        '          <CardTitle className="text-display-sm break-words text-balance">\n            {t(($) => $.signin.title)}',
+    )]
+
+
 def login_support_changes():
     links = []
     for key, label in (("MULTICA_QUICKSTART_URL", "quickstart"), ("MULTICA_INFOFLOW_USER_GROUP_URL", "community")):
@@ -283,7 +290,7 @@ CHANGES = {
     AUTH_ZH: auth_zh_changes() + login_support_labels("zh-Hans"),
     AUTH_EN: auth_en_changes() + login_support_labels("en"),
     **{f"packages/views/locales/{locale}/auth.json": login_support_labels(locale) for locale in ("ja", "ko", "fr")},
-    LOGIN_PAGE: login_page_changes() + login_support_changes(),
+    LOGIN_PAGE: login_page_changes() + login_support_changes() + login_heading_changes(),
     "packages/views/auth/login-page.test.tsx": login_test_changes(),
     LOGIN_ROUTE: [
         # The web shell passes a "prefer the desktop app? download" slot into the
@@ -891,6 +898,8 @@ CHANGES.setdefault("packages/views/issues/components/issue-detail.tsx", []).appe
 
 
 runpy.run_path(str(HERE / "chat-access-web-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "resource-web-panels-web-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "math-rendering-web-patch.py"))["extend"](CHANGES)
 
 
 def apply_patches():

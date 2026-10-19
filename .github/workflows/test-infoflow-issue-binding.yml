@@ -52,6 +52,7 @@ jobs:
           python3 -m unittest discover -s infoflow-bridge/test -p 'test_bridgectl.py' -v
           python3 -m unittest discover -s deploy -p 'test_team_migrate.py' -v
           python3 scripts/builtin-agent-env-sql-test.py
+          python3 scripts/resource-web-panels-test.py
           bash -n deploy/migrate-team.sh deploy/start.sh
       - name: Prepare isolated database and Go overlay
         run: |
@@ -71,8 +72,10 @@ jobs:
         run: |
           set -euo pipefail
           export GOFLAGS="-overlay=$GITHUB_WORKSPACE/overlays/go-overlay.json -mod=readonly"
-          go test -race ./internal/handler -run '^Test(InfoFlow|SharedChat|BuiltinSandbox|OneAPI)' -count=1 -v
+          go test -race ./internal/handler -run '^Test(InfoFlow|SharedChat|BuiltinSandbox|OneAPI|ResourceWebPanel)' -count=1 -v
           go test -race ./cmd/server -run '^TestInfoFlow' -count=1 -v
+          go test -race ./internal/service -run '^Test(ResourceWebPanelSkill|BuiltinSkillsConformToTemplate|BuiltinSkillsFrontmatterIsStrictYAML|BuiltinSkillPayload)' -count=1 -v
+          go test -race ./cmd/multica -run '^TestIssuePanelCLI' -count=1 -v
           go vet ./internal/handler ./cmd/server
           git -C .. diff --exit-code
   group-ui:
@@ -104,5 +107,9 @@ jobs:
           pnpm --filter @multica/core exec vitest run api/infoflow-groups.test.ts api/infoflow-group-binding.test.ts issues/infoflow-groups.test.ts issues/infoflow-group-binding.test.ts api/infoflow-conversations.test.ts issues/infoflow-conversations.test.ts
           pnpm --filter @multica/views exec vitest run issues/components/issue-infoflow-groups.test.tsx issues/components/issue-infoflow-group-binding.test.tsx issues/components/bind-infoflow-conversation.test.tsx
           pnpm --filter @multica/views exec vitest run agents/components/inspector/oneapi-thinking.test.ts agents/components/inspector/manual-model-thinking.test.tsx agents/components/inspector/model-change-cleanup.test.ts
+          pnpm --filter @multica/core exec vitest run web-panels api/web-panel-schema.test.ts platform/storage-cleanup.test.ts
+          pnpm --filter @multica/views exec vitest run web-panels layout/dashboard-layout.test.tsx
+          pnpm --filter @multica/views exec vitest run rich-content/latex-delimiters.test.ts rich-content/latex-delimiters.test.tsx editor/readonly-content-math.test.tsx auth/login-page.test.tsx
+          pnpm --filter @multica/core exec tsc --noEmit
           pnpm --filter @multica/views exec tsc --noEmit
           git -C "$GITHUB_WORKSPACE/multica" diff --exit-code

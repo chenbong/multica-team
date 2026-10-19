@@ -6,8 +6,9 @@ assert(process.argv[2], "usage: node deploy/apply-brand.cjs <staging-root> [--ch
 const root = fs.realpathSync(process.argv[2]);
 assert(!fs.existsSync(path.join(root, ".git")), "Use the separate frontend staging copy");
 assert(fs.existsSync(path.join(root, "apps/web/package.json")), "Invalid frontend staging root");
-// Both overrides are opt-in. Unset values preserve the staged configuration.
+// Overrides are opt-in. Unset values preserve the staged configuration.
 const display = process.env.MULTICA_BRAND_NAME?.trim();
+const loginTitle = process.env.MULTICA_LOGIN_TITLE?.trim() || display;
 const bridgeUrl = process.env.MULTICA_BRAND_BRIDGE_URL?.trim();
 const planned = new Map();
 
@@ -22,6 +23,17 @@ function edit(rel, transform) {
   planned.set(rel, transform(source));
 }
 
+if (loginTitle) {
+  for (const locale of ["zh-Hans", "en"]) {
+    edit(`packages/views/locales/${locale}/auth.json`, (source) => {
+      const json = JSON.parse(source);
+      assert.equal(typeof json.signin?.title, "string", "Missing sign-in title");
+      json.signin.title = loginTitle;
+      return JSON.stringify(json, null, 2) + "\n";
+    });
+  }
+}
+
 if (display) {
   const titleSource = fs.readFileSync(path.join(root, "apps/web/platform/document-title.ts"), "utf8");
   const suffixMatch = titleSource.match(/export const TITLE_SUFFIX = ("(?:\\.|[^"\\])*");/);
@@ -32,14 +44,6 @@ if (display) {
   const escapeTestString = (value) => JSON.stringify(value).slice(1, -1)
     .replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
 
-  for (const locale of ["zh-Hans", "en"]) {
-    edit(`packages/views/locales/${locale}/auth.json`, (source) => {
-      const json = JSON.parse(source);
-      assert.equal(typeof json.signin?.title, "string", "Missing sign-in title");
-      json.signin.title = display;
-      return JSON.stringify(json, null, 2) + "\n";
-    });
-  }
   edit("apps/web/platform/document-title.ts", (source) => {
     source = replaceOnce(source, /export const SITE_TITLE = "(?:\\.|[^"\\])*";/,
       `export const SITE_TITLE = ${JSON.stringify(display)};`, "site title");

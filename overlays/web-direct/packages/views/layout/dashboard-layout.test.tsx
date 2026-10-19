@@ -16,6 +16,10 @@ vi.mock("../modals/registry", () => ({ ModalRegistry: () => <div data-testid="mo
 vi.mock("./navigation-progress", () => ({ NavigationProgress: () => null }));
 vi.mock("./workspace-presence-prefetch", () => ({ WorkspacePresencePrefetch: () => null }));
 vi.mock("./global-shortcuts", () => ({ GlobalShortcuts: () => null }));
+vi.mock("../web-panels/panel-shell", () => ({
+  ResourceWebPanelShellProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  ResourceWebPanelLayout: ({ children }: { children: ReactNode }) => <div data-testid="web-panel-layout">{children}</div>,
+}));
 
 import { DashboardLayout } from "./dashboard-layout";
 
@@ -24,6 +28,7 @@ describe("dashboard without source attribution prompt", () => {
     const { rerender } = render(<DashboardLayout><main>Tasks</main></DashboardLayout>);
     expect(screen.getByText("Tasks")).toBeInTheDocument();
     expect(screen.getByTestId("sidebar")).toBeInTheDocument();
+    expect(screen.getByTestId("web-panel-layout")).toBeInTheDocument();
     expect(screen.getByTestId("modal-registry")).toBeInTheDocument();
     expect(screen.queryByTestId("source-survey")).toBeNull();
     expect(survey).not.toHaveBeenCalled();
