@@ -694,7 +694,9 @@ type Daemon struct {
 	// runUpdateFn executes the brew-or-download upgrade. Set to d.runUpdate by
 	// New() and overridable in tests so the auto-update poller can be exercised
 	// without touching the real network or the brew CLI.
-	runUpdateFn func(targetVersion string) (string, error)
+	runUpdateFn            func(targetVersion string) (string, error)
+	guardedUpdateRuntimeID string // protected by restartMu
+	guardedUpdateRequestID string // protected by restartMu
 }
 
 type profileLaunchSpec struct {
@@ -764,6 +766,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 	d.executionEnvironmentCommand = defaultExecutionEnvironmentCommand
 	d.runner = taskRunnerFunc(d.runTask)
 	d.runUpdateFn = d.runUpdate
+	d.pauseClaims = cfg.UpdateProbation != nil
 	return d
 }
 
@@ -2076,6 +2079,7 @@ func (d *Daemon) clearWSHeartbeatAcks() {
 func (d *Daemon) Run(ctx context.Context) error {
 	// Wrap context so handleUpdate can cancel the daemon for restart.
 	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	d.cancelFunc = cancel
 	d.setLifecycleCtx(ctx)
 	d.rootCtx = ctx
@@ -2085,6 +2089,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer healthLn.Close()
 
 	agentNames := make([]string, 0, len(d.agents()))
 	for name := range d.agents() {
@@ -2170,7 +2175,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	taskWakeups := make(chan taskWakeup, 256)
 	go d.taskWakeupLoop(ctx, taskWakeups)
 	go d.heartbeatLoop(ctx)
-	go d.gcLoop(ctx)
 	go d.autoUpdateLoop(ctx)
 	go d.tokenRenewalLoop(ctx)
 
@@ -2180,6 +2184,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// readiness wait blocks on, so success is reported only after startup
 	// actually completed, not merely because the health port came up.
 	d.ready.Store(true)
+	if err := d.confirmUpdateStartup(ctx); err != nil {
+		return err
+	}
+	go d.gcLoop(ctx)
 	d.logger.Debug("background loops launched (workspace-sync, terminal-report-replay, task-wakeup, heartbeat, gc, auto-update, token-renewal); health now reporting ready")
 	err = d.pollLoop(ctx, taskWakeups)
 	d.logger.Debug("daemon main loop returning", "error", err)
@@ -5083,14 +5091,23 @@ func (d *Daemon) handleUpdate(ctx context.Context, runtimeID string, update *Pen
 		return
 	}
 
-	d.logger.Info("CLI update completed successfully", "output", output)
-	d.reportUpdateResult(ctx, runtimeID, update.ID, map[string]any{
-		"status": "completed",
-		"output": fmt.Sprintf("Updated to %s", update.TargetVersion),
-	})
+	d.logger.Info("CLI update downloaded", "output", output)
+	if !d.deferGuardedUpdateResult(runtimeID, update.ID) {
+		d.reportUpdateResult(ctx, runtimeID, update.ID, map[string]any{
+			"status": "completed",
+			"output": fmt.Sprintf("Updated to %s", update.TargetVersion),
+		})
+	}
 
 	// Trigger daemon restart with the new binary.
-	d.triggerRestart()
+	if !d.triggerRestart() {
+		if d.cfg.UpdateLease != nil {
+			_ = d.cfg.UpdateLease.Rollback()
+			_ = d.cfg.UpdateLease.Shared()
+		}
+		d.FinishGuardedUpdate(fmt.Errorf("could not resolve update restart target"))
+		return
+	}
 	restarting = d.RestartBinary() != ""
 }
 
@@ -5162,7 +5179,7 @@ func (d *Daemon) runUpdate(targetVersion string) (string, error) {
 		return out, nil
 	}
 	d.logger.Info("updating CLI via direct download...", "target_version", targetVersion)
-	out, err := cli.UpdateViaDownload(targetVersion)
+	out, err := cli.UpdateDaemonViaDownload(targetVersion, d.cfg.UpdateLease)
 	if err != nil {
 		return out, fmt.Errorf("download update failed: %w", err)
 	}

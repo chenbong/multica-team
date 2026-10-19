@@ -74,6 +74,9 @@ type GitHubRelease struct {
 // uses this to skip self-update for source builds, where downgrading to a
 // public release would clobber unreleased changes.
 func IsReleaseVersion(v string) bool {
+	if _, ok := forkReleaseVersion(v); ok {
+		return true
+	}
 	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(v), "v"))
 	if s == "" {
 		return false
@@ -100,6 +103,19 @@ func IsReleaseVersion(v string) bool {
 // (a 4th component, pre-release tag, etc.). Returns false if either side
 // cannot be parsed — the caller treats that as "stay on current".
 func IsNewerVersion(latest, current string) bool {
+	if l, lok := forkReleaseVersion(latest); lok {
+		if c, cok := forkReleaseVersion(current); cok {
+			for i := range l {
+				if l[i] != c[i] {
+					return l[i] > c[i]
+				}
+			}
+			return false
+		}
+		// Plain upstream and development builds are not silently converted
+		// into fork releases. Bootstrap the fork explicitly once.
+		return false
+	}
 	l, ok := parseReleaseVersion(latest)
 	if !ok {
 		return false
@@ -393,6 +409,33 @@ func UpdateViaDownload(targetVersion string) (string, error) {
 
 // UpdateViaDownloadWithTimeout downloads the latest release binary with a caller-selected timeout.
 func UpdateViaDownloadWithTimeout(targetVersion string, downloadTimeout time.Duration) (string, error) {
+	return updateViaDownloadWithTimeout(targetVersion, downloadTimeout, nil)
+}
+
+// UpdateDaemonViaDownload preserves the previous Linux executable until the
+// successor has proved startup health. Other platforms keep their manual path.
+func UpdateDaemonViaDownload(targetVersion string, lease *DaemonUpdateLease) (string, error) {
+	if runtime.GOOS != "linux" {
+		return UpdateViaDownload(targetVersion)
+	}
+	if lease == nil {
+		return "", fmt.Errorf("safe daemon update unavailable: no installation lease")
+	}
+	if err := lease.Begin(targetVersion); err != nil {
+		return "", err
+	}
+	installed := false
+	defer func() {
+		if !installed {
+			_ = lease.Shared()
+		}
+	}()
+	output, err := updateViaDownloadWithTimeout(targetVersion, DefaultUpdateDownloadTimeout, lease)
+	installed = err == nil
+	return output, err
+}
+
+func updateViaDownloadWithTimeout(targetVersion string, downloadTimeout time.Duration, lease *DaemonUpdateLease) (string, error) {
 	// Determine current binary path.
 	exePath, err := selfexec.Resolve()
 	if err != nil {
@@ -465,6 +508,12 @@ func UpdateViaDownloadWithTimeout(targetVersion string, downloadTimeout time.Dur
 	}
 	if err != nil {
 		return "", fmt.Errorf("extract binary: %w", err)
+	}
+	if lease != nil {
+		if err := lease.Install(targetVersion, binaryData); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Staged %s; startup confirmation is pending", assetName), nil
 	}
 
 	// Atomic replace: write to temp file, then rename over the original.

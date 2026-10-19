@@ -64,6 +64,8 @@ def main() -> None:
     generated = list(guards["generated"](UPSTREAM, FILES)) + list(chat["generated"](UPSTREAM, FILES))
     panel_agent = runpy.run_path(str(HERE / "resource-web-panels-agent.py"))
     generated += panel_agent["generated"](UPSTREAM, FILES)
+    daemon_updates = runpy.run_path(str(HERE / "daemon-auto-update.py"))
+    generated += list(daemon_updates["generated"](UPSTREAM, FILES))
     builtin_env = runpy.run_path(str(HERE / "builtin-agent-env-sql.py"))
     generated = builtin_env["extend"](UPSTREAM, generated)
     web_panels = runpy.run_path(str(HERE / "resource-web-panels-sql.py"))
