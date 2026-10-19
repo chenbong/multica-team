@@ -283,26 +283,36 @@ func TestInfoFlowOneIssueConcurrentGroupClaims(t *testing.T) {
 }
 
 func TestInfoFlowKnownForeignQuotesNeverChooseUniqueIssue(t *testing.T) {
-	f := newInfoFlowFixture(t)
-	f.bind(t)
-	foreign := f
-	foreign.issue = dbfx.Issue(t, "Different group issue", testutil.Cols{"creator_id": f.owner, "assignee_type": "agent", "assignee_id": f.req.AgentID})
-	foreign.req.IssueRef = foreign.issue
-	foreign.req.Conversation.ID = f.req.Conversation.ID[:18] + "1"
-	foreign.req.MessageID = uuid.NewString()
-	foreign.bind(t)
-	foreignInput, _, _ := infoFlowInput(t, foreign, foreign.req.Conversation)
-	private := f.req
-	private.Conversation = infoFlowConversation{Kind: "private", ID: f.req.Sender}
-	private.MessageID = uuid.NewString()
-	infoFlowCall(t, f.h, private, 200)
-	privateInput, _, _ := infoFlowInput(t, f, private.Conversation)
-	for _, id := range []string{foreignInput.MessageID, privateInput.MessageID} {
-		r := infoFlowMultiMessage(f, f.req.AgentID, "continue")
-		r.ReplyToMessageID = id
-		if v := infoFlowPreflight(t, f, r); !v.Handled || v.Binding != nil || v.CanComment || v.Notice == "" {
-			t.Fatalf("foreign quote guessed unique target: %+v", v)
-		}
+	for _, lastDigit := range []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"} {
+		t.Run("source_suffix_"+lastDigit, func(t *testing.T) {
+			f := newInfoFlowFixture(t)
+			f.req.Conversation.ID = f.req.Conversation.ID[:18] + lastDigit
+			f.bind(t)
+			foreign := f
+			foreign.issue = dbfx.Issue(t, "Different group issue", testutil.Cols{"creator_id": f.owner, "assignee_type": "agent", "assignee_id": f.req.AgentID})
+			foreign.req.IssueRef = foreign.issue
+			foreign.req.Conversation.ID = f.req.Conversation.ID[:18] + "1"
+			// Replacing a timestamp suffix with 1 can reproduce the source ID.
+			// Exercise every suffix and keep the foreign conversation distinct.
+			if foreign.req.Conversation.ID == f.req.Conversation.ID {
+				foreign.req.Conversation.ID = f.req.Conversation.ID[:18] + "2"
+			}
+			foreign.req.MessageID = uuid.NewString()
+			foreign.bind(t)
+			foreignInput, _, _ := infoFlowInput(t, foreign, foreign.req.Conversation)
+			private := f.req
+			private.Conversation = infoFlowConversation{Kind: "private", ID: f.req.Sender}
+			private.MessageID = uuid.NewString()
+			infoFlowCall(t, f.h, private, 200)
+			privateInput, _, _ := infoFlowInput(t, f, private.Conversation)
+			for _, id := range []string{foreignInput.MessageID, privateInput.MessageID} {
+				r := infoFlowMultiMessage(f, f.req.AgentID, "continue")
+				r.ReplyToMessageID = id
+				if v := infoFlowPreflight(t, f, r); !v.Handled || v.Binding != nil || v.CanComment || v.Notice == "" {
+					t.Fatalf("foreign quote guessed unique target: %+v", v)
+				}
+			}
+		})
 	}
 }
 
