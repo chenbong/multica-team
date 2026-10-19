@@ -72,6 +72,40 @@ test("mode comes from route metadata, not model-written labels", () => {
   assert.equal(noticeReplyMode({ conversation_mode: "issue" }), "issue");
 });
 
+for (const kind of ["private", "group"]) for (const authorType of ["agent", "user"]) {
+  test(`${kind} ${authorType} task delivery includes its authoritative title`, async t => {
+    const f = fixture(t, kind, "issue");
+    f.delivery.binding = { ...binding, title: "任务标题" };
+    f.delivery.author_type = authorType;
+    f.delivery.author_name = "alice";
+    await f.bridge.issueRelay.poll();
+    const body = f.sent.find(item => !item.options.notificationOnly);
+    assert.ok(body.content.startsWith("**[任务模式] TASK-1:任务标题**\n\n"));
+    assert.ok(body.content.includes(answer));
+    if (authorType === "user") assert.ok(body.content.includes("@alice："));
+    assert.equal(f.delivery.content, answer);
+  });
+}
+
+test("renaming after Markdown was accepted retries only the existing AT reminder", async t => {
+  const f = fixture(t, "group", "issue"), relay = f.bridge.issueRelay;
+  f.delivery.binding = { ...binding, title: "旧任务名" };
+  const send = relay.send;
+  let failAt = true;
+  relay.send = async (conversation, content, options) => {
+    if (options.notificationOnly && failAt) throw new Error("fixture AT failure");
+    return send(conversation, content, options);
+  };
+  await relay.poll();
+  assert.equal(f.sent.filter(item => !item.options.notificationOnly).length, 1);
+  f.delivery.binding.title = "改名后的任务";
+  failAt = false;
+  await relay.poll();
+  assert.equal(f.sent.filter(item => !item.options.notificationOnly).length, 1);
+  assert.equal(f.sent.filter(item => item.options.notificationOnly).length, 1);
+  assert.deepEqual(relay.sentParts, {});
+});
+
 test("bind, permission notices and successful unbind show the correct current mode", async t => {
   const f = fixture(t, "group", "issue");
   for (const notice of ["已绑定任务", "没有工作区权限，无法评论", "没有智能体权限，当前仅新增评论", "只有管理员可以解除绑定"]) {

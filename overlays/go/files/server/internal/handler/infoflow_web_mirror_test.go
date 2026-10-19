@@ -70,7 +70,7 @@ func TestInfoFlowWebBindingNoticesAndUnbindRemainDurableAndScoped(t *testing.T) 
 			}
 			bound := f.bind(t)
 			notices := infoFlowNoticePoll(t, f)
-			if len(notices) != 1 || notices[0].Kind != "bound" || notices[0].Conversation != f.req.Conversation || notices[0].Identifier == "" {
+			if len(notices) != 1 || notices[0].Kind != "bound" || notices[0].Conversation != f.req.Conversation || notices[0].Identifier == "" || notices[0].Title != "InfoFlow secret title" {
 				t.Fatalf("bound notice: %+v", notices)
 			}
 			f.bind(t)
@@ -99,6 +99,28 @@ func TestInfoFlowWebBindingNoticesAndUnbindRemainDurableAndScoped(t *testing.T) 
 				t.Fatalf("revoked notice exposed: %+v", revoked)
 			}
 		})
+	}
+}
+
+func TestInfoFlowTaskHeaderTitlesFollowRenamesWithoutChangingBinding(t *testing.T) {
+	f := newInfoFlowFixture(t)
+	bound := f.bind(t)
+	const title = "任务已改名 **保留原始名称**"
+	dbfx.Exec(t, `UPDATE issue SET title=$2 WHERE id=$1`, f.issue, title)
+	lookup := f.req
+	lookup.Operation, lookup.MessageID = "binding", ""
+	current := infoFlowCall(t, f.h, lookup, 200)
+	if current.Binding == nil || current.Binding.Title != title || current.Binding.Generation != bound.Binding.Generation {
+		t.Fatalf("title changed task routing: %+v", current.Binding)
+	}
+	notices := infoFlowNoticePoll(t, f)
+	if len(notices) != 1 || notices[0].Title != title {
+		t.Fatalf("notice did not carry current authorized title: %+v", notices)
+	}
+	lookup.Sender = "unregistered-header-reader"
+	denied := infoFlowCall(t, f.h, lookup, 200)
+	if denied.Binding != nil && denied.Binding.Title != "" {
+		t.Fatal("denied task header exposed its title")
 	}
 }
 
