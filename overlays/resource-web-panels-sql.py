@@ -3,7 +3,7 @@ import re
 
 
 def rewrite(source, kind):
-    name = {"issue": "DeleteIssue", "workspace": "DeleteWorkspace"}[kind]
+    name = {"issue": "DeleteIssue", "workspace": "DeleteWorkspace", "workspace_issue_roots": "DeleteWorkspaceIssueRoots"}[kind]
     pattern = rf"(?ms)(-- name: {name} :exec\n)(.*?)(?=^-- name:|^`|\Z)"
     matches = list(re.finditer(pattern, source))
     if len(matches) != 1:
@@ -13,20 +13,31 @@ def rewrite(source, kind):
     if kind == "issue":
         before = "cleared_wakeup_receipts AS (\n"
         cleanup = "DELETE FROM resource_web_panel WHERE issue_id IN (SELECT target.id FROM target)"
-    else:
+    elif kind == "workspace":
         before = "cleared_client_usage_workspace AS (\n"
+        cleanup = "DELETE FROM resource_web_panel WHERE workspace_id = $1 OR issue_id IN (SELECT id FROM issue WHERE workspace_id = $1)"
+    else:
+        before = "WITH deleted_wakeup_receipts AS (\n"
+        # The HTTP teardown removes issue roots before the final workspace
+        # sweep. Use the SAME statement snapshot as root deletion, while the
+        # issue-to-workspace relationship is still visible. CTE execution order
+        # is deliberately not relied on; the enclosing teardown holds locks.
         cleanup = "DELETE FROM resource_web_panel WHERE workspace_id = $1 OR issue_id IN (SELECT id FROM issue WHERE workspace_id = $1)"
     if query.count(before) != 1:
         raise SystemExit(f"web panel cleanup anchor changed: {name}")
-    query = query.replace(before, f"cleared_resource_web_panels AS (\n    {cleanup}\n),\n{before}", 1)
+    if kind == "workspace_issue_roots":
+        after = f"WITH cleared_resource_web_panels AS (\n    {cleanup}\n), deleted_wakeup_receipts AS (\n"
+    else:
+        after = f"cleared_resource_web_panels AS (\n    {cleanup}\n),\n{before}"
+    query = query.replace(before, after, 1)
     return source[:match.start()] + query + source[match.end():]
 
 
 def extend(upstream, files, generated):
     result = list(generated)
-    for kind in ("issue", "workspace"):
-        rewrite((upstream / f"server/pkg/db/queries/{kind}.sql").read_text(), kind)
-        relative = f"server/pkg/db/generated/{kind}.sql.go"
+    for kind, filename in (("issue", "issue"), ("workspace", "workspace"), ("workspace_issue_roots", "workspace_delete")):
+        rewrite((upstream / f"server/pkg/db/queries/{filename}.sql").read_text(), kind)
+        relative = f"server/pkg/db/generated/{filename}.sql.go"
         hits = [i for i, (rel, _) in enumerate(result) if rel == relative]
         if len(hits) > 1:
             raise SystemExit(f"duplicate web panel SQL overlay: {relative}")

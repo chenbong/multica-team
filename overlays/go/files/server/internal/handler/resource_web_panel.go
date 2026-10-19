@@ -57,7 +57,12 @@ func (a webPanelAccess) canManage(createdBy string) bool {
 
 func validResourceWebPanel(name, rawURL string) (string, string, bool) {
 	name, rawURL = strings.TrimSpace(name), strings.TrimSpace(rawURL)
-	if name == "" || utf8.RuneCountInString(name) > 120 || len(rawURL) > 4096 || strings.ContainsAny(name, "\x00\r\n") || strings.IndexFunc(rawURL, func(ch rune) bool { return ch <= 0x20 || ch == 0x7f }) >= 0 {
+	if name == "" {
+		name = rawURL
+	}
+	// URL-derived names retain the complete navigation URL, even beyond the
+	// custom-name character limit. The URL's byte and safety limits still apply.
+	if (name != rawURL && utf8.RuneCountInString(name) > 120) || len(rawURL) > 4096 || strings.ContainsAny(name, "\x00\r\n") || strings.IndexFunc(rawURL, func(ch rune) bool { return ch <= 0x20 || ch == 0x7f }) >= 0 {
 		return "", "", false
 	}
 	u, err := url.Parse(rawURL)
@@ -206,8 +211,8 @@ func (h *Handler) mutateResourceWebPanel(w http.ResponseWriter, r *http.Request,
 	var panel resourceWebPanel
 	var err error
 	if r.Method == http.MethodPost {
-		if body.Name == nil || body.URL == nil {
-			writeErrorCode(w, http.StatusBadRequest, "invalid_web_panel", "Panel name and URL are required")
+		if body.URL == nil {
+			writeErrorCode(w, http.StatusBadRequest, "invalid_web_panel", "Panel URL is required")
 			return
 		}
 		var count int
@@ -242,6 +247,9 @@ func (h *Handler) mutateResourceWebPanel(w http.ResponseWriter, r *http.Request,
 	if r.Method == http.MethodDelete {
 		_, err = tx.Exec(r.Context(), `DELETE FROM resource_web_panel WHERE id=$1 AND `+a.column()+`=$2`, panel.ID, a.resourceID)
 	} else {
+		if body.Name == nil && body.URL != nil && panel.Name == panel.URL {
+			panel.Name = ""
+		}
 		if body.Name != nil {
 			panel.Name = *body.Name
 		}
@@ -250,7 +258,7 @@ func (h *Handler) mutateResourceWebPanel(w http.ResponseWriter, r *http.Request,
 		}
 		name, href, valid := validResourceWebPanel(panel.Name, panel.URL)
 		if !valid {
-			writeErrorCode(w, http.StatusBadRequest, "invalid_web_panel", "Use a name of up to 120 characters and an HTTP(S) URL without embedded credentials")
+			writeErrorCode(w, http.StatusBadRequest, "invalid_web_panel", "Use an HTTP(S) URL without embedded credentials; a custom page name is optional and limited to 120 characters")
 			return
 		}
 		if r.Method == http.MethodPost {

@@ -41,6 +41,13 @@ describe("web panel wire contracts", () => {
     expect(fetch.mock.calls[0]?.[0]).toBe(`https://api.example.test/api/issues/${row.resource_id}/web-panels`);
     expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({ "X-Workspace-Slug": "expected-workspace" });
   });
+  it("accepts long full-URL names but not oversized unrelated names", () => {
+    const url = "https://example.test/" + "x".repeat(180) + "?a=1#view";
+    expect(ResourceWebPanelSchema.parse({ ...row, name: url, url }).name).toBe(url);
+    expect(ResourceWebPanelSchema.safeParse({ ...row, name: url }).success).toBe(false);
+    const tooLong = "https://example.test/" + "x".repeat(4096);
+    expect(ResourceWebPanelSchema.safeParse({ ...row, name: tooLong, url: tooLong }).success).toBe(false);
+  });
   it("reports invalid API responses as query errors rather than a misleading empty list", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ panels: "broken" }), { status: 200, headers: { "Content-Type": "application/json" } })));
     await expect(new ApiClient("https://api.example.test").listResourceWebPanels({ scope: "workspace", resourceId: row.workspace_id }, "acme")).rejects.toThrow("Invalid web panel list");

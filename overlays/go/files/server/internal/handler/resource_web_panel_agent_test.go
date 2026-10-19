@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -105,6 +106,19 @@ func TestResourceWebPanelAgentCreatesOnlyCurrentIssueAndRecordsSource(t *testing
 	testutil.Call(t, f.h.ListIssueWebPanels, r).Want(200).JSON(&list)
 	if len(list.Panels) != 1 || !list.Panels[0].CanManage {
 		t.Fatal("the requesting member cannot manage the new item")
+	}
+}
+
+func TestResourceWebPanelAgentOptionalName(t *testing.T) {
+	f := newPanelRunFixture(t)
+	href := "https://example.test/" + strings.Repeat("x", 180) + "?a=1#result"
+	w := f.call(t, "POST", "/api/agent/issue-web-panels", f.token, map[string]string{"url": href}, http.StatusCreated)
+	var panel resourceWebPanel
+	if err := json.Unmarshal(w.Body.Bytes(), &panel); err != nil {
+		t.Fatal(err)
+	}
+	if panel.Name != href || panel.URL != href || panel.ResourceID != f.issue || panel.CanManage {
+		t.Fatal("optional name changed current-issue scope, full URL, or management rights")
 	}
 }
 

@@ -31,7 +31,7 @@ export interface ResourceWebPanelList {
 }
 
 export interface WebPanelInput {
-  name: string;
+  name?: string;
   url: string;
 }
 

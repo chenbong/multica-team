@@ -1113,12 +1113,13 @@ const (
 	sourceClawHub importSource = iota
 	sourceSkillsSh
 	sourceGitHub
+	sourceOneTool
 )
 
 // detectImportSource determines the source from a URL.
 // Returns the source and a normalized URL (with scheme).
 func detectImportSource(raw string) (importSource, string, error) {
-	raw = strings.TrimSpace(raw)
+	raw = normalizeOneToolImportInput(raw)
 	if raw == "" {
 		return 0, "", fmt.Errorf("empty URL")
 	}
@@ -1135,6 +1136,14 @@ func detectImportSource(raw string) (importSource, string, error) {
 
 	host := strings.ToLower(parsed.Hostname())
 	switch {
+	case host == "mcp-proxy.baidu-int.com":
+		u, err := oneToolDownloadURL(normalized)
+		if err != nil {
+			return 0, "", err
+		}
+		return sourceOneTool, u.String(), nil
+	case host == "console.cloud.baidu-int.com":
+		return 0, "", fmt.Errorf("OneTool detail pages require authorization; paste the ZIP download link or the copied install text instead")
 	case host == "skills.sh" || host == "www.skills.sh":
 		return sourceSkillsSh, normalized, nil
 	case host == "clawhub.ai" || host == "www.clawhub.ai":
@@ -1146,7 +1155,7 @@ func detectImportSource(raw string) (importSource, string, error) {
 		if !strings.Contains(raw, "/") || !strings.Contains(raw, ".") {
 			return sourceClawHub, raw, nil
 		}
-		return 0, "", fmt.Errorf("unsupported source: %s (supported: clawhub.ai, skills.sh, github.com)", host)
+		return 0, "", fmt.Errorf("unsupported source: %s (supported: clawhub.ai, skills.sh, github.com, OneTool ZIP downloads)", host)
 	}
 }
 
@@ -2574,6 +2583,8 @@ func (h *Handler) ImportSkill(w http.ResponseWriter, r *http.Request) {
 		imported, err = fetchFromSkillsSh(ctx, httpClient, normalized)
 	case sourceGitHub:
 		imported, err = fetchFromGitHub(ctx, httpClient, normalized)
+	case sourceOneTool:
+		imported, err = fetchFromOneTool(ctx, httpClient, normalized)
 	}
 	if err != nil {
 		status, msg := importFetchErrorResponse(ctx, err)

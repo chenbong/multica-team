@@ -273,7 +273,28 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 	checks := []struct{ code, sql string }{
 		{"children_or_dependencies", `SELECT EXISTS(SELECT 1 FROM issue WHERE parent_issue_id=$1 OR duplicate_of_issue_id=$1) OR EXISTS(SELECT 1 FROM issue_dependency WHERE issue_id=$1 OR depends_on_issue_id=$1) OR EXISTS(SELECT 1 FROM issue_child_event WHERE child_id=$1 OR parent_id=$1)`},
 		{"attachments", `SELECT EXISTS(SELECT 1 FROM attachment WHERE issue_id=$1 OR comment_id IN(SELECT id FROM comment WHERE issue_id=$1) OR task_id IN(SELECT id FROM agent_task_queue WHERE issue_id=$1))`},
-		{"automation_or_sources", `SELECT EXISTS(SELECT 1 FROM issue_source_context WHERE issue_id=$1 OR source_issue_id=$1) OR EXISTS(SELECT 1 FROM issue_wakeup WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM autopilot_run WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM task_supplement WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM task_supplement_capability WHERE issue_id=$1)`},
+		// A negotiated capability is historical metadata, not a delivery or
+		// live credential. Keep actual supplement receipts protected, and only
+		// admit capability rows tied consistently to terminal, unlinked runs.
+		{"automation_or_sources", `SELECT
+          EXISTS(SELECT 1 FROM issue_source_context WHERE issue_id=$1 OR source_issue_id=$1)
+          OR EXISTS(SELECT 1 FROM issue_wakeup WHERE issue_id=$1)
+          OR EXISTS(SELECT 1 FROM autopilot_run WHERE issue_id=$1)
+          OR EXISTS(SELECT 1 FROM task_supplement WHERE issue_id=$1
+            OR task_id IN(SELECT id FROM agent_task_queue WHERE issue_id=$1)
+            OR comment_id IN(SELECT id FROM comment WHERE issue_id=$1))
+          OR EXISTS(
+            SELECT 1 FROM task_supplement_capability cap
+            LEFT JOIN agent_task_queue history ON history.id=cap.task_id
+            WHERE (cap.issue_id=$1 OR history.issue_id=$1)
+              AND (history.id IS NULL
+                OR cap.issue_id IS DISTINCT FROM $1::uuid
+                OR history.issue_id IS DISTINCT FROM $1::uuid
+                OR cap.workspace_id IS DISTINCT FROM (SELECT workspace_id FROM issue WHERE id=$1)
+                OR history.status NOT IN ('completed','failed','cancelled')
+                OR history.chat_session_id IS NOT NULL
+                OR history.autopilot_run_id IS NOT NULL)
+          )`},
 		{"labels_pins_or_prs", `SELECT EXISTS(SELECT 1 FROM issue_to_label WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM pinned_item WHERE item_id=$1) OR EXISTS(SELECT 1 FROM issue_pull_request WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM issue_vcs_pull_request WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM issue_pr_automation WHERE issue_id=$1) OR EXISTS(SELECT 1 FROM issue_pull_request_exclusion WHERE issue_id=$1)`},
 		{"notification_recipients", `SELECT EXISTS(SELECT 1 FROM inbox_item n WHERE n.issue_id=$1 AND (n.recipient_type<>'member' OR NOT EXISTS(SELECT 1 FROM member m WHERE m.workspace_id=$2 AND m.user_id=n.recipient_id)))`},
 	}
@@ -313,7 +334,9 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
        (SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM agent_task_queue x WHERE issue_id=$1),
        (SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM inbox_item x WHERE issue_id=$1),
        (SELECT jsonb_agg(to_jsonb(x) ORDER BY user_type,user_id) FROM issue_subscriber x WHERE issue_id=$1),
-       (SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM member x WHERE workspace_id=$2)
+       (SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM member x WHERE workspace_id=$2),
+       (SELECT jsonb_agg(to_jsonb(x) ORDER BY task_id) FROM task_supplement_capability x
+         WHERE issue_id=$1 OR task_id IN(SELECT id FROM agent_task_queue WHERE issue_id=$1))
        )::text)`, id, target).Scan(&stamp)
 	if err != nil {
 		return nil, err
@@ -347,6 +370,13 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 		if _, err = tx.Exec(ctx, "UPDATE "+table+" SET workspace_id=$2 WHERE issue_id=$1", id, target); err != nil {
 			return nil, err
 		}
+	}
+	// Preserve the completed run's negotiated metadata while making its read
+	// scope follow the issue. Run IDs, protocol flags and timestamps stay raw.
+	// Both supplementary tables are fenced above, so the validation and this
+	// scope update cannot race a capability negotiation or delivery write.
+	if _, err = tx.Exec(ctx, `UPDATE task_supplement_capability SET workspace_id=$2 WHERE issue_id=$1 AND workspace_id=$3`, id, target, source); err != nil {
+		return nil, err
 	}
 	// Finished-run credentials are operational leases, not history. Never let
 	// an old host retain a credential to data that has changed workspace.

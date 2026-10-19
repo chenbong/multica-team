@@ -3,7 +3,9 @@
 ## User experience
 
 There are two shared collections: workspace Web panels and task Web panels.
-Adding a name and HTTP(S) URL pins the panel directly to that resource. Workspace
+Adding an HTTP(S) URL pins the panel directly to that resource. The URL field
+comes first; the optional page name follows and defaults to the complete URL
+when blank. Workspace
 panels appear under "Workspace panels" in the workspace sidebar; task panels
 appear under "Issue panels" in the task's information sidebar (Chinese:
 "工作区面板" / "任务面板"). There is no personal dashboard, POPO-only category, or
@@ -43,6 +45,24 @@ and workspace through the platform storage adapter.
 - Transferred tasks derive panel access from the task's current workspace.
   Deleting a task or workspace deletes its panel metadata in the same database
   statement, without deleting anything on the external website.
+  Workspace teardown cleans both panel scopes in `DeleteWorkspaceIssueRoots`,
+  using the same statement snapshot as issue deletion. The final workspace
+  sweep alone is too late to discover issue-owned panels once issues are gone.
+  The enclosing transaction and existing resource locks retain rollback and
+  concurrent-write isolation; transferred issues are scoped by their current
+  workspace, not their panel's creator.
+
+Existing orphan metadata is not silently removed by the forward fix. Operators
+can audit missing owners in a read-only transaction:
+
+```sh
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/resource-web-panel-orphans.sql
+```
+
+The report contains identifiers and timestamps, not page names or
+URLs that may contain sensitive input. Review and back up any historical rows
+before a separately authorized, identifier-scoped cleanup; do not delete panels
+because their creator left or their issue moved to another live workspace.
 
 ## External-page boundary
 
@@ -98,7 +118,10 @@ and `url` only. Responses include resource/workspace identity, creator,
 timestamps, and per-user `can_manage`; lists also return `can_add` and `limit`.
 
 - Up to 50 panels per resource, with serialized resource-level count checks.
-- Name: 1–120 Unicode characters after trimming.
+- Custom page name: optional, up to 120 Unicode characters after trimming.
+  Omitted or blank names use the entire URL, without truncating its query or
+  fragment. Editing an unnamed panel keeps the name optional; changing its URL
+  updates the derived name. Explicit custom names are preserved.
 - URL: up to 4096 UTF-8 bytes, HTTP(S), hostname required, no embedded credentials
   or raw control/space characters. Invalid URLs are never navigated.
 - The exact same URL cannot be added twice to one resource. Query/fragment
@@ -112,7 +135,11 @@ SQLc constant changes use the existing Go overlay. Shared core/views components,
 API parsing, event wiring, locales and host-layout changes use the explicit
 frontend stage. Web and desktop reuse the same shared layout/components.
 
-Apply team migrations **523–527 before starting the new API**. The table has no
+Apply team migrations **523–528 before starting the new API**. Migration 528
+allows full URL-derived names while retaining the custom-name limit; it does
+not rewrite existing panels. Its down migration fails atomically if longer
+URL-derived names remain: rename those panels before downgrading rather than
+discarding their data. The table has no
 foreign keys or cascade deletes, following repository conventions. Each explicit
 index is in its own concurrent-index migration. Rollback requires reverting the
 API overlay first, then applying down migrations in reverse order; dropping the

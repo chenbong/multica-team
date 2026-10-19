@@ -7,13 +7,15 @@ export const ResourceWebPanelSchema = z.object({
   resource_id: z.string().uuid(),
   workspace_id: z.string().uuid(),
   created_by: z.string().uuid(),
-  name: z.string().min(1).refine((value) => [...value].length <= 120),
+  name: z.string().min(1),
   url: z.string().refine((value) => webPanelUrl(value) !== null),
   created_at: z.string().datetime({ offset: true }),
   updated_at: z.string().datetime({ offset: true }),
   can_manage: z.boolean().default(false),
   created_by_agent_id: z.string().uuid().nullable().default(null),
   source_task_id: z.string().uuid().nullable().default(null),
+}).refine((value) => value.name === value.url || [...value.name].length <= 120, {
+  path: ["name"], message: "Custom page names are limited to 120 characters",
 }).transform((value) => ({
   id: value.id,
   scope: value.scope,

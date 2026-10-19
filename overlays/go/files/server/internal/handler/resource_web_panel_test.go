@@ -25,10 +25,71 @@ func TestResourceWebPanelURLValidation(t *testing.T) {
 			t.Fatalf("unsafe URL accepted: %q", href)
 		}
 	}
-	for _, name := range []string{"", "   ", strings.Repeat("字", 121), "bad\nname"} {
+	for _, name := range []string{strings.Repeat("字", 121), "bad\nname"} {
 		if _, _, ok := validResourceWebPanel(name, "https://example.test/"); ok {
 			t.Fatal("invalid name accepted")
 		}
+	}
+}
+
+func TestResourceWebPanelOptionalName(t *testing.T) {
+	href := "https://example.test/" + strings.Repeat("x", 180) + "?view=all#details"
+	for _, name := range []string{"", " \t ", href} {
+		gotName, gotURL, ok := validResourceWebPanel(name, " "+href+" ")
+		if !ok || gotName != href || gotURL != href {
+			t.Fatal("blank names must retain the complete URL, including query and fragment")
+		}
+	}
+	if _, _, ok := validResourceWebPanel(href+"extra", href); ok {
+		t.Fatal("oversized custom names must not bypass the limit")
+	}
+	maxURL := "https://example.test/" + strings.Repeat("x", 4096-len("https://example.test/"))
+	if name, _, ok := validResourceWebPanel("", maxURL); !ok || name != maxURL {
+		t.Fatal("maximum-length valid URLs must work as names")
+	}
+	if _, _, ok := validResourceWebPanel("", maxURL+"x"); ok {
+		t.Fatal("URL-derived names must not bypass the URL limit")
+	}
+}
+
+func TestResourceWebPanelOptionalNamePersistence(t *testing.T) {
+	webPanelDB(t)
+	for _, scope := range []string{"workspace", "issue"} {
+		t.Run(scope, func(t *testing.T) {
+			resource := testWorkspaceID
+			if scope == "issue" {
+				resource = dbfx.Issue(t, "Optional panel name")
+			}
+			href := "https://example.test/" + uuid.NewString() + strings.Repeat("x", 180) + "?team=one#view"
+			w := webPanelCall(t, http.MethodPost, scope, resource, "", testUserID, map[string]string{"url": href}, http.StatusCreated)
+			var panel resourceWebPanel
+			if err := json.Unmarshal(w.Body.Bytes(), &panel); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { dbfx.Exec(t, `DELETE FROM resource_web_panel WHERE id=$1`, panel.ID) })
+			if panel.Name != href || panel.URL != href {
+				t.Fatal("omitted name did not default to the full URL")
+			}
+			updated := href + "-next"
+			w = webPanelCall(t, http.MethodPatch, scope, resource, panel.ID, testUserID, map[string]string{"url": updated}, http.StatusOK)
+			var changed resourceWebPanel
+			_ = json.Unmarshal(w.Body.Bytes(), &changed)
+			if changed.Name != updated || changed.URL != updated {
+				t.Fatal("URL-derived name did not follow an edited URL")
+			}
+			webPanelCall(t, http.MethodPatch, scope, resource, panel.ID, testUserID, map[string]string{"name": "Custom title"}, http.StatusOK)
+			w = webPanelCall(t, http.MethodPatch, scope, resource, panel.ID, testUserID, map[string]string{"url": href}, http.StatusOK)
+			_ = json.Unmarshal(w.Body.Bytes(), &changed)
+			if changed.Name != "Custom title" {
+				t.Fatal("editing the URL replaced a custom name")
+			}
+			w = webPanelCall(t, http.MethodPatch, scope, resource, panel.ID, testUserID, map[string]string{"name": "   "}, http.StatusOK)
+			_ = json.Unmarshal(w.Body.Bytes(), &changed)
+			if changed.Name != href {
+				t.Fatal("clearing a custom name did not restore the URL")
+			}
+			webPanelCall(t, http.MethodPatch, scope, resource, panel.ID, testUserID, map[string]string{"name": strings.Repeat("x", 121)}, http.StatusBadRequest)
+		})
 	}
 }
 
