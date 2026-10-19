@@ -145,10 +145,20 @@ class FrontendPatches(unittest.TestCase):
         self.assertLess(login.index('data-testid="login-support-links"'), login.index('$.signin.description'))
         self.assertLess(login.index('data-testid="login-support-links"'), login.index('<form id="login-form"'))
         self.assertIn('onSubmit={handleSendCode}', login)
+        self.assertIn('className="text-display-sm break-words text-balance"', login)
         self.assertIn('$.verify.title_link', login)
         for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
             labels = json.loads((self.target / f"packages/views/locales/{locale}/auth.json").read_text())
             self.assertEqual(set(labels["login_links"]), {"quickstart", "community"})
+
+    def test_task_math_uses_the_canonical_renderer_and_keeps_currency_policy(self):
+        self.apply()
+        renderer = (self.target / "packages/views/rich-content/rich-content.tsx").read_text()
+        self.assertIn('import { normalizeLatexDelimiters } from "./latex-delimiters";', renderer)
+        self.assertIn("preprocessMarkdown(normalizeLatexDelimiters(content),", renderer)
+        self.assertIn("singleDollarTextMath: false", renderer)
+        self.assertIn("rehypeKatex", renderer)
+        self.assertTrue((ROOT / "overlays/web-direct/packages/views/rich-content/latex-delimiters.ts").exists())
 
     def test_reapplication_does_not_clobber_changed_staging_files(self):
         self.apply()
@@ -275,13 +285,14 @@ class FrontendPatches(unittest.TestCase):
         self.apply()
         command = ["node", str(ROOT / "deploy/apply-brand.cjs"), str(self.target)]
         before = self.snapshot()
+        default_env = {**os.environ, "MULTICA_LOGIN_TITLE": ""}
         # Default branding preserves all existing deployment configuration.
-        subprocess.run([*command, "--check"], check=True, capture_output=True)
+        subprocess.run([*command, "--check"], env=default_env, check=True, capture_output=True)
         self.assertEqual(before, self.snapshot())
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, env=default_env, check=True, capture_output=True)
         self.assertEqual(before, self.snapshot())
 
-        configured_env = {**os.environ, "MULTICA_BRAND_NAME": "Multica · Example"}
+        configured_env = {**default_env, "MULTICA_BRAND_NAME": "Multica · Example"}
         subprocess.run([*command, "--check"], env=configured_env, check=True, capture_output=True)
         self.assertEqual(before, self.snapshot())
         subprocess.run(command, env=configured_env, check=True, capture_output=True)
@@ -289,7 +300,7 @@ class FrontendPatches(unittest.TestCase):
         subprocess.run(command, env=configured_env, check=True, capture_output=True)
         self.assertEqual(branded, self.snapshot())
         # Removing the override must not reset an already configured build.
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, env=default_env, check=True, capture_output=True)
         self.assertEqual(branded, self.snapshot())
         for locale in ("zh-Hans", "en"):
             auth = json.loads(branded[f"packages/views/locales/{locale}/auth.json"])
@@ -305,7 +316,7 @@ class FrontendPatches(unittest.TestCase):
         self.assertIn("http://bridge.example.test:8002", branded[agents])
 
         # A separate explicit override can change only the Bridge destination.
-        bridge_env = {**os.environ, "MULTICA_BRAND_BRIDGE_URL": "https://override.example.test:8002"}
+        bridge_env = {**default_env, "MULTICA_BRAND_BRIDGE_URL": "https://override.example.test:8002"}
         subprocess.run([*command, "--check"], env=bridge_env, check=True, capture_output=True)
         self.assertEqual(branded, self.snapshot())
         subprocess.run(command, env=bridge_env, check=True, capture_output=True)
@@ -315,6 +326,36 @@ class FrontendPatches(unittest.TestCase):
                          {rel: text for rel, text in branded.items() if rel != agents})
         subprocess.run(command, env=bridge_env, check=True, capture_output=True)
         self.assertEqual(overridden, self.snapshot())
+
+    def test_login_title_is_independent_of_site_brand_and_survives_final_verification(self):
+        self.apply()
+        command = ["node", str(ROOT / "deploy/apply-brand.cjs"), str(self.target)]
+        title = "Team Mesh：组织 AI 协作平台"
+        config = {key: os.environ.get(key, "Fixture") or "Fixture" for key in runpy.run_path(str(ROOT / "deploy/prepare-web.py"))["REQUIRED"]}
+        config.update(MULTICA_BRAND_NAME="Team Mesh", MULTICA_LOGIN_TITLE=title)
+        env = {**os.environ, **config}
+        before = self.snapshot()
+        subprocess.run([*command, "--check"], env=env, check=True, capture_output=True)
+        self.assertEqual(before, self.snapshot())
+        subprocess.run(command, env=env, check=True, capture_output=True)
+        for locale in ("zh-Hans", "en"):
+            auth = json.loads((self.target / f"packages/views/locales/{locale}/auth.json").read_text())
+            self.assertEqual(auth["signin"]["title"], title)
+            self.assertEqual(auth["verify"]["title_link"], "Fixture bot")
+            original_auth = json.loads(before[f"packages/views/locales/{locale}/auth.json"])
+            original_auth["signin"]["title"] = title
+            self.assertEqual(auth, original_auth)
+        self.assertIn('export const SITE_TITLE = "Team Mesh";', (self.target / "apps/web/platform/document-title.ts").read_text())
+        runpy.run_path(str(ROOT / "deploy/prepare-web.py"))["verify_output"](self.target, config)
+        branded = self.snapshot()
+        subprocess.run(command, env=env, check=True, capture_output=True)
+        self.assertEqual(branded, self.snapshot())
+        login_only_env = {**env, "MULTICA_BRAND_NAME": "", "MULTICA_LOGIN_TITLE": title + "（预览）"}
+        subprocess.run(command, env=login_only_env, check=True, capture_output=True)
+        after = self.snapshot()
+        for rel in BRAND_FILES:
+            self.assertEqual(after[rel], branded[rel])
+        self.assertEqual(json.loads(after["packages/views/locales/zh-Hans/auth.json"])["signin"]["title"], title + "（预览）")
 
     def test_brand_anchor_drift_writes_nothing(self):
         self.apply()

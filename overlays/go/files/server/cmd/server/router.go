@@ -1749,6 +1749,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Use(middleware.RequireWorkspaceMemberFromURL(queries, "id"))
 					r.Get("/", h.GetWorkspace)
 					r.Get("/members", h.ListMembersWithUser)
+					r.With(handler.RequireHumanActor).Get("/web-panels", h.ListWorkspaceWebPanels)
+					r.With(handler.RequireHumanActor).Post("/web-panels", h.CreateWorkspaceWebPanel)
+					r.With(handler.RequireHumanActor).Patch("/web-panels/{panelId}", h.UpdateWorkspaceWebPanel)
+					r.With(handler.RequireHumanActor).Delete("/web-panels/{panelId}", h.DeleteWorkspaceWebPanel)
 					r.Post("/leave", h.LeaveWorkspace)
 					r.Get("/invitations", h.ListWorkspaceInvitations)
 					// Listing GitHub installations is member-visible so the
@@ -2035,6 +2039,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Use(middleware.RequireWorkspaceMember(queries))
 
 			// Assignee frequency
+			r.Post("/api/agent/issue-web-panels", h.AddCurrentIssueWebPanel)
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 
 			// Local search index sync for Web/Desktop (MUL-7754). Human clients
@@ -2068,6 +2073,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Post("/batch-delete", h.BatchDeleteIssues)
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetIssue)
+					r.With(handler.RequireHumanActor).Get("/web-panels", h.ListIssueWebPanels)
+					r.With(handler.RequireHumanActor).Post("/web-panels", h.CreateIssueWebPanel)
+					r.With(handler.RequireHumanActor).Patch("/web-panels/{panelId}", h.UpdateIssueWebPanel)
+					r.With(handler.RequireHumanActor).Delete("/web-panels/{panelId}", h.DeleteIssueWebPanel)
 					r.Get("/infoflow-groups", h.GetIssueInfoFlowGroups)
 					r.With(handler.RequireHumanActor).Get("/infoflow-group-binding", h.GetIssueInfoFlowGroupBinding)
 					r.With(handler.RequireHumanActor).Post("/infoflow-group-binding", h.BindIssueInfoFlowGroup)

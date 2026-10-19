@@ -153,7 +153,7 @@ export class Bridge {
   async reply(conversation, user, content, mode = "chat", strict = false, metadata = {}) {
     try {
       const url = metadata.omitLink ? null : replyUrl(this.config.multica, metadata);
-      await deliverReply(this.sender, conversation, formatReply(content, { mode, identifier: metadata.binding?.identifier, url }),
+      await deliverReply(this.sender, conversation, formatReply(content, { mode, identifier: metadata.binding?.identifier, title: metadata.binding?.title, url }),
         metadata.notifyUsers ? notifyUsers(conversation, user, metadata.notifyUsers) : [], notificationText(url, metadata.binding?.identifier));
     } catch (error) {
       this.logger.error(`sending to ${conversation.kind}:${conversation.id} failed: ${error.message}`);

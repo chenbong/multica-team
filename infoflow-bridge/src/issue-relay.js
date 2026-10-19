@@ -618,7 +618,7 @@ export class IssueRelay {
   async sendNotice(conversation, result) {
     if (result.silent || typeof result.notice !== "string" || !result.notice) return;
     if (this.stopped) throw new Error("issue relay stopped before notice delivery");
-    const options = { mode: noticeReplyMode(result), identifier: result.binding?.identifier };
+    const options = { mode: noticeReplyMode(result), identifier: result.binding?.identifier, title: result.binding?.title };
     const url = replyUrl(this.config.multica, { binding: result.binding, commentId: result.comment_id, sessionId: result.session_id });
     if (["help", "status", "task_choices"].includes(result.notice_kind)) {
       await this.send(conversation, formatCommandNotice(this.config.multica, result), {});
@@ -752,8 +752,8 @@ export class IssueRelay {
             route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, route.pin);
           }
           const content = legacy
-            ? withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], binding), "issue", binding.identifier)
-            : formatReply(userLabel + parts[index], { mode: "issue", identifier: binding.identifier, label: route?.pin.label || "",
+            ? withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], binding), "issue", binding.identifier, binding.title)
+            : formatReply(userLabel + parts[index], { mode: "issue", identifier: binding.identifier, title: binding.title, label: route?.pin.label || "",
               url: replyUrl(this.config.multica, { binding, commentId: item.comment_id }) });
           const receipt = await (route?.send || this.send)(item.conversation, content, {});
           // Private sendToUser returns msgkey, whereas the group send API uses

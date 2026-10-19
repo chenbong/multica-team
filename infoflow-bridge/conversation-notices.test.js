@@ -175,6 +175,36 @@ test("malformed ACK retains successful send and is retried without duplication",
   assert.equal(relay.sentNotices[f.notice.id].acked, true);
 });
 
+test("lifecycle title changes cannot replay a sent notice or prevent its ACK", async t => {
+  const f = fixture(t), first = f.make();
+  f.notice.title = "新的任务名称";
+  f.state.failAck = true;
+  await first.pollConversationNotices();
+  assert.equal(f.state.sent.length, 1);
+  assert.ok(f.state.sent[0].content.startsWith("**[任务模式] TEST-1:新的任务名称 已绑定本对话**"));
+  first.stop();
+  f.notice.title = "任务已改名";
+  f.state.failAck = false;
+  const restored = f.make();
+  await restored.pollConversationNotices();
+  assert.equal(f.state.sent.length, 1);
+  assert.equal(restored.sentNotices[f.notice.id].acked, true);
+});
+
+test("pre-title lifecycle checkpoints finish only ACK after the upgrade", async t => {
+  const f = fixture(t), first = f.make();
+  f.state.failAck = true;
+  await first.pollConversationNotices();
+  delete first.sentNotices[f.notice.id].content;
+  first.saveNotices(); first.stop();
+  f.notice.title = "上线后才提供的任务名";
+  f.state.failAck = false;
+  const restored = f.make();
+  await restored.pollConversationNotices();
+  assert.equal(f.state.sent.length, 1);
+  assert.equal(restored.sentNotices[f.notice.id].acked, true);
+});
+
 test("send checkpoint persistence failure cannot ACK or duplicate the in-memory successful send", async t => {
   const f = fixture(t), relay = f.make(), save = relay.saveNotices.bind(relay);
   relay.saveNotices = () => {

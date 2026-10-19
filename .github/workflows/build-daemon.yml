@@ -56,6 +56,17 @@ jobs:
             ./cmd/server ./cmd/multica ./internal/cli ./internal/daemon/... ./internal/handler \
             ./internal/service ./pkg/agent ./pkg/db/generated
 
+      - name: Test safe Linux daemon updates with isolated release and process fixtures
+        working-directory: multica/server
+        env:
+          MULTICA_RUN_REAL_AGENT_SMOKE: "0"
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          export GOFLAGS="-overlay=$workspace/overlays/go-overlay.json -mod=readonly"
+          go test -race ./internal/cli ./internal/daemon ./cmd/multica \
+            -run 'Test(DaemonUpdate|TeamMesh|UpdateStartup|GuardedUpdate|TryAutoUpdate|AutoUpdate|TrySelfReload|IsReleaseVersion|IsNewerVersion|Fork)' -count=1
+
       - name: Test ducc and ducx preparation with fixture CLIs
         working-directory: multica/server
         env:
@@ -141,8 +152,8 @@ jobs:
             base_version="$upstream_commit"
           fi
           # Preserve the fork's release naming and reject a plain upstream tag.
-          # Upstream auto-update treats x.y.z as eligible for replacement;
-          # overlay suffixes keep that automatic path disabled.
+          # Only numeric overlay release tags are eligible for automatic
+          # updates. Branch artifacts use an explicit development marker.
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-overlay\.[0-9]+$ ]]; then
               echo "daemon release tags must use v<upstream-version>-overlay.<number>" >&2
@@ -154,7 +165,7 @@ jobs:
               exit 1
             fi
           else
-            version="${base_version}-overlay.${parent_rev}"
+            version="${base_version}-overlay.dev.${parent_rev}"
           fi
           out="$workspace/dist/multica-$GOOS-$GOARCH$suffix"
           mkdir -p "$workspace/dist"

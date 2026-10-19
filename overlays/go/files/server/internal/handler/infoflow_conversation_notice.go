@@ -18,6 +18,7 @@ type infoFlowConversationNotice struct {
 	Kind                       string               `json:"kind"`
 	IssueID                    string               `json:"issue_id"`
 	Identifier                 string               `json:"identifier"`
+	Title                      string               `json:"title,omitempty"`
 	WorkspaceSlug              string               `json:"workspace_slug"`
 	RobotID                    string               `json:"robot_id"`
 	AgentID                    string               `json:"agent_id"`
@@ -150,6 +151,12 @@ func (h *Handler) InfoFlowConversationNotices(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if allowed {
+			// Fetch presentation data only after the destination's authorization
+			// check. Titles are current display metadata, never routing keys.
+			if err := tx.QueryRow(r.Context(), `SELECT title FROM issue WHERE id=$1 AND workspace_id=$2`, n.IssueID, req.WorkspaceID).Scan(&n.Title); err != nil {
+				infoFlowError(w, 500, "notice title")
+				return
+			}
 			out = append(out, n)
 		} else {
 			// Expired identity or a superseded binding must not starve later
