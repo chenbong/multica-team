@@ -18,6 +18,7 @@ import (
 )
 
 func TestUpdateStartupCommitReleasesTaskBarrier(t *testing.T) {
+	standaloneUpdateFixture(t)
 	directory := t.TempDir()
 	executable := filepath.Join(directory, "multica")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -68,6 +69,7 @@ func TestUpdateStartupCommitReleasesTaskBarrier(t *testing.T) {
 }
 
 func TestTeamMeshPeriodicPollingWaitsForIdle(t *testing.T) {
+	standaloneUpdateFixture(t)
 	executable := filepath.Join(t.TempDir(), "multica")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -101,5 +103,13 @@ func TestTeamMeshPeriodicPollingWaitsForIdle(t *testing.T) {
 	}
 	if checks.Load() < 2 {
 		t.Fatal("idle daemon did not poll periodically")
+	}
+}
+
+func standaloneUpdateFixture(t *testing.T) {
+	t.Helper()
+	// Host service-manager metadata must not turn this fixture into a service.
+	for _, key := range []string{"INVOCATION_ID", "JOURNAL_STREAM", "SUPERVISOR_ENABLED", "MULTICA_LAUNCHED_BY"} {
+		t.Setenv(key, "")
 	}
 }

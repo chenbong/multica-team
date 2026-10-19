@@ -20,6 +20,10 @@ import (
 
 func updateTestLease(t *testing.T) (*DaemonUpdateLease, []byte) {
 	t.Helper()
+	// Model an ordinary standalone install, not the test runner's launcher.
+	for _, key := range []string{"INVOCATION_ID", "JOURNAL_STREAM", "SUPERVISOR_ENABLED", "MULTICA_LAUNCHED_BY"} {
+		t.Setenv(key, "")
+	}
 	executable := filepath.Join(t.TempDir(), "multica")
 	old := []byte("#!/bin/sh\nexit 0\n")
 	if err := os.WriteFile(executable, old, 0o750); err != nil {
@@ -160,6 +164,7 @@ func TestDaemonUpdateSharedInstallationAndLaunchModes(t *testing.T) {
 		env map[string]string
 	}{
 		{1, nil}, {42, map[string]string{"INVOCATION_ID": "service"}},
+		{42, map[string]string{"JOURNAL_STREAM": "fixture"}},
 		{42, map[string]string{"SUPERVISOR_ENABLED": "1"}}, {42, map[string]string{"MULTICA_LAUNCHED_BY": "desktop"}},
 	} {
 		if daemonUpdateLaunchModeError(test.pid, func(k string) string { return test.env[k] }) == nil {

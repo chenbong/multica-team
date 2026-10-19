@@ -99,6 +99,11 @@ func TestDaemonUpdateChildFixture(t *testing.T) {
 }
 
 func TestDaemonUpdateGuardedStartup(t *testing.T) {
+	// Child installation fixtures inherit a standalone environment even when
+	// the host test runner itself is launched by systemd or a supervisor.
+	for _, key := range []string{"INVOCATION_ID", "JOURNAL_STREAM", "SUPERVISOR_ENABLED", "MULTICA_LAUNCHED_BY"} {
+		t.Setenv(key, "")
+	}
 	oldTimeout, oldWindow, oldInterval := updateStartupTimeout, updateStabilityWindow, updateHealthInterval
 	updateStartupTimeout, updateStabilityWindow, updateHealthInterval = 3*time.Second, 200*time.Millisecond, 20*time.Millisecond
 	t.Cleanup(func() {
