@@ -900,6 +900,8 @@ CHANGES.setdefault("packages/views/issues/components/issue-detail.tsx", []).appe
 runpy.run_path(str(HERE / "chat-access-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "resource-web-panels-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "math-rendering-web-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "issue-jump-to-latest-web-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "onetool-skill-web-patch.py"))["extend"](CHANGES)
 
 
 def apply_patches():

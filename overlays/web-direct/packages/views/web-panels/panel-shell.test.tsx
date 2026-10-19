@@ -279,11 +279,53 @@ describe("resource-bound web panel dock", () => {
     renderWithI18n(app(client(), context, false), { locale: "zh-Hans" });
     fireEvent.click(await screen.findByRole("button", { name: "添加面板" }));
     fireEvent.change(screen.getByLabelText("名称"), { target: { value: "新面板" } });
-    fireEvent.change(screen.getByLabelText("页面链接"), { target: { value: "https://new.example.test/#/route" } });
+    fireEvent.change(screen.getByLabelText("链接"), { target: { value: "https://new.example.test/#/route" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("无法保存面板");
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByLabelText("页面链接")).toHaveValue("https://new.example.test/#/route");
+    expect(screen.getByLabelText("链接")).toHaveValue("https://new.example.test/#/route");
+  });
+  it("puts the required URL first and allows an empty page name in both scopes", async () => {
+    for (const scope of ["workspace", "issue"] as const) {
+      api.createResourceWebPanel.mockResolvedValue(first);
+      const view = renderWithI18n(app(client(), context, scope === "issue"), { locale: "zh-Hans" });
+      await waitFor(() => expect(screen.getAllByRole("button", { name: "添加面板" })).toHaveLength(scope === "issue" ? 2 : 1));
+      const buttons = screen.getAllByRole("button", { name: "添加面板" });
+      fireEvent.click(buttons[scope === "issue" ? 1 : 0]!);
+      const url = screen.getByLabelText("链接");
+      const name = screen.getByLabelText("名称");
+      expect(url.compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(url).toBeRequired();
+      expect(name).not.toBeRequired();
+      expect(name).toHaveAttribute("placeholder", "可选，留空则使用链接");
+      expect(name).toHaveValue("");
+      const href = "https://example.test/" + "x".repeat(180) + "?q=one#view";
+      fireEvent.change(url, { target: { value: href } });
+      fireEvent.click(screen.getByRole("button", { name: "保存" }));
+      await waitFor(() => expect(api.createResourceWebPanel).toHaveBeenLastCalledWith({ scope, resourceId: scope === "issue" ? ids.issue : ids.workspace }, { name: "", url: href }, "acme"));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      view.unmount();
+    }
+  });
+  it("keeps URL-derived names optional on edit and preserves custom names", async () => {
+    const href = "https://example.test/" + "x".repeat(180) + "?q=one#view";
+    api.listResourceWebPanels.mockResolvedValue({ panels: [{ ...first, name: href, url: href }], canAdd: true, limit: 50 });
+    api.updateResourceWebPanel.mockResolvedValue(first);
+    renderWithI18n(app(client(), context, false), { locale: "zh-Hans" });
+    fireEvent.click(await screen.findByRole("button", { name: `修改面板 ${href}` }));
+    expect(screen.getByLabelText("名称")).toHaveValue("");
+    fireEvent.change(screen.getByLabelText("链接"), { target: { value: href + "-new" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(api.updateResourceWebPanel).toHaveBeenCalledWith(resource, first.id, { name: "", url: href + "-new" }, "acme"));
+  });
+  it("rejects oversized custom page names without discarding input", async () => {
+    renderWithI18n(app(client(), context, false), { locale: "zh-Hans" });
+    fireEvent.click(await screen.findByRole("button", { name: "添加面板" }));
+    fireEvent.change(screen.getByLabelText("链接"), { target: { value: "https://example.test/" } });
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "字".repeat(121) } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("自定义页面名称不能超过 120 个字符。");
+    expect(api.createResourceWebPanel).not.toHaveBeenCalled();
   });
   it("removes cached frames when a successful refetch removes the shared panel", async () => {
     const queryClient = client();

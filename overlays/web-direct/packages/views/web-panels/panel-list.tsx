@@ -93,15 +93,15 @@ export function ResourceWebPanelList({ resource }: { resource: WebPanelResource 
 function WebPanelEditor({ panel, submit, onClose }: { panel: ResourceWebPanel | null; submit: (input: WebPanelInput) => Promise<void>; onClose: () => void }) {
   const { t } = useT("layout");
   const id = useId();
-  const [name, setName] = useState(panel?.name ?? "");
+  const [name, setName] = useState(panel?.name === panel?.url ? "" : panel?.name ?? "");
   const [url, setUrl] = useState(panel?.url ?? "");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!name.trim() || [...name.trim()].length > 120) { setError(t(($) => $.sidebar.web_panels.invalid_name)); return; }
     const href = webPanelUrl(url);
     if (!href) { setError(t(($) => $.sidebar.web_panels.invalid_url)); return; }
+    if (name.trim() !== href && [...name.trim()].length > 120) { setError(t(($) => $.sidebar.web_panels.invalid_name)); return; }
     setPending(true);
     setError(null);
     try { await submit({ name: name.trim(), url: href }); onClose(); }
@@ -113,8 +113,8 @@ function WebPanelEditor({ panel, submit, onClose }: { panel: ResourceWebPanel | 
       <DialogContent>
         <form onSubmit={save} className="flex flex-col gap-4">
           <DialogHeader><DialogTitle>{panel ? t(($) => $.sidebar.web_panels.edit) : t(($) => $.sidebar.web_panels.add)}</DialogTitle><DialogDescription>{t(($) => $.sidebar.web_panels.permission_hint)}</DialogDescription></DialogHeader>
-          <div className="flex flex-col gap-1.5"><Label htmlFor={`${id}-name`}>{t(($) => $.sidebar.web_panels.name)}</Label><Input id={`${id}-name`} autoFocus required value={name} onChange={(event) => setName(event.target.value)} disabled={pending} /></div>
-          <div className="flex flex-col gap-1.5"><Label htmlFor={`${id}-url`}>{t(($) => $.sidebar.web_panels.url)}</Label><Input id={`${id}-url`} type="url" inputMode="url" autoComplete="off" spellCheck={false} required value={url} onChange={(event) => setUrl(event.target.value)} disabled={pending} /></div>
+          <div className="flex flex-col gap-1.5"><Label htmlFor={`${id}-url`}>{t(($) => $.sidebar.web_panels.url)}</Label><Input id={`${id}-url`} autoFocus type="url" inputMode="url" autoComplete="off" spellCheck={false} required value={url} onChange={(event) => setUrl(event.target.value)} disabled={pending} /></div>
+          <div className="flex flex-col gap-1.5"><Label htmlFor={`${id}-name`}>{t(($) => $.sidebar.web_panels.name)}</Label><Input id={`${id}-name`} placeholder={t(($) => $.sidebar.web_panels.name_placeholder)} value={name} onChange={(event) => setName(event.target.value)} disabled={pending} /></div>
           {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
           <DialogFooter><Button type="button" variant="outline" disabled={pending} onClick={onClose}>{t(($) => $.sidebar.web_panels.cancel)}</Button><Button type="submit" disabled={pending} aria-busy={pending}>{t(($) => $.sidebar.web_panels.save)}</Button></DialogFooter>
         </form>

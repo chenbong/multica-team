@@ -48,7 +48,7 @@ func (h *Handler) AddCurrentIssueWebPanel(w http.ResponseWriter, r *http.Request
 	}
 	name, href, valid := validResourceWebPanel(body.Name, body.URL)
 	if !valid {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_web_panel", "Use a name of up to 120 characters and an HTTP(S) URL without embedded credentials")
+		writeErrorCode(w, http.StatusBadRequest, "invalid_web_panel", "Use an HTTP(S) URL without embedded credentials; a custom page name is optional and limited to 120 characters")
 		return
 	}
 	// This preliminary read only locates the resource. The run identity and
