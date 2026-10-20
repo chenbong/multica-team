@@ -155,6 +155,7 @@ class FrontendPatches(unittest.TestCase):
         self.apply()
         renderer = (self.target / "packages/views/rich-content/rich-content.tsx").read_text()
         self.assertIn('import { normalizeLatexDelimiters } from "./latex-delimiters";', renderer)
+        self.assertIn('import "katex/contrib/mhchem";', renderer)
         self.assertIn("preprocessMarkdown(normalizeLatexDelimiters(content),", renderer)
         self.assertIn("singleDollarTextMath: false", renderer)
         self.assertIn("rehypeKatex", renderer)

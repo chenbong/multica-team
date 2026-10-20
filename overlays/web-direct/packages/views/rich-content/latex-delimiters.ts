@@ -59,14 +59,14 @@ function displayMath(source: string, start: number, close: number, body: string)
 }
 
 /**
- * Accept AI-authored \(...\) and \[...\] before link/highlight preprocessing.
+ * Accept $...$, AI-authored \(...\) and \[...\] before link/highlight preprocessing.
  * Convert only complete pairs in prose. Storage and editable source stay raw;
- * existing dollar math, code, links and HTML literals are never rewritten.
+ * existing double-dollar math, code, links and HTML literals are never rewritten.
  */
 export function normalizeLatexDelimiters(source: string): string {
-  if (!/\\[[(]/.test(source)) return source;
+  if (!/\\[[(]|\$/.test(source)) return source;
   const ranges = literalRanges(source);
-  const tokens = /\\[[(]|\${2,}/g;
+  const tokens = /\\[[(]|\$+/g;
   const output: string[] = [];
   let copied = 0;
   let rangeIndex = 0;
@@ -77,22 +77,28 @@ export function normalizeLatexDelimiters(source: string): string {
     const range = ranges[rangeIndex];
     if (range && range.start <= start) { tokens.lastIndex = range.end; continue; }
     if (isEscaped(source, start)) continue;
-    if (token[0].startsWith("$")) {
+    if (token[0].startsWith("$") && token[0].length > 1) {
       let closing = source.indexOf(token[0], tokens.lastIndex);
       while (closing >= 0 && isEscaped(source, closing)) closing = source.indexOf(token[0], closing + token[0].length);
       tokens.lastIndex = closing < 0 ? source.length : closing + token[0].length;
       continue;
     }
-    const closingToken = token[0] === "\\[" ? "\\]" : "\\)";
+    const singleDollar = token[0] === "$";
+    if (singleDollar && /\s/.test(source[start + 1] ?? "")) continue;
+    const closingToken = singleDollar ? "$" : token[0] === "\\[" ? "\\]" : "\\)";
     let close = source.indexOf(closingToken, tokens.lastIndex);
-    while (close >= 0 && isEscaped(source, close)) close = source.indexOf(closingToken, close + 2);
-    if (close < 0 || (range && range.start < close + 2)) continue;
-    const body = source.slice(start + 2, close);
+    while (close >= 0 && isEscaped(source, close)) close = source.indexOf(closingToken, close + closingToken.length);
+    if (close < 0 || (range && range.start < close + closingToken.length)) continue;
+    const body = source.slice(start + token[0].length, close);
+    // Conservative inline grammar: no multiline/edge whitespace, no closing
+    // dollar followed by a digit (e.g. "$100 ... $200" or "$100~$120").
+    // Literal currency can always be made unambiguous with an escaped dollar.
+    if (singleDollar && (/\r|\n/.test(body) || /\s$/.test(body) || source[close + 1] === "$" || /\d/.test(source[close + 1] ?? ""))) continue;
     if (!body.trim() || (closingToken === "\\)" && /\r?\n[ \t]*\r?\n/.test(body))) continue;
     const prefix = continuationPrefix(source.slice(source.lastIndexOf("\n", start - 1) + 1, start));
     const replacement = closingToken === "\\]" ? displayMath(source, start, close, body) : `$$${expressionBody(body, prefix)}$$`;
     output.push(source.slice(copied, start), replacement);
-    copied = close + 2;
+    copied = close + closingToken.length;
     tokens.lastIndex = copied;
   }
   return output.length ? output.join("") + source.slice(copied) : source;

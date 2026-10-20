@@ -111,7 +111,7 @@ jobs:
           pnpm --filter @multica/views exec vitest run web-panels layout/dashboard-layout.test.tsx
           pnpm --filter @multica/views exec vitest run issues/components/issue-jump-to-latest.test.tsx issues/components/issue-detail.test.tsx issues/hooks/use-issue-detail-scroll-restore.test.tsx
           pnpm --filter @multica/views exec vitest run skills/components/create-skill-onetool.test.tsx skills/lib/onetool.test.ts skills/lib/origin.test.ts skills/components/create-skill-dialog.test.tsx skills/components/refresh-skill-dialog.test.tsx skills/components/skills-page.source-link.test.tsx
-          pnpm --filter @multica/views exec vitest run rich-content/latex-delimiters.test.ts rich-content/latex-delimiters.test.tsx editor/readonly-content-math.test.tsx auth/login-page.test.tsx
+          pnpm --filter @multica/views exec vitest run rich-content/latex-delimiters.test.ts rich-content/latex-delimiters.test.tsx rich-content/latex-samples.test.tsx editor/readonly-content-math.test.tsx auth/login-page.test.tsx
           pnpm --filter @multica/core exec tsc --noEmit
           pnpm --filter @multica/views exec tsc --noEmit
           git -C "$GITHUB_WORKSPACE/multica" diff --exit-code

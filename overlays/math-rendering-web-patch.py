@@ -6,7 +6,8 @@ def extend(changes):
         (
             'import { highlightToHtml } from "../editor/utils/highlight-markdown";\n',
             'import { highlightToHtml } from "../editor/utils/highlight-markdown";\n'
-            'import { normalizeLatexDelimiters } from "./latex-delimiters";\n',
+            'import { normalizeLatexDelimiters } from "./latex-delimiters";\n'
+            'import "katex/contrib/mhchem";\n',
         ),
         (
             'preprocessMarkdown(content, { cdnDomain, autolinkIssueIdentifiers: true })',

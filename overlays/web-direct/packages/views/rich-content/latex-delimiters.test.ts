@@ -8,6 +8,23 @@ describe("read-only LaTeX delimiter normalization", () => {
     expect(normalizeLatexDelimiters("\\[\n\\frac{a}{b}\n\\]")).toBe("$$\n\\frac{a}{b}\n$$");
     expect(normalizeLatexDelimiters(String.raw`\[x^2\]`)).toBe("$$\nx^2\n$$");
   });
+  it.each([
+    [String.raw`质能 $E = mc^2$`, String.raw`质能 $$E = mc^2$$`],
+    [String.raw`设$x>0$，则$\sqrt{x}$有意义`, String.raw`设$$x>0$$，则$$\sqrt{x}$$有意义`],
+    [String.raw`$a_1 + a_2$ 和 $a * b * c$`, String.raw`$$a_1 + a_2$$ 和 $$a * b * c$$`],
+    [String.raw`$\text{ICLR-3 https://example.test}$`, String.raw`$$\text{ICLR-3 https://example.test}$$`],
+    [String.raw`$\text{\(literal\)}$`, String.raw`$$\text{\(literal\)}$$`],
+  ])("normalizes a complete single-dollar expression: %s", (source, expected) => {
+    expect(normalizeLatexDelimiters(source)).toBe(expected);
+  });
+  it.each([
+    String.raw`售价 \$100，另一件 \$200`, "Revenue $120/mo gross (~$85 net)", "$100~$120",
+    "$100 and $200", "$ x$", "$x $", "$x\ny$", "$unfinished", "$x\n\n$y",
+    "`$x$`", "```latex\n$x$\n```", "    $x$", String.raw`<code>$x$</code>`,
+    String.raw`[$x$](https://example.test/$y$)`, String.raw`<span title="$x$">literal</span>`,
+  ])("preserves currency, incomplete input and literal single dollars: %s", (source) => {
+    expect(normalizeLatexDelimiters(source)).toBe(source);
+  });
   it("preserves quote and list continuation prefixes", () => {
     expect(normalizeLatexDelimiters("> \\[\n> x^2\n> \\]")).toBe("> $$\n> x^2\n> $$");
     expect(normalizeLatexDelimiters(String.raw`- \[x^2\]`)).toBe("- $$\n  x^2\n  $$");
