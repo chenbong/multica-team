@@ -40,33 +40,26 @@ test("malformed internal links and unrelated protocols are not rewritten", () =>
     assert.equal(infoflowMarkdown(source), source);
 });
 
-for (const exact of [false, true]) test(`group ${exact ? "exact" : "SDK"} transport converts only Markdown and keeps native AT separate`, async () => {
-  const sent = [], progress = {};
-  let failAt = true;
-  const accept = wire => {
-    sent.push(wire);
-    if (wire.header.msgtype === "TEXT" && failAt) throw Error("AT failed");
-    return { messageid: "1234567890123456789" };
-  };
-  const client = {
-    im: { message: { sendToGroupWithOptions: async wire => accept({ header: wire, body: wire.body }) } },
-    httpClient: { post: async (_path, wire) => ({ errcode: 0, data: accept(JSON.parse(wire).message) }) },
-  };
-  const source = "**结果**\n\n- [@小明](mention://member/id) 请查阅 [文档](https://example.test/docs)",
-    expected = "**结果**\n\n- @小明 请查阅 [文档](https://example.test/docs)",
-    users = ["alice", "bob"], notice = "已回复，请查看上一条消息。";
-  const send = (conversation, content, options) => sendRobotReply(client, conversation, content, options, exact);
-  await assert.rejects(deliverReply(send, { kind: "group", id: "42" }, source, users, notice, progress), /AT failed/);
-  assert.equal(progress.digest, createHash("sha256").update(JSON.stringify([source, users, notice])).digest("hex"));
-  assert.deepEqual(sent[0].body, [{ type: "MD", content: expected }]);
-  failAt = false;
-  const restored = JSON.parse(JSON.stringify(progress));
-  await deliverReply(send, { kind: "group", id: "42" }, source, users, notice, restored);
-  assert.equal(sent.filter(wire => wire.header.msgtype === "MD").length, 1);
-  assert.deepEqual(sent.at(-1).body, [
-    { type: "AT", atall: false, atuserids: users }, { type: "TEXT", content: notice },
-  ]);
-  assert.equal(restored.notified, true);
+for (const exact of [false, true]) test("group transport merges Markdown and native AT without retrying an accepted body: " + exact, async () => {
+ const sent=[],progress={}; let fail=true;
+ const client={httpClient:{post:async(_path,wire)=>{
+  const msg=JSON.parse(wire).message;sent.push(msg);
+  if(fail)throw Error("transport failed");
+  return {errcode:0,data:{messageid:"1234567890123456789"}};
+ }}};
+ const source="**结果**\n\n- [@小明](mention://member/id) 请查阅 [文档](https://example.test/docs)";
+ const send=(c,t,o)=>sendRobotReply(client,c,t,o,exact);
+ await assert.rejects(deliverReply(send,{kind:"group",id:"42"},source,["alice","bob"],"unused",progress),/transport failed/);
+ fail=false;
+ await deliverReply(send,{kind:"group",id:"42"},source,["alice","bob"],"unused",progress);
+ assert.deepEqual(sent[0],sent[1]);
+ assert.equal(sent[1].header.msgtype,"MD");
+ assert.deepEqual(sent[1].body[0],{type:"AT",atall:false,atuserids:["alice","bob"]});
+ assert.equal(sent[1].body[1].advanced,"1");
+ assert.doesNotMatch(sent[1].body[1].content,/mention:\/\//);
+ assert.ok(sent[1].body[1].content.includes("[文档](https://example.test/docs)"));
+ await deliverReply(send,{kind:"group",id:"42"},source,["alice","bob"],"unused",progress);
+ assert.equal(sent.length,2);
 });
 
 test("private transport converts internal links without any native AT or extra send", async () => {

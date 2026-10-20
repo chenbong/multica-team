@@ -33,6 +33,21 @@ async function open(managementURL?: string) {
 }
 
 describe("unified InfoFlow dialog", () => {
+  it("keeps the cross-conversation disclosure visible for both binding types without another confirmation", async () => {
+    const user = await open();
+    expect(screen.getByText(en.infoflow_conversations.sync_scope)).toBeVisible();
+    await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    expect(screen.getByText(en.infoflow_conversations.sync_scope)).toBeVisible();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+  it("shows an always-visible disclosure on an existing binding without requiring rebind", async () => {
+    const current = fresh();
+    current.group.binding = { bindingId: id, groupId: "123", name: "Existing group", state: "active", reason: "" };
+    state.get.mockResolvedValue(current);
+    render(view());
+    expect(await screen.findByText(en.infoflow_conversations.sync_short)).toBeVisible();
+    expect(state.post).not.toHaveBeenCalled();
+  });
   it("previews the assigned robot name before private binding", async () => {
     const current = fresh(); current.private.robot = { state: "ready", robotId: "assigned", name: "My fixture robot", robotChatId: "123" };
     state.get.mockResolvedValue(current); const user = await open();

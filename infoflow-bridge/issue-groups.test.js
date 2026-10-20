@@ -129,7 +129,7 @@ test("group user mirror uses coordinator without member delegation while agents 
   assert.match(f.state.sent[0].content, /\n\n@alice：网页用户评论/);
   assert.doesNotMatch(f.state.sent[0].content, /队长代发/);
   assert.match(f.state.sent[0].content, /#comment-comment1\)/);
-  assert.deepEqual(f.state.sent[0].options, {});
+  assert.deepEqual(f.state.sent[0].options.atUsers || [], []);
   assert.equal(f.state.sent[1].robotId, "b");
   assert.doesNotMatch(f.state.sent[1].content, /@alice|队长代发/);
 });
@@ -347,7 +347,7 @@ test("member in group sends as member; confirmed absent member uses labelled lea
       assert.equal(f.state.sent.length, 1);
       assert.equal(f.state.sent[0].robotId, present ? "b" : "a");
       assert.equal(f.state.sent[0].content.includes("【成员 B · 队长代发】"), !present);
-      assert.deepEqual(f.state.sent[0].options, {});
+      assert.deepEqual(f.state.sent[0].options.atUsers || [], []);
       assert.equal(f.state.acked.size, 1);
     });
   }
@@ -400,7 +400,7 @@ test("legacy removal of a squad member between parts pauses its remaining output
 });
 
 test("fallback label with 120 Unicode characters fits the single UTF-8 summary and precise footer", async t => {
-  const f = fixture(t); f.addDelivery(B, "性能提升🚀".repeat(500));
+  const f = fixture(t); f.addDelivery(B, "性能提升🚀".repeat(2000));
   f.state.deliveries[0].author_name = "🚀".repeat(160);
   f.state.deliveries[0].comment_id = "33333333-3333-4333-8333-333333333333";
   await f.make().issueRelay.poll();
@@ -411,7 +411,7 @@ test("fallback label with 120 Unicode characters fits the single UTF-8 summary a
     assert.match(sent.content, /完整对话链接\]\(https:\/\/team.example.invalid\/team\/issues\/TEST-1#comment-33333333-3333-4333-8333-333333333333\)\*\*$/);
     assert.ok(sent.content.includes(`【${"🚀".repeat(120)} · 队长代发】`));
     assert.match(sent.content, /回复较长/);
-    assert.ok(Buffer.byteLength(sent.content) <= 1800);
+    assert.ok(sent.content.length <= 8192);
     assert.equal(sent.content.includes("\ufffd"), false);
   }
 });
@@ -437,15 +437,15 @@ test("fresh failed summary pins the absent member's leader route across restart 
   assert.equal(f.state.sent.length, 0);
   assert.equal(f.state.acked.size, 0);
   const checkpoint = f.groups.deliveries["delivery-1"];
-  assert.equal(checkpoint.format, "summary-v1"); assert.equal(checkpoint.next, 0);
+  assert.equal(checkpoint.format, "combined-v2"); assert.equal(checkpoint.next, 0);
   assert.equal(checkpoint.route.robot_id, "a");
   f.state.members.push("202"); f.state.failPart = 0; f.restoreGroups();
   await f.make().issueRelay.poll();
   assert.equal(f.state.sent.length, 1);
   assert.equal(f.state.sent[0].robotId, "a");
   assert.match(f.state.sent[0].content, /队长代发/);
-  assert.ok(Buffer.byteLength(f.state.sent[0].content) <= 1800);
-  assert.deepEqual(f.state.sent[0].options, {});
+  assert.ok(Buffer.byteLength(f.state.sent[0].content) <= 8192);
+  assert.deepEqual(f.state.sent[0].options.atUsers || [], []);
   assert.equal(f.state.acked.size, 1);
 });
 

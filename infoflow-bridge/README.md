@@ -5,38 +5,34 @@ Nothing inside the Multica checkout is modified.
 
 ## Group reply notifications
 
-Group AI replies retain one Markdown summary and its full-conversation link,
-followed by a short native AT notification. The reminder does not repeat the
-full-conversation link, which stays in the Markdown body. Its audience consists
-of the original sender and structured human mentions in that input, normalized
-and deduplicated. Private replies are unchanged. Help, status, binding confirmations
-and receipt fallbacks do not add another AT notification.
+Group AI replies use one extended Markdown message with a native AT block.
+The visible AT row is below the body and above the full-conversation link.
+Replies have an 8192 UTF-16-unit budget. Requesters are prioritized; at most
+50 present group members are notified, with an omission notice when necessary.
+Private replies have the same budget but no AT. Failed sends retry the pinned
+message; they never fall back to a standalone TEXT notification.
+See [combined replies](../docs/combined-infoflow-replies.md).
 
-Outgoing Markdown converts internal `[@name](mention://member/id)` (and agent,
-squad or all mentions) into readable `@name` text. Ordinary links and Markdown
-formatting are retained; code examples are not rewritten. This is a transport
-presentation step only: source comments, task content, notification audiences and
-checkpoint digests remain unchanged. Real InfoFlow mentions still belong to the
-separate native AT reminder, never the Markdown body.
+## Bound task subscriptions
 
-Original structured human mentions remain readable as `@name` at their original
-positions in synced user comments and Chat instructions. Labels are escaped text,
-not invocation links or notification identities. Commands and task selection use
-the canonical input without those display labels; the selected issue is then
-pinned before adding them to comment content. Existing prepared requests are not
-rewritten, and robot mentions remain handled by the normal agent prefix.
+All active conversations bound to one task subscribe to its new comments and
+agent replies, including scheduled wakeups and replies to older instructions.
+This includes cross-conversation private/group sharing. The original human
+message is not echoed into its source conversation. Unbound Chats retain their
+existing isolation. Other tasks and workspaces never become subscriptions.
 
-Notification metadata stays separate from prompts and issue reply bodies.
-Apply migration `521_infoflow_issue_notify_users.up.sql` before enabling the
-updated API and Bridge together. Old receipts and prepared requests remain
-compatible; old in-flight delivery checkpoints do not gain new notifications.
-Each input supports up to 50 notification accounts including its sender.
-Replies fed by multiple inputs retain their complete notification union; when
-it exceeds the API limit, only the short AT reminders are batched, up to 50
-people each. Each batch has its own checkpoint and receipt correlation.
-Markdown and notification sends checkpoint independently: after an AT failure,
-retry the reminder; after an ACK failure, retry only the ACK. A transport success
-followed by a crash before its checkpoint is saved can still duplicate that send.
+Human comments carry the author's name without source-conversation labels and
+do not trigger native AT. Agent replies notify the requester and explicit
+recipients independently in each destination group. Scheduled wakeups notify
+only accounts explicitly named in the instruction snapshot, never the creator
+by default. Group membership is checked before applying the 50-person cap.
+
+Apply migration 531 with API and Bridge stopped, after backing up. Existing
+bindings start at that cutover; older missing or pending messages are not
+replayed. New/recreated bindings start at their own effective time. Unbinding
+fences queued/retrying deliveries, and every external send rechecks authority.
+Already sent comments are not edited or recalled when the web comment changes.
+See [subscription policy](../docs/infoflow-task-subscriptions.md).
 
 ## What it does today
 
@@ -108,7 +104,7 @@ Design notes worth knowing:
 提示使用事务内持久队列，失败重试会轮转；同一任务重新绑定后不重发旧解绑提示。
 网页新评论按真实用户名同步到已绑定对话，后续智能体回复同样同步。
 仅从绑定成功后的新评论开始，不补发历史内容；解绑后停止同步。
-如流输入不回显，私聊、群聊及跨任务来源不互相广播；不能证明来源的模型输出不转发。
+如流输入不回传来源对话，但会同步到该任务的其他有效绑定；智能体新回复同步到全部有效绑定。跨任务、跨工作区内容仍不得混入。
 
 平台聊天按工作区成员资格与智能体调用权限共享，旧聊天也适用。
 有权限的成员可查看和继续对话，每条新消息独立记录真实作者；无权限的成员无法通过链接、

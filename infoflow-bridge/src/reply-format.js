@@ -57,33 +57,41 @@ export function replyUrl(multica, { binding = null, commentId = null, sessionId 
 
 // Budget the complete IM message, including a pinned leader attribution. The
 // original platform content is never modified or used as routing metadata.
-export function formatReply(content, { mode = "chat", identifier = null, title = null, label = "", url = null, maxBytes = 1800 }) {
+// Application budget, not a claim about the provider's character limit.
+// Keep legacy checkpoint splitting unchanged; only new summaries use this cap.
+export const MAX_REPLY_LENGTH = 8192;
+
+export function formatReply(content, { mode = "chat", identifier = null, title = null, label = "", url = null, maxLength = MAX_REPLY_LENGTH, maxBytes } = {}) {
+  // Group API counts UTF-16 code units. Explicit byte budgets remain available
+  // for legacy callers; for-of truncation never splits a surrogate pair.
+  const limit = maxBytes ?? maxLength;
+  const measure = maxBytes == null ? text => text.length : text => Buffer.byteLength(text);
   const target = url?.replace(/[()]/g, c => c === "(" ? "%28" : "%29");
   const footer = target ? `\n\n**[完整对话链接](${target})**` : "";
   const hint = target ? "\n\n...（回复较长，全文请在下方链接查看。）" : "\n\n...（内容较长，后续已省略。）";
-  const prefix = withReplyMode(label, mode, identifier, title, maxBytes - Buffer.byteLength(hint + footer) - 4);
+  const prefix = withReplyMode(label, mode, identifier, title, limit - measure(hint + footer) - 4);
   const text = String(content);
   const closing = replyFenceSuffix(text);
-  if (Buffer.byteLength(prefix + text + closing + footer) <= maxBytes) return prefix + text + closing + footer;
+  if (measure(prefix + text + closing + footer) <= limit) return prefix + text + closing + footer;
   const suffix = hint + footer;
-  const budget = maxBytes - Buffer.byteLength(prefix + suffix);
-  if (budget < 0) throw new Error("reply metadata exceeds byte budget");
+  const budget = limit - measure(prefix + suffix);
+  if (budget < 0) throw new Error("reply metadata exceeds message budget");
   const chars = [];
-  let bytes = 0;
+  let used = 0;
   for (const char of text) {
-    const size = Buffer.byteLength(char);
-    if (bytes + size > budget) break;
-    chars.push(char); bytes += size;
+    const size = measure(char);
+    if (used + size > budget) break;
+    chars.push(char); used += size;
   }
   let summary = chars.join(""), fence = replyFenceSuffix(summary);
-  while (bytes + Buffer.byteLength(fence) > budget && chars.length) {
-    bytes -= Buffer.byteLength(chars.pop());
+  while (used + measure(fence) > budget && chars.length) {
+    used -= measure(chars.pop());
     summary = chars.join(""); fence = replyFenceSuffix(summary);
   }
   return prefix + summary + fence + suffix;
 }
 
-function replyFenceSuffix(text) {
+export function replyFenceSuffix(text) {
   let fence = "", indent = "";
   for (const [, spaces, marker, rest] of text.matchAll(/^( {0,3})(`{3,}|~{3,})([^\n]*)$/gm)) {
     if (!fence) {

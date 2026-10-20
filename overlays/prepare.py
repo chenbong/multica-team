@@ -66,6 +66,8 @@ def main() -> None:
     generated += panel_agent["generated"](UPSTREAM, FILES)
     daemon_updates = runpy.run_path(str(HERE / "daemon-auto-update.py"))
     generated += list(daemon_updates["generated"](UPSTREAM, FILES))
+    wakeup_snapshot = runpy.run_path(str(HERE / "infoflow-wakeup-snapshot.py"))
+    generated += list(wakeup_snapshot["generated"](UPSTREAM, FILES))
     builtin_env = runpy.run_path(str(HERE / "builtin-agent-env-sql.py"))
     generated = builtin_env["extend"](UPSTREAM, generated)
     web_panels = runpy.run_path(str(HERE / "resource-web-panels-sql.py"))

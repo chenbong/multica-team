@@ -53,7 +53,7 @@ func infoFlowWebRequestTable(kind string) (string, error) {
 }
 
 func infoFlowPrivateWebLock(ctx context.Context, tx pgx.Tx, issue, user pgtype.UUID) error {
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "infoflow-web-private:"+uuidToString(issue)+":"+uuidToString(user))
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "infoflow-web-private:"+uuidToString(issue))
 	return err
 }
 

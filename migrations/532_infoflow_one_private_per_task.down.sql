@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS infoflow_issue_binding_one_private_per_task;

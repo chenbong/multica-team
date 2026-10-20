@@ -22,12 +22,11 @@ export function notifyUsers(conversation, sender = null, users = []) {
 
 export function mentionedReplyUsers(conversation, sender, mentions = []) {
   const users = notifyUsers(conversation, sender, mentions.filter(item => item?.kind === "user").map(item => item.userId));
-  if (users.length > MAX_NOTIFY_USERS) throw new Error("too many notification users in one input");
   return users;
 }
 
-// Native TEXT + AT renders real mentions; Markdown body blocks hide them in
-// current InfoFlow clients. Keep readable text and bare clickable URLs.
+// Legacy conversion remains available for stored notices and old consumers.
+// New automatic replies use combined Markdown and AT, never this TEXT format.
 export function plainGroupReply(content) {
   return String(content)
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, "$1：$2")
@@ -52,32 +51,28 @@ export function nativeAtBody(content, recipients) {
   ];
 }
 
-// Keep the Markdown body and native AT reminder as separate, durable stages.
-// In particular, a failed AT send must not replay an already accepted body.
+// Already accepted legacy bodies are terminal: do not replay them or send a
+// delayed standalone AT. New sends persist one combined-message checkpoint.
 export async function deliverReply(send, conversation, content, recipients, notice, progress = {}, save = () => {}, legacyNotice = null) {
+  if (progress.bodySent) {
+    if (!progress.notified) { progress.notified = true; save(); }
+    return;
+  }
   const users = notifyUsers(conversation, null, recipients);
-  if (!progress.noticeText && legacyNotice && progress.bodySent && progress.digest ===
-      createHash("sha256").update(JSON.stringify([content, users, legacyNotice])).digest("hex")) {
-    progress.noticeText = legacyNotice;
+  const digest = createHash("sha256").update(JSON.stringify([content, users])).digest("hex");
+  if (progress.format === "combined-v2" && progress.digest !== digest) throw new Error("reply changed during retry");
+  if (progress.format !== "combined-v2") {
+    progress.format = "combined-v2";
+    progress.digest = digest;
+    progress.transport = {};
+    save();
   }
-  const pinnedNotice = progress.noticeText || notice;
-  const digest = createHash("sha256").update(JSON.stringify([content, users, pinnedNotice])).digest("hex");
-  if (progress.digest && progress.digest !== digest) throw new Error("reply changed during notification retry");
-  if (!progress.digest) { progress.digest = digest; progress.noticeText = pinnedNotice; save(); }
-  if (!progress.bodySent) {
-    await send(conversation, content, {});
-    progress.bodySent = true; save();
-  }
-  if (users.length && !progress.notified) {
-    const start = progress.notificationNext || 0;
-    if (!Number.isInteger(start) || start < 0 || start > users.length) throw new Error("invalid notification progress");
-    for (let next = start; next < users.length; next += MAX_NOTIFY_USERS) {
-      const receipt = await send(conversation, pinnedNotice, { atUsers: users.slice(next, next + MAX_NOTIFY_USERS), notificationOnly: true });
-      progress.notificationNext = Math.min(next + MAX_NOTIFY_USERS, users.length);
-      const id = messageIdString(receipt?.messageid ?? receipt?.messageId);
-      if (id) progress.notificationMessageIds = [...(progress.notificationMessageIds || []), id];
-      save();
-    }
-    progress.notified = true; save();
-  }
+  const options = conversation.kind === "group"
+    ? { atUsers: users, deliveryState: progress.transport, saveDelivery: save } : {};
+  const receipt = await send(conversation, content, options);
+  const id = messageIdString(receipt?.messageid ?? receipt?.messageId ?? receipt?.msgkey);
+  if (id) progress.messageId = id;
+  progress.bodySent = true;
+  progress.notified = true;
+  save();
 }

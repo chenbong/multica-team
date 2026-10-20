@@ -141,6 +141,8 @@ def extend(changes):
             '  "infoflow_groups": ' + json.dumps(copy, ensure_ascii=False) + ',\n  "inline_run":')
     conversation_labels = {
         "en": {"bind": "Bind InfoFlow conversation", "description": "Group and your private conversation can both be linked to this task.",
+            "sync_scope": "Each task supports one group and one private chat. New task comments and replies are shared across all bound conversations, including private chats and groups. Original messages are not echoed to their source. Historical messages are not replayed.",
+            "sync_short": "New messages are shared across bound private chats and groups.",
             "kind": "Conversation type", "group": "Group", "private": "My private conversation", "my_private": "Me and the assigned agent's robot",
             "private_routing": "A private conversation can link to several tasks. Reply to a task message or include its number when the target is ambiguous.",
             "private_restriction": "Only tasks assigned to a single agent can bind a private conversation.",
@@ -157,6 +159,8 @@ def extend(changes):
             "cancel_request": "Cancel request", "cancel_group": "Cancel group request", "cancel_private": "Cancel private request",
             "cancel_group_note": "Cancellation stops binding confirmation, but does not withdraw group invitations already sent."},
         "zh-Hans": {"bind": "绑定如流对话", "description": "任务可同时关联群聊和你自己的私聊。",
+            "sync_scope": "每个任务最多绑定 1 个群聊和 1 个私聊。此任务的新评论和回复会同步到所有绑定对话，包括私聊和群聊。原始消息不回传来源对话，不补发历史消息。",
+            "sync_short": "新消息会同步到全部绑定的私聊和群聊。",
             "kind": "对话类型", "group": "群聊", "private": "我的私聊", "my_private": "我与任务负责智能体的机器人",
             "private_routing": "同一私聊可关联多个任务。出现多个候选时，请引用任务消息或注明任务编号。",
             "private_restriction": "只有单个智能体负责的任务才能绑定私聊。",

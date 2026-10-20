@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS infoflow_issue_binding_one_private_per_task ON infoflow_issue_binding (workspace_id, issue_id) WHERE conversation_kind = 'private' AND issue_id IS NOT NULL;

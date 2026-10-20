@@ -87,8 +87,15 @@ for (const kind of ["private", "group"]) for (const authorType of ["agent", "use
   });
 }
 
-test("renaming after Markdown was accepted retries only the existing AT reminder", async t => {
+test("renaming after an accepted combined reply never emits a separate reminder", async t => {
   const f = fixture(t, "group", "issue"), relay = f.bridge.issueRelay;
+  const request = relay.request;
+  let acked = false;
+  relay.request = async (path, body) => {
+    if (path.endsWith("/ack")) acked = true;
+    if (path === "issue-deliveries" && acked) return { deliveries: [] };
+    return request(path, body);
+  };
   f.delivery.binding = { ...binding, title: "旧任务名" };
   const send = relay.send;
   let failAt = true;
@@ -102,7 +109,7 @@ test("renaming after Markdown was accepted retries only the existing AT reminder
   failAt = false;
   await relay.poll();
   assert.equal(f.sent.filter(item => !item.options.notificationOnly).length, 1);
-  assert.equal(f.sent.filter(item => item.options.notificationOnly).length, 1);
+  assert.equal(f.sent.filter(item => item.options.notificationOnly).length, 0);
   assert.deepEqual(relay.sentParts, {});
 });
 
@@ -188,7 +195,7 @@ for (const kind of ["private", "group"]) {
   for (const mode of ["chat", "issue"]) {
     test(`${kind} x ${mode}: long fresh reply sends once with a precise link and full platform body`, async t => {
       const f = fixture(t, kind, mode);
-      const content = "中文🙂🚀𝌆原文\n".repeat(700);
+      const content = "中文🙂🚀𝌆原文\n".repeat(1200);
       const input = "请分析：" + content + "尾部";
       f.bridge.config.multica.issueWebUrl = "https://entry.example.test";
       f.delivery.content = content;
@@ -200,15 +207,15 @@ for (const kind of ["private", "group"]) {
       const before = f.sent.length;
       if (mode === "chat") await f.bridge.chat.poll();
       else await f.bridge.issueRelay.poll();
-      assert.equal(f.sent.length - before, kind === "group" ? 2 : 1);
+      assert.equal(f.sent.length - before, 1);
       const reply = f.sent.slice(before).find(message => !message.options.notificationOnly);
       assert.ok(reply.content.startsWith(withReplyMode("中文🙂🚀𝌆原文\n", mode, binding.identifier)));
       assert.match(reply.content, /回复较长，全文请在下方链接查看/);
       const target = mode === "chat" ? "team/chat?session=chat" : "team/issues/TASK-1#comment-c1";
       assert.ok(reply.content.endsWith(`**[完整对话链接](https://entry.example.test/${target})**`));
-      assert.ok(Buffer.byteLength(reply.content) <= 1800);
+      assert.ok(reply.content.length <= 8192);
       assert.equal(Buffer.from(reply.content).toString("utf8"), reply.content);
-      assert.deepEqual(reply.options, {});
+      assert.deepEqual(reply.options.atUsers || [], kind === "group" ? ["alice"] : []);
       assert.deepEqual(f.apiInputs, [input]);
       assert.equal(received, 1);
       assert.equal(f.delivery.content, content);

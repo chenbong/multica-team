@@ -148,7 +148,9 @@ var infoFlowUsername = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var infoFlowAccountLetter = regexp.MustCompile(`[a-z]`)
 var infoFlowDomain = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$`)
 
-const infoFlowMaxNotifyUsers = 50
+// Preserve the complete intended audience; the Bridge limits a single AT
+// block to 50 and reports omitted recipients without dropping the task.
+const infoFlowMaxNotifyUsers = 5000
 
 // The authenticated bridge supplies human UUAP accounts, never display names,
 // numeric robot IDs, UUIDs, or broadcast tokens. This is not an identity lookup.
@@ -178,7 +180,6 @@ func infoFlowNormalizeNotifyUsers(sender string, users []string, robotID string)
 		seen[account] = true
 		out = append(out, account)
 	}
-	slices.Sort(out)
 	return out
 }
 
@@ -442,7 +443,10 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		// Omitted/empty fields must remain omitted in the historical request
 		// hash. Explicit lists are canonicalized before hashing and storage.
 		if len(req.NotifyUsers) > 0 {
-			req.NotifyUsers = notifyUsers
+			// Retain the historical request fingerprint for retries while
+			// storing sender-first instruction order separately below.
+			req.NotifyUsers = slices.Clone(notifyUsers)
+			slices.Sort(req.NotifyUsers)
 		}
 	} else {
 		req.NotifyUsers = nil
@@ -906,6 +910,23 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			resp.Notice = "未找到该工作区中的任务，请检查任务编号后重新绑定"
 			writeJSON(w, http.StatusOK, resp)
 			return
+		}
+		if req.Conversation.Kind == "private" {
+			if err = infoFlowPrivateWebLock(r.Context(), tx, issue.ID, user.ID); err != nil {
+				infoFlowError(w, 500, "private issue claim")
+				return
+			}
+			var elsewhere bool
+			if err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE conversation_kind='private' AND issue_id=$1 AND id<>$2)`, issue.ID, b.ID).Scan(&elsewhere); err != nil {
+				infoFlowError(w, 500, "private issue claim")
+				return
+			}
+			if elsewhere {
+				resp.CanComment, resp.Binding = false, nil
+				resp.Notice = "该任务已绑定其他私聊，请先解除原绑定"
+				writeJSON(w, 200, resp)
+				return
+			}
 		}
 		if req.Conversation.Kind == "group" {
 			// Serialize claims from different groups before taking issue row

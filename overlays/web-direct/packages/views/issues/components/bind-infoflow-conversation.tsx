@@ -50,6 +50,9 @@ export function BindInfoFlowConversation({ workspaceId, issueId, managementURL =
       {open && <ConversationDialog key={`${userId}:${workspaceId}:${issueId}`} status={status} readError={query.isError || !userId}
         refreshing={query.isFetching} refresh={() => { void query.refetch(); }} bind={bind} unbind={unbind} cancel={cancel} managementURL={managementURL} />}
     </Dialog>
+    {(group || privates.length > 0) && <span role="note" className="max-w-xs text-caption text-muted-foreground">
+      {t(($) => $.infoflow_conversations.sync_short)}
+    </span>}
   </>;
 }
 
@@ -152,6 +155,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
         <DialogTitle>{t(($) => $.infoflow_conversations.bind)}</DialogTitle>
         <DialogDescription>{kind === "private" ? t(($) => $.infoflow_conversations.private_restriction) : t(($) => $.infoflow_conversations.description)}</DialogDescription>
       </DialogHeader>
+      <p role="note" className="text-caption text-muted-foreground">{t(($) => $.infoflow_conversations.sync_scope)}</p>
       {(readError || !status?.enabled) && <p role="alert">{t(($) => $.infoflow_groups.read_failed)}</p>}
       {!readError && status?.enabled && <Tabs value={kind} onValueChange={(value) => { if (!busy && (value === "group" || value === "private")) { setKind(value); setError(""); } }}>
         <TabsList aria-label={t(($) => $.infoflow_conversations.kind)}>

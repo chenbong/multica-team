@@ -4,7 +4,7 @@ import { VerificationCodeRelay } from "./codes.js";
 import { parseConversationBlocks, messageIdString, privateReplyMessageId, conversationContext } from "./conversation-context.js";
 import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
 import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
-import { mentionedReplyUsers, notifyUsers, nativeAtBody, MAX_NOTIFY_USERS } from "./reply-mentions.js";
+import { mentionedReplyUsers } from "./reply-mentions.js";
 import { groupRobotEntries } from "./group-robot-entries.js";
 import { infoflowMarkdown } from "./infoflow-markdown.js";
 
@@ -337,16 +337,10 @@ export class RobotRuntime {
 
 export async function sendRobotReply(client, conversation, content, options = {}, exactGroups = false) {
   if (conversation.kind === "group") {
-    if (exactGroups) return sendGroupExact(client, conversation, content, options);
-    const body = [];
-    const recipients = notifyUsers(conversation, options.atUser, options.atUsers || []);
-    if (recipients.length > MAX_NOTIFY_USERS) throw new Error("AT batch exceeds group limit");
-    if (recipients.length && options.notificationOnly !== true) throw new Error("native AT requires a separate TEXT reminder");
-    if (recipients.length) body.push(...nativeAtBody(content, recipients));
-    else body.push({ type: "MD", content: infoflowMarkdown(content) });
-    return client.im.message.sendToGroupWithOptions({ groupId: conversation.id, msgtype: recipients.length ? "TEXT" : "MD", body });
+    return sendGroupExact(client, conversation, content, options);
   }
   // Single-chat markdown is lowercase "md"; uppercase belongs to the group API.
+  await options.beforeSend?.();
   return client.im.message.sendToUser(conversation.id, infoflowMarkdown(content), "md");
 }
 

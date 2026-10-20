@@ -40,7 +40,7 @@ for (const kind of ["private", "group"]) test(`${kind} task completion replies r
     request: async () => { throw new Error("No proactive status scan is allowed"); },
   });
   await bridge.handleMessage({ conversation, user: "alice", text: "/issue Do a fixture task", messageId: "123" });
-  assert.equal(sent.length, kind === "group" ? 3 : 2); // A group answer also has a native AT reminder.
+  assert.equal(sent.length, 2); // A group answer also has a native AT reminder.
   assert(sent.every(message => message.destination === conversation));
   assert.match(sent[1].content, /Completion answer/);
   assert.match(sent[1].content, /issues\/TEST-1#comment-comment/);

@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
-import { notifyUsers, nativeAtBody, MAX_NOTIFY_USERS } from "./reply-mentions.js";
-import { infoflowMarkdown } from "./infoflow-markdown.js";
+import { prepareGroupDelivery, groupMarkdownBody, invalidHumanAudience, combinedMarkdown } from "./group-markdown.js";
+import { notifyUsers } from "./reply-mentions.js";
 
 let lastClientMessageId = 0;
 function clientMessageId() {
@@ -21,6 +21,8 @@ export function exactGroupId(value) {
 
 function groupAPIRejected(code, message) {
   const error = new Error("group API rejected request");
+  error.groupCode = code;
+  error.groupMessage = typeof message === "string" ? message : "";
   // Classify only the documented/observed structured denial. Do not infer
   // membership from arbitrary SDK exception text or expose raw error payloads.
   if (code === 40000 && message === "机器人未在群成员列表中") error.groupReason = "inviter_not_in_group";
@@ -101,17 +103,36 @@ export async function inviteGroupLeader(client, groupId, appId) {
 
 export async function sendGroupExact(client, conversation, content, options = {}) {
   const id = exactGroupId(conversation.id);
-  const body = [];
-  const recipients = notifyUsers(conversation, options.atUser, options.atUsers || []);
-  if (recipients.length > MAX_NOTIFY_USERS) throw new Error("AT batch exceeds group limit");
-  if (recipients.length && options.notificationOnly !== true) throw new Error("native AT requires a separate TEXT reminder");
-  if (recipients.length) body.push(...nativeAtBody(content, recipients));
-  else body.push({ type: "MD", content: infoflowMarkdown(content) });
-  const header = `{"toid":${id},"totype":"GROUP","msgtype":"${recipients.length ? "TEXT" : "MD"}","clientmsgid":${clientMessageId()},"role":"robot"}`;
-  const result = apiEnvelope(await client.httpClient.post("/robot/msg/groupmsgsend",
-    `{"message":{"header":${header},"body":${JSON.stringify(body)}}}`, { disableRetry: true }));
-  if (result.code !== 0) throw new Error("group message was not accepted");
-  return result.data;
+  if (options.filterGroupMembers === true && !options.deliveryState?.id) {
+    const intended = notifyUsers(conversation, options.atUser, options.atUsers || []);
+    if (intended.length) {
+      const roster = await groupRoster(client, id);
+      options = { ...options, atUser: null, atUsers: intended.filter(user => roster.members.includes(user)) };
+    }
+  }
+  const state = prepareGroupDelivery(conversation, content, options);
+  const send = async () => {
+    await options.beforeSend?.();
+    const header = `{"toid":${id},"totype":"GROUP","msgtype":"MD","clientmsgid":${state.id},"clienttime":${state.time},"role":"robot"}`;
+    const result = apiEnvelope(await client.httpClient.post("/robot/msg/groupmsgsend",
+      `{"message":{"header":${header},"body":${JSON.stringify(groupMarkdownBody(state))}}}`, { disableRetry: true }));
+    if (result.code !== 0) throw new Error("group message was not accepted");
+    return result.data;
+  };
+  try { return await send(); }
+  catch (error) {
+    if (!state.users.length || !invalidHumanAudience(error.groupCode, error.groupMessage || "")) throw error;
+    const roster = await groupRoster(client, id);
+    const valid = state.users.filter(user => roster.members.includes(user));
+    if (valid.length === state.users.length) throw error;
+    state.users = valid;
+    state.content = combinedMarkdown(state.original, valid, state.omitted);
+    // Only an explicit rejection permits changing the pinned payload.
+    state.id = clientMessageId();
+    state.time = Date.now();
+    options.saveDelivery?.();
+    return send();
+  }
 }
 
 export function botOrigin(raw) {

@@ -11,7 +11,7 @@ import { pollConversationNotices } from "./conversation-notices.js";
 import { pollRobotDirectory } from "./robot-directory.js";
 import { groupUsername } from "./issue-groups.js";
 import { formatCommandNotice } from "./commands.js";
-import { notifyUsers, notificationText, MAX_NOTIFY_USERS } from "./reply-mentions.js";
+import { notifyUsers } from "./reply-mentions.js";
 
 const DEFERRED_BINDING = Symbol("deferred-binding");
 const RECEIPT_ATTEMPTED = Symbol("receipt-attempted");
@@ -703,14 +703,14 @@ export class IssueRelay {
         const prior = checkpoints[item.id];
         if (prior?.acked) return;
         const incomingUsers = notifyUsers(item.conversation, null, item.notify_users || []);
-        if (prior?.notifyUsers && JSON.stringify(prior.notifyUsers) !== JSON.stringify(incomingUsers)) {
+        if (prior?.notifyUsers && JSON.stringify([...prior.notifyUsers].sort()) !== JSON.stringify([...incomingUsers].sort())) {
           throw new Error("issue notification users changed during retry");
         }
         // Never add new mentions to an in-flight legacy delivery. New messages
         // pin their audience before the first send, alongside the sender route.
         const notificationUsers = prior ? (prior.notifyUsers || []) : incomingUsers;
         if (shared && !prior && this.sentParts[item.id]) throw new Error("legacy per-robot group checkpoint requires operator review");
-        if (prior?.format && prior.format !== "summary-v1") throw new Error("unknown issue delivery checkpoint format");
+        if (prior?.format && !["summary-v1", "combined-v2"].includes(prior.format)) throw new Error("unknown issue delivery checkpoint format");
         const legacy = Boolean(prior && !prior.format);
         const binding = item.binding || item;
         const parts = legacy ? this.replyParts(item.content, binding, shared ? 1200 : 1800) : [item.content];
@@ -738,7 +738,7 @@ export class IssueRelay {
           if (!prior || prior.next < parts.length || (notificationUsers.length && !prior.notified)) route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, prior?.route);
         }
         if (!prior) {
-          checkpoints[item.id] = { next: 0, digest, messageIds: [], format: "summary-v1", notifyUsers: notificationUsers, ...(route ? { route: route.pin } : {}) };
+          checkpoints[item.id] = { next: 0, digest, messageIds: [], format: "combined-v2", notifyUsers: notificationUsers, ...(route ? { route: route.pin } : {}) };
           // Pin format and route before sending, including failed first sends.
           save();
         }
@@ -755,7 +755,21 @@ export class IssueRelay {
             ? withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], binding), "issue", binding.identifier, binding.title)
             : formatReply(userLabel + parts[index], { mode: "issue", identifier: binding.identifier, title: binding.title, label: route?.pin.label || "",
               url: replyUrl(this.config.multica, { binding, commentId: item.comment_id }) });
-          const receipt = await (route?.send || this.send)(item.conversation, content, {});
+          if (item.conversation.kind === "group") checkpoints[item.id].transport ||= {};
+          const options = item.conversation.kind === "group" ? {
+            atUsers: legacy ? [] : notificationUsers, deliveryState: checkpoints[item.id].transport, saveDelivery: save,
+          } : {};
+          if (item.requires_check === true) {
+            options.filterGroupMembers = true;
+            options.beforeSend = async () => {
+              if (this.stopped) throw new Error("issue relay stopped before send");
+              const current = await this.request(`issue-deliveries/${encodeURIComponent(item.id)}/check`, scope);
+              if (current.allowed !== true) throw new Error("delivery binding is no longer active");
+            };
+            // Custom sender adapters must honor the same boundary too.
+            await options.beforeSend();
+          }
+          const receipt = await (route?.send || this.send)(item.conversation, content, options);
           // Private sendToUser returns msgkey, whereas the group send API uses
           // messageid. Both are the exact original ID quoted by the IM client.
           const messageId = messageIdString(receipt?.messageid ?? receipt?.messageId ??
@@ -763,22 +777,14 @@ export class IssueRelay {
           const messageIds = [...(checkpoints[item.id]?.messageIds || [])];
           if (messageId) messageIds.push(messageId);
           checkpoints[item.id] = { ...checkpoints[item.id], next: index + 1, digest, messageIds, ...(route ? { route: route.pin } : {}) };
+          // Historical multipart records have distinct pending chunks. Never
+          // reuse one chunk's transport ID for another.
+          if (legacy) delete checkpoints[item.id].transport;
           save();
         }
         if (this.stopped) return;
+        // An accepted old body never receives a delayed standalone reminder.
         if (notificationUsers.length && !checkpoints[item.id].notified) {
-          const start = checkpoints[item.id].notificationNext || 0;
-          if (!Number.isInteger(start) || start < 0 || start > notificationUsers.length) throw new Error("invalid notification progress");
-          for (let next = start; next < notificationUsers.length; next += MAX_NOTIFY_USERS) {
-            if (this.stopped) return;
-            const receipt = await (route?.send || this.send)(item.conversation,
-              notificationText(replyUrl(this.config.multica, { binding, commentId: item.comment_id }), binding.identifier),
-              { atUsers: notificationUsers.slice(next, next + MAX_NOTIFY_USERS), notificationOnly: true });
-            const id = messageIdString(receipt?.messageid ?? receipt?.messageId);
-            if (id) checkpoints[item.id].messageIds = [...(checkpoints[item.id].messageIds || []), id];
-            checkpoints[item.id].notificationNext = Math.min(next + MAX_NOTIFY_USERS, notificationUsers.length);
-            save();
-          }
           checkpoints[item.id].notified = true;
           save();
         }

@@ -46,7 +46,7 @@ jobs:
         run: >-
           node --test chat.test.js conversation-context.test.js
           issue-relay.test.js issue-relay-reliability.test.js issue-groups.test.js web-group-bindings.test.js issue-review-regressions.test.js issue-multigroup.test.js issue-private-multi.test.js web-private-bindings.test.js reply-mode.test.js
-          reactions.test.js task-status-notifications.test.js group-info.test.js conversation-notices.test.js robot-directory.test.js admin-form.test.js private-bind-metadata.test.js issue-handlers.test.js receipt-handoff.test.js reply-mentions.test.js reply-title.test.js
+          reactions.test.js task-status-notifications.test.js group-info.test.js conversation-notices.test.js robot-directory.test.js admin-form.test.js private-bind-metadata.test.js issue-handlers.test.js receipt-handoff.test.js reply-mentions.test.js reply-title.test.js group-markdown.test.js reply-format.test.js infoflow-markdown.test.js
       - name: Verify standalone restart credentials and private state exclusions
         run: |
           python3 -m unittest discover -s infoflow-bridge/test -p 'test_bridgectl.py' -v
@@ -61,7 +61,7 @@ jobs:
           for relay_database in infoflow_binding_test infoflow_binding_migrations_test; do
             relay_database_url="postgres://test:test@127.0.0.1:55439/$relay_database?sslmode=disable"
             (cd multica/server && DATABASE_URL="$relay_database_url" go run ./cmd/migrate up)
-            for migration in migrations/001*.up.sql migrations/45*.up.sql migrations/46*.up.sql migrations/47*.up.sql migrations/48*.up.sql migrations/49*.up.sql migrations/50*.up.sql migrations/51*.up.sql migrations/52*.up.sql; do
+            for migration in migrations/001*.up.sql migrations/45*.up.sql migrations/46*.up.sql migrations/47*.up.sql migrations/48*.up.sql migrations/49*.up.sql migrations/50*.up.sql migrations/51*.up.sql migrations/52*.up.sql migrations/53*.up.sql; do
               psql "$relay_database_url" -v ON_ERROR_STOP=1 -f "$migration"
             done
           done
@@ -74,6 +74,8 @@ jobs:
           export GOFLAGS="-overlay=$GITHUB_WORKSPACE/overlays/go-overlay.json -mod=readonly"
           go test -race ./internal/handler -run '^Test(InfoFlow|SharedChat|BuiltinSandbox|OneAPI|OneToolImport|ImportSkill|ParseSkillArchive|FetchImportedSkill|SkillRefresh|ResourceWebPanel|IssueTransfer)' -count=1 -v
           go test -race ./cmd/server -run '^TestInfoFlow' -count=1 -v
+          go test -race ./cmd/server -run '^TestPersonalMachineName' -count=1 -v
+          go test -race ./internal/handler -run '^Test(MachineName|UpdateAgentRuntime_CustomName|DaemonRegister_.*(CustomName|MachineName))' -count=1 -v
           go test -race ./internal/service -run '^Test(ResourceWebPanelSkill|BuiltinSkillsConformToTemplate|BuiltinSkillsFrontmatterIsStrictYAML|BuiltinSkillPayload)' -count=1 -v
           go test -race ./cmd/multica -run '^TestIssuePanelCLI' -count=1 -v
           go vet ./internal/handler ./cmd/server
@@ -105,6 +107,7 @@ jobs:
           set -euo pipefail
           cd build/group-web
           pnpm --filter @multica/core exec vitest run api/infoflow-groups.test.ts api/infoflow-group-binding.test.ts issues/infoflow-groups.test.ts issues/infoflow-group-binding.test.ts api/infoflow-conversations.test.ts issues/infoflow-conversations.test.ts
+          pnpm --filter @multica/core exec vitest run runtimes/personal-name-schema.test.ts runtimes/mutations.machine-name.test.tsx
           pnpm --filter @multica/views exec vitest run issues/components/issue-infoflow-groups.test.tsx issues/components/issue-infoflow-group-binding.test.tsx issues/components/bind-infoflow-conversation.test.tsx
           pnpm --filter @multica/views exec vitest run agents/components/inspector/oneapi-thinking.test.ts agents/components/inspector/manual-model-thinking.test.tsx agents/components/inspector/model-change-cleanup.test.ts
           pnpm --filter @multica/core exec vitest run web-panels api/web-panel-schema.test.ts platform/storage-cleanup.test.ts

@@ -64,7 +64,8 @@ function fixture(t) {
     listAgents: async () => { ownerCalls.push("listAgents"); throw new Error("UUID config must not resolve an owner CLI"); },
   };
   const send = async (conversation, content, options) => {
-    const call = { conversation: structuredClone(conversation), content, options: structuredClone(options) };
+    const { saveDelivery, ...wireOptions } = options;
+    const call = { conversation: structuredClone(conversation), content, options: structuredClone(wireOptions) };
     sendAttempts.push(call);
     const result = await server.send(call);
     sent.push({ ...call, result: structuredClone(result) });

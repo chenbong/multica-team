@@ -21,10 +21,12 @@ function noticeContent(notice, scope, config, includeTitle = true) {
   if (!notice.identifier) throw new Error("notice task identifier is missing");
   withReplyMode("", "issue", notice.identifier);
   const url = replyUrl(config, { binding: notice }).replace(/[()]/g, char => char === "(" ? "%28" : "%29");
-  const bare = `**[任务模式] ${notice.identifier} 已${notice.kind === "bound" ? "绑定" : "解绑"}本对话**\n\n[任务链接](${url})`;
+  const scopeNote = includeTitle && notice.kind === "bound"
+    ? "\n\n此任务的新评论和回复会同步到所有绑定对话，包括私聊和群聊。原始消息不回传来源对话，不补发历史消息。" : "";
+  const bare = `**[任务模式] ${notice.identifier} 已${notice.kind === "bound" ? "绑定" : "解绑"}本对话**${scopeNote}\n\n[任务链接](${url})`;
   const reference = taskReplyReference(notice.identifier, includeTitle ? notice.title : null,
     { maxTitleBytes: 1800 - Buffer.byteLength(bare) - 1 });
-  const text = `**[任务模式] ${reference} 已${notice.kind === "bound" ? "绑定" : "解绑"}本对话**\n\n[任务链接](${url})`;
+  const text = `**[任务模式] ${reference} 已${notice.kind === "bound" ? "绑定" : "解绑"}本对话**${scopeNote}\n\n[任务链接](${url})`;
   if (Buffer.byteLength(text) > 1800) throw new Error("conversation notice exceeds byte budget");
   return text;
 }

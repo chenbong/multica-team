@@ -65,7 +65,7 @@ for (const kind of ["private", "group"]) for (const noticeKind of ["bound", "unb
     await relay.pollConversationNotices();
     assert.equal(f.state.sent.length, 1);
     assert.deepEqual(f.state.sent[0], { conversation: f.notice.conversation,
-      content: `**[任务模式] TEST-1 已${noticeKind === "bound" ? "绑定" : "解绑"}本对话**\n\n[任务链接](http://127.0.0.1:8004/team/issues/TEST-1)`, options: {} });
+      content: `**[任务模式] TEST-1 已${noticeKind === "bound" ? "绑定" : "解绑"}本对话**${noticeKind === "bound" ? "\n\n此任务的新评论和回复会同步到所有绑定对话，包括私聊和群聊。原始消息不回传来源对话，不补发历史消息。" : ""}\n\n[任务链接](http://127.0.0.1:8004/team/issues/TEST-1)`, options: {} });
     assert.deepEqual(f.state.requests.find(item => item.path.endsWith("/ack")).body,
       { ...scope, message_id: "1836339350307196087", message_ids: ["1836339350307196087"] });
     assert.equal(f.state.rosterCalls, kind === "group" ? 1 : 0);

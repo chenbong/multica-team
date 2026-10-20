@@ -26,12 +26,12 @@ import (
 func newInfoFlowNotifyFixture(t *testing.T) infoFlowTestFixture {
 	t.Helper()
 	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
-	if err != nil || cfg.ConnConfig.Host != "127.0.0.1" || cfg.ConnConfig.Port != 55439 ||
+	if err != nil || cfg.ConnConfig.Host != "127.0.0.1" || (cfg.ConnConfig.Port != 55439 && cfg.ConnConfig.Port != 55451) ||
 		(cfg.ConnConfig.Database != "infoflow_binding_test" && !strings.HasPrefix(cfg.ConnConfig.Database, "chat_access_notify_")) {
-		t.Fatal("requires loopback:55439 infoflow_binding_test or a chat_access_notify_ schema clone")
+		t.Fatal("requires isolated loopback test database on port 55439 or 55451")
 	}
 	for _, fallback := range cfg.ConnConfig.Fallbacks {
-		if fallback.Host != "127.0.0.1" || fallback.Port != 55439 {
+		if fallback.Host != "127.0.0.1" || (fallback.Port != 55439 && fallback.Port != 55451) {
 			t.Fatal("unsafe database fallback")
 		}
 	}
@@ -87,7 +87,9 @@ func wantInfoFlowNotifyUsers(t *testing.T, got, want []string) {
 	t.Helper()
 	want = slices.Clone(want)
 	slices.Sort(want)
-	if got == nil || !slices.Equal(got, want) {
+	actual := slices.Clone(got)
+	slices.Sort(actual)
+	if got == nil || !slices.Equal(actual, want) {
 		t.Fatalf("notify_users=%v (nil=%v), want %v", got, got == nil, want)
 	}
 }
@@ -105,6 +107,21 @@ func TestInfoFlowNotifyLegacyWireHash(t *testing.T) {
 	}
 }
 
+func TestInfoFlowNotifyAudienceAboveSingleMessageLimit(t *testing.T) {
+	f := newInfoFlowNotifyFixture(t)
+	f.bind(t)
+	users := make([]string, 60)
+	for i := range users {
+		users[i] = fmt.Sprintf("recipient%d", i)
+	}
+	_, out, _ := infoFlowNotifyInput(t, f, f.req.Sender, users)
+	var saved []string
+	dbfx.QueryRow(t, `SELECT notify_users FROM infoflow_issue_source WHERE comment_id=$1`, out.CommentID).Scan(&saved)
+	if len(saved) != 61 || saved[0] != f.req.Sender || !slices.Equal(saved[1:], users) {
+		t.Fatalf("full audience or priority was lost: %v", saved)
+	}
+}
+
 func TestInfoFlowNotifySourceAndCanonicalRetry(t *testing.T) {
 	f := newInfoFlowNotifyFixture(t)
 	f.bind(t)
@@ -112,6 +129,9 @@ func TestInfoFlowNotifySourceAndCanonicalRetry(t *testing.T) {
 	var saved []string
 	dbfx.QueryRow(t, `SELECT notify_users FROM infoflow_issue_source WHERE comment_id=$1`, out.CommentID).Scan(&saved)
 	wantInfoFlowNotifyUsers(t, saved, []string{"alice", "bob", f.req.Sender})
+	if !slices.Equal(saved, []string{f.req.Sender, "bob", "alice"}) {
+		t.Fatalf("sender and explicit instruction order lost: %v", saved)
+	}
 	r.NotifyUsers = []string{"bob", "ALICE", f.req.Sender}
 	if retry := infoFlowCall(t, f.h, r, 200); retry.CommentID != out.CommentID {
 		t.Fatalf("canonical retry duplicated comment: %+v", retry)
@@ -164,6 +184,9 @@ func TestInfoFlowNotifyDeliveryRecursiveUnion(t *testing.T) {
 		t.Fatalf("recursive delivery: %+v", got)
 	}
 	wantInfoFlowNotifyUsers(t, got[0].NotifyUsers, []string{"alice", "bob", "charlie", f.req.Sender, other})
+	if !slices.Contains(got[0].NotifyUsers[:2], other) || !slices.Contains(got[0].NotifyUsers[:2], f.req.Sender) {
+		t.Fatalf("coalesced requesters must precede mentioned recipients: %v", got[0].NotifyUsers)
+	}
 	again := infoFlowPoll(t, f, 20)
 	if len(again) != 1 || again[0].ID != got[0].ID {
 		t.Fatalf("pending receipt changed: %+v", again)
@@ -334,7 +357,7 @@ func TestInfoFlowNotifyTaskOnlyAndCommentAncestry(t *testing.T) {
 	wantInfoFlowNotifyUsers(t, got[0].NotifyUsers, []string{"alice", f.req.Sender})
 }
 
-func TestInfoFlowNotifyDeliveryMixedOriginsBlocked(t *testing.T) {
+func TestInfoFlowNotifyMixedConversationsAllowedButCrossTaskBlocked(t *testing.T) {
 	for _, kind := range []string{"private", "group", "generation"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newInfoFlowNotifyFixture(t)
@@ -360,8 +383,12 @@ func TestInfoFlowNotifyDeliveryMixedOriginsBlocked(t *testing.T) {
 			}
 			dbfx.Exec(t, `UPDATE agent_task_queue SET coalesced_comment_ids=ARRAY[$2::uuid] WHERE id=$1`, task, second.CommentID)
 			infoFlowAgentReply(t, f, f.issue, first.CommentID, task, "mixed output")
-			if got := infoFlowPoll(t, f, 20); len(got) != 0 {
-				t.Fatalf("mixed ancestry leaked: %+v", got)
+			got := infoFlowPoll(t, f, 20)
+			if kind == "group" && len(got) != 0 {
+				t.Fatalf("cross-task ancestry leaked: %+v", got)
+			}
+			if kind != "group" && len(got) == 0 {
+				t.Fatal("same-task mixed conversations suppressed")
 			}
 		})
 	}
@@ -402,12 +429,16 @@ func TestInfoFlowNotifyPrivateAndWebEmpty(t *testing.T) {
 					break
 				}
 				for _, d := range got {
-					wantInfoFlowNotifyUsers(t, d.NotifyUsers, []string{})
+					want := []string{}
+					if kind == "web-agent" && d.CommentID == reply {
+						want = []string{f.req.Sender}
+					}
+					wantInfoFlowNotifyUsers(t, d.NotifyUsers, want)
 					found = found || d.CommentID == reply
 					infoFlowAck(t, f, d.ID, nil, 200)
 				}
 			}
-			if found != (kind != "unattributed-agent") {
+			if !found {
 				t.Fatalf("unexpected delivery eligibility %s: %v", kind, found)
 			}
 		})

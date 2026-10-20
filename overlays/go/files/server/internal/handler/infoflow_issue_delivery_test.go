@@ -103,49 +103,49 @@ func TestInfoFlowDeliverySourceAckEchoAndQuotedChunks(t *testing.T) {
 	}
 }
 
-func TestInfoFlowDeliveryPrivateGroupIsolationAndAmbiguity(t *testing.T) {
+func TestInfoFlowDeliveryBroadcastAndRecipientRevocation(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	f.bind(t)
-	_, group, groupTask := infoFlowInput(t, f, f.req.Conversation)
 	private := f.req
 	private.Conversation = infoFlowConversation{Kind: "private", ID: f.req.Sender}
 	private.MessageID = uuid.NewString()
 	infoFlowCall(t, f.h, private, 200)
+	_, group, groupTask := infoFlowInput(t, f, f.req.Conversation)
 	_, priv, privateTask := infoFlowInput(t, f, private.Conversation)
-	privateReply := infoFlowAgentReply(t, f, f.issue, priv.CommentID, privateTask, "private answer")
-	groupReply := infoFlowAgentReply(t, f, f.issue, group.CommentID, groupTask, "public group answer")
-	deliveries := infoFlowPoll(t, f, 20)
-	if len(deliveries) != 2 {
-		t.Fatalf("want distinct destinations: %+v", deliveries)
+	privateReply := infoFlowAgentReply(t, f, f.issue, priv.CommentID, privateTask, "private-origin answer")
+	groupReply := infoFlowAgentReply(t, f, f.issue, group.CommentID, groupTask, "group-origin answer")
+	deliveries := infoFlowDrainBroadcast(t, f)
+	if len(deliveries) != 6 {
+		t.Fatalf("expected two mirrors and four replies: %+v", deliveries)
 	}
 	for _, d := range deliveries {
-		if (d.CommentID == privateReply && d.Conversation != private.Conversation) || (d.CommentID == groupReply && d.Conversation != f.req.Conversation) {
-			t.Fatalf("privacy leak: %+v", d)
+		if d.CommentID == group.CommentID && d.Conversation == f.req.Conversation {
+			t.Fatal("group input echoed")
 		}
-		infoFlowAck(t, f, d.ID, []string{uuid.NewString()}, 200)
+		if d.CommentID == priv.CommentID && d.Conversation == private.Conversation {
+			t.Fatal("private input echoed")
+		}
+		if d.CommentID != group.CommentID && d.CommentID != priv.CommentID && d.CommentID != groupReply && d.CommentID != privateReply {
+			t.Fatal("unexpected reply")
+		}
 	}
-	// Reading private context does not make an otherwise group-origin reply
-	// ambiguous; only actual trigger/coalesced lineage defines provenance.
-	dbfx.Exec(t, `UPDATE agent_task_queue SET delivered_comment_ids=ARRAY[$2::uuid] WHERE id=$1`, groupTask, priv.CommentID)
-	readReply := infoFlowAgentReply(t, f, f.issue, group.CommentID, groupTask, "group answer after context read")
-	deliveries = infoFlowPoll(t, f, 20)
-	if len(deliveries) != 1 || deliveries[0].CommentID != readReply || deliveries[0].Conversation.Kind != "group" {
-		t.Fatalf("context read incorrectly suppressed: %+v", deliveries)
-	}
-	infoFlowAck(t, f, deliveries[0].ID, nil, 200)
-	// A run actually triggered by both destinations must never broadcast the
-	// combined private content, regardless of which parent the agent chose.
 	dbfx.Exec(t, `UPDATE agent_task_queue SET coalesced_comment_ids=ARRAY[$2::uuid] WHERE id=$1`, groupTask, priv.CommentID)
-	infoFlowAgentReply(t, f, f.issue, group.CommentID, groupTask, "combined PRIVATE answer")
-	if got := infoFlowPoll(t, f, 20); len(got) != 0 {
-		t.Fatalf("ambiguous output leaked: %+v", got)
+	mixed := infoFlowAgentReply(t, f, f.issue, group.CommentID, groupTask, "mixed same-task answer")
+	deliveries = infoFlowDrainBroadcast(t, f)
+	if len(deliveries) != 2 {
+		t.Fatalf("mixed source was suppressed: %+v", deliveries)
 	}
-	// The private recipient loses workspace access; the original private run
-	// may finish, but no new answer is returned for that destination.
+	for _, d := range deliveries {
+		if d.CommentID != mixed {
+			t.Fatal("unexpected replay")
+		}
+	}
 	dbfx.Exec(t, `DELETE FROM member WHERE user_id=$1 AND workspace_id=$2`, f.owner, testWorkspaceID)
-	infoFlowAgentReply(t, f, f.issue, priv.CommentID, privateTask, "private after membership loss")
-	if got := infoFlowPoll(t, f, 20); len(got) != 0 {
-		t.Fatalf("revoked private destination delivered: %+v", got)
+	infoFlowAgentReply(t, f, f.issue, priv.CommentID, privateTask, "after membership loss")
+	for _, d := range infoFlowPoll(t, f, 20) {
+		if d.Conversation.Kind == "private" {
+			t.Fatal("revoked private recipient received output")
+		}
 	}
 }
 

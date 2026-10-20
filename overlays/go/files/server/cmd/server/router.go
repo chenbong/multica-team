@@ -1591,6 +1591,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Post("/api/integrations/infoflow/issue-group-status", h.InfoFlowIssueGroupStatus)
 	r.Post("/api/integrations/infoflow/issue-deliveries", h.InfoFlowIssueDeliveries)
 	r.Post("/api/integrations/infoflow/issue-deliveries/{id}/ack", h.InfoFlowIssueDeliveryAck)
+	r.Post("/api/integrations/infoflow/issue-deliveries/{id}/check", h.InfoFlowIssueDeliveryCheck)
 	r.Post("/api/integrations/infoflow/conversation-notices", h.InfoFlowConversationNotices)
 	r.Post("/api/integrations/infoflow/conversation-notices/{id}/ack", h.InfoFlowConversationNoticeAck)
 	r.Post("/api/integrations/infoflow/conversation-notices/{id}/check", h.InfoFlowConversationNoticeCheck)

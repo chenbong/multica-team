@@ -65,6 +65,14 @@ func (h *Handler) infoFlowPrivateJobAuthority(ctx context.Context, tx pgx.Tx, j 
 	if !manage {
 		return t, rows, "permission_changed", nil
 	}
+	var occupied bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE issue_id=$1 AND conversation_kind='private' AND (binder_id IS DISTINCT FROM $2 OR conversation_id<>$3))`, j.IssueID, j.RequesterID, j.Sender).Scan(&occupied)
+	if err != nil {
+		return t, rows, "", err
+	}
+	if occupied {
+		return t, rows, "binding_changed", nil
+	}
 	var saved []map[string]string
 	if json.Unmarshal(j.Snapshot, &saved) != nil {
 		return t, rows, "binding_changed", nil
@@ -243,6 +251,10 @@ func (h *Handler) InfoFlowWebPrivateResult(w http.ResponseWriter, r *http.Reques
 			}
 			_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET assignment_version=$2,generation=$3,bound_at=CASE WHEN generation<>$3 THEN clock_timestamp() ELSE bound_at END,robot_chat_id=$4,robot_name=$5 WHERE id=$1`, current.ID, t.AssignmentVersion, generation, req.RobotChatID, req.RobotName)
 		} else {
+			if len(rows) > 0 {
+				infoFlowError(w, 409, "该任务已绑定其他私聊，请先解除原绑定")
+				return
+			}
 			_, err = tx.Exec(r.Context(), `INSERT INTO infoflow_issue_binding(id,robot_id,workspace_id,agent_id,conversation_kind,conversation_id,issue_id,binder_id,generation,assignment_version,robot_chat_id,robot_name) VALUES($1,$2,$3,$4,'private',$5,$6,$7,$8,$9,$10,$11)`, dbid.NewV7(), req.TargetRobotID, j.Workspace, j.AgentID, j.Sender, j.IssueID, j.RequesterID, dbid.NewV7(), t.AssignmentVersion, req.RobotChatID, req.RobotName)
 		}
 		if err != nil {

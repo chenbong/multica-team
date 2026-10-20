@@ -5,6 +5,18 @@ import { formatReply, replyUrl, withReplyMode } from "./src/reply-format.js";
 const config = { webUrl: "https://web.example.test/base/", issueWebUrl: "https://entry.example.test/", workspaceSlug: "team" };
 const binding = { issue_id: "11111111-1111-4111-8111-111111111111", identifier: "TASK-7", workspace_slug: "other" };
 
+test("new summaries use UTF-16 units, retain Chinese beyond 8192 bytes, and support legacy byte caps", () => {
+  const content = "中".repeat(5000);
+  const full = formatReply(content);
+  assert.ok(full.includes(content));
+  assert.ok(full.length <= 8192 && Buffer.byteLength(full) > 8192);
+  const legacy = formatReply(content, { maxBytes: 1800 });
+  assert.ok(Buffer.byteLength(legacy) <= 1800);
+  const emoji = formatReply("🙂".repeat(6000));
+  assert.ok(emoji.length <= 8192);
+  assert.equal(Buffer.from(emoji).toString("utf8"), emoji);
+});
+
 test("native comment and session routes use the configured entry and authoritative metadata", () => {
   assert.equal(replyUrl(config, { binding, commentId: "comment_1" }), "https://entry.example.test/other/issues/TASK-7#comment-comment_1");
   assert.equal(replyUrl(config, { binding: { ...binding, identifier: null }, commentId: "c2" }),
@@ -30,8 +42,8 @@ test("short reply preserves the exact body including whitespace and Markdown", (
   assert.equal(formatReply(content, { mode: "chat", url }), withReplyMode(content, "chat") + `\n\n**[完整对话链接](${url})**`);
 });
 
-test("one UTF-8 prefix budgets header, footer, notice and 120 Unicode author characters", () => {
-  const content = "中文🙂𝌆🚀\n".repeat(1200);
+test("one UTF-16 prefix budgets header, footer, notice and 120 Unicode author characters", () => {
+  const content = "中文🙂𝌆🚀\n".repeat(3000);
   const label = `【${"🚀".repeat(120)} · 队长代发】\n`;
   const url = replyUrl(config, { binding, commentId: "33333333-3333-4333-8333-333333333333" });
   const output = formatReply(content, { mode: "issue", identifier: binding.identifier, label, url });
@@ -43,15 +55,15 @@ test("one UTF-8 prefix budgets header, footer, notice and 120 Unicode author cha
   assert.ok(summary.length > 0 && content.startsWith(summary) && summary.length < content.length);
   assert.equal(Buffer.from(output).toString("utf8"), output);
   assert.equal(output.includes("\ufffd"), false);
-  assert.ok(Buffer.byteLength(output) <= 1800);
+  assert.ok(output.length <= 8192);
   assert.throws(() => formatReply(content, { mode: "issue", label, url, maxBytes: 100 }), /budget/);
 });
 
-test("the complete message byte boundary determines whether a notice is needed", () => {
+test("the complete message UTF-16 boundary determines whether a notice is needed", () => {
   const url = replyUrl(config, { sessionId: "s1" });
-  const overhead = Buffer.byteLength(withReplyMode("", "chat") + `\n\n**[完整对话链接](${url})**`);
-  const body = "x".repeat(1800 - overhead);
-  assert.equal(Buffer.byteLength(formatReply(body, { mode: "chat", url })), 1800);
+  const overhead = (withReplyMode("", "chat") + `\n\n**[完整对话链接](${url})**`).length;
+  const body = "x".repeat(8192 - overhead);
+  assert.equal(formatReply(body, { mode: "chat", url }).length, 8192);
   assert.equal(formatReply(body, { mode: "chat", url }).includes("回复较长"), false);
   assert.match(formatReply(body + "🙂", { mode: "chat", url }), /回复较长/);
 });
@@ -59,18 +71,18 @@ test("the complete message byte boundary determines whether a notice is needed",
 test("truncating within a code fence keeps the notice and clickable footer outside it", () => {
   const url = replyUrl(config, { sessionId: "s1" });
   for (const marker of ["```", "~~~~"]) {
-    const content = marker + "text\n" + "中文🙂".repeat(800) + "\n" + marker;
+    const content = marker + "text\n" + "中文🙂".repeat(3000) + "\n" + marker;
     const output = formatReply(content, { mode: "chat", url });
     assert.ok(output.includes(`\n${marker}\n\n...（回复较长`));
     assert.ok(output.endsWith(`**[完整对话链接](${url})**`));
-    assert.ok(Buffer.byteLength(output) <= 1800);
+    assert.ok(output.length <= 8192);
   }
 });
 
 test("closing a truncated list fence retains its indentation instead of opening a new block", () => {
   const url = replyUrl(config, { sessionId: "s1" });
-  const output = formatReply("- 示例：\n\n  ```text\n  " + "中文🙂".repeat(800) + "\n  ```", { mode: "chat", url });
+  const output = formatReply("- 示例：\n\n  ```text\n  " + "中文🙂".repeat(3000) + "\n  ```", { mode: "chat", url });
   assert.ok(output.includes("\n  ```\n\n...（回复较长"));
   assert.ok(output.endsWith(`**[完整对话链接](${url})**`));
-  assert.ok(Buffer.byteLength(output) <= 1800);
+  assert.ok(output.length <= 8192);
 });

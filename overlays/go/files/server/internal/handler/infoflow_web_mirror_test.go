@@ -15,7 +15,7 @@ func TestInfoFlowPlatformCommentsMirrorToEachActiveDestinationWithoutIMEcho(t *t
 	infoFlowCall(t, f.h, private, 200)
 	web := dbfx.Comment(t, f.issue, "Web authored message", testutil.Cols{"author_type": "member", "author_id": f.owner})
 	reply := dbfx.Comment(t, f.issue, "Web response", testutil.Cols{"author_type": "agent", "author_id": f.req.AgentID, "parent_id": web})
-	dbfx.Comment(t, f.issue, "Unrelated agent output", testutil.Cols{"author_type": "agent", "author_id": f.req.AgentID})
+	standalone := dbfx.Comment(t, f.issue, "Standalone task output", testutil.Cols{"author_type": "agent", "author_id": f.req.AgentID})
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
 		deliveries := infoFlowPoll(t, f, 20)
@@ -32,7 +32,7 @@ func TestInfoFlowPlatformCommentsMirrorToEachActiveDestinationWithoutIMEcho(t *t
 				if d.AuthorType != "user" || d.AuthorName != f.req.Sender {
 					t.Fatalf("incorrect user attribution: %+v", d)
 				}
-			} else if d.CommentID == reply {
+			} else if d.CommentID == reply || d.CommentID == standalone {
 				if d.AuthorType != "agent" {
 					t.Fatalf("incorrect agent attribution: %+v", d)
 				}
@@ -42,12 +42,12 @@ func TestInfoFlowPlatformCommentsMirrorToEachActiveDestinationWithoutIMEcho(t *t
 			infoFlowAck(t, f, d.ID, []string{uuid.NewString()}, 200)
 		}
 	}
-	if len(seen) != 4 {
-		t.Fatalf("expected user/agent in both destinations, got %+v", seen)
+	if len(seen) != 6 {
+		t.Fatalf("expected all new task comments in both destinations, got %+v", seen)
 	}
 	_, _, _ = infoFlowInput(t, f, f.req.Conversation)
-	if got := infoFlowPoll(t, f, 20); len(got) != 0 {
-		t.Fatalf("IM human input echoed: %+v", got)
+	if got := infoFlowPoll(t, f, 20); len(got) != 1 || got[0].Conversation.Kind != "private" {
+		t.Fatalf("IM input should mirror only to the other conversation: %+v", got)
 	}
 }
 

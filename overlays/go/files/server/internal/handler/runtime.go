@@ -155,10 +155,10 @@ type AgentRuntimeResponse struct {
 	WorkspaceID string  `json:"workspace_id"`
 	DaemonID    *string `json:"daemon_id"`
 	Name        string  `json:"name"`
-	// CustomName is the user-set display override (MUL-4217); null when the
-	// runtime still uses its daemon-proposed Name. Clients show
-	// CustomName ?? Name and seed the rename field from this raw value.
+	// CustomName is the effective display override for this viewer.
+	// PersonalName seeds the private rename field; daemon responses omit it.
 	CustomName   *string `json:"custom_name"`
+	PersonalName *string `json:"personal_name"`
 	RuntimeMode  string  `json:"runtime_mode"`
 	Provider     string  `json:"provider"`
 	LaunchHeader string  `json:"launch_header"`
@@ -593,14 +593,11 @@ type UpdateAgentRuntimeRequest struct {
 	// only, gated by canSetRuntimeVisibility — narrower than the rest of this
 	// request, which admins may also send.
 	Visibility *string `json:"visibility,omitempty"`
-	// CustomName sets or clears a user-facing display override (MUL-4217).
-	// An empty / whitespace-only string clears it (revert to the
-	// daemon-proposed name). Owner / workspace admin only.
+	// CustomName sets the current viewer's private machine remark.
+	// Empty text clears it, preserving the pre-existing shared default.
 	CustomName *string `json:"custom_name,omitempty"`
-	// ApplyToMachine, when true alongside CustomName, applies the name to
-	// every runtime sharing this runtime's daemon_id (a machine hosts one
-	// runtime per provider) instead of just this one. Ignored when the
-	// runtime has no daemon_id.
+	// ApplyToMachine is retained for installed clients. Remarks always follow
+	// the daemon identity across workspaces, independently of this flag.
 	ApplyToMachine bool `json:"apply_to_machine,omitempty"`
 }
 
@@ -609,9 +606,7 @@ type UpdateAgentRuntimeRequest struct {
 // keeping the picker rows and machine headers from overflowing.
 const maxRuntimeCustomNameLen = 100
 
-// UpdateAgentRuntime handles PATCH /api/runtimes/:id. Currently visibility
-// is editable; the request shape is open-ended so future fields (display
-// name, description) can be added without a route change.
+// UpdateAgentRuntime handles PATCH /api/runtimes/:id for visibility and names.
 // Workspace-membership-checked; write access is gated by canEditRuntime, and
 // `visibility` carries the narrower owner-only gate on top (MUL-6126).
 func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
@@ -620,137 +615,65 @@ func (h *Handler) UpdateAgentRuntime(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
 	rt, err := h.getAgentRuntime(r.Context(), obsmetrics.RuntimeLookupSourceRuntimeAPI, runtimeUUID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "runtime not found")
 		return
 	}
-
 	member, ok := h.requireWorkspaceMember(w, r, uuidToString(rt.WorkspaceID), "runtime not found")
 	if !ok {
 		return
 	}
-	if !canEditRuntime(member, rt) {
-		writeError(w, http.StatusForbidden, "you can only edit your own runtimes")
+	if !canLabelRuntime(member, rt) {
+		writeError(w, http.StatusForbidden, "you cannot label this runtime")
 		return
 	}
-
 	var req UpdateAgentRuntimeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-
-	// Validate every field before any mutation so a bad value in one field
-	// can't leave a partially-applied PATCH.
-	var (
-		newVisibility  string
-		needVisibility bool
-	)
+	if req.CustomName != nil && len([]rune(strings.TrimSpace(*req.CustomName))) > maxRuntimeCustomNameLen {
+		writeError(w, http.StatusBadRequest, "custom name is too long")
+		return
+	}
+	visibilityChanged := false
 	if req.Visibility != nil {
-		v := *req.Visibility
-		if v != "private" && v != "public" {
+		if *req.Visibility != "private" && *req.Visibility != "public" {
 			writeError(w, http.StatusBadRequest, "visibility must be 'private' or 'public'")
 			return
 		}
-		// Only a real change is gated. An admin renaming a runtime through a
-		// PATCH-as-PUT client that echoes the unchanged visibility back is not
-		// trying to share anyone's machine, so that no-op is dropped rather
-		// than turned into a 403 — same tolerance UpdateAgent applies to
-		// resubmitted agent permissions.
-		if v != rt.Visibility {
-			if !canSetRuntimeVisibility(member, rt) {
-				writeError(w, http.StatusForbidden, "only the runtime owner can change its visibility")
-				return
-			}
-			newVisibility = v
-			needVisibility = true
-		}
-	}
-
-	if req.CustomName != nil {
-		if len([]rune(strings.TrimSpace(*req.CustomName))) > maxRuntimeCustomNameLen {
-			writeError(w, http.StatusBadRequest, "custom name is too long")
+		visibilityChanged = *req.Visibility != rt.Visibility
+		if visibilityChanged && !canSetRuntimeVisibility(member, rt) {
+			writeError(w, http.StatusForbidden, "only the runtime owner can change its visibility")
 			return
 		}
 	}
-
-	changed := false
-
-	if needVisibility {
-		updated, err := h.Queries.UpdateAgentRuntimeVisibility(r.Context(), db.UpdateAgentRuntimeVisibilityParams{
-			ID:         runtimeUUID,
-			Visibility: newVisibility,
-		})
+	if req.CustomName != nil || visibilityChanged {
+		rt, err = h.updatePersonalRuntime(r.Context(), rt, member.UserID, req)
 		if err != nil {
-			slog.Error("UpdateAgentRuntimeVisibility failed", "error", err, "runtime_id", runtimeID)
+			if errors.Is(err, errPersonalRuntimeChanged) {
+				writeError(w, http.StatusConflict, "machine changed; refresh and retry")
+				return
+			}
+			slog.Error("personal machine name update failed", "error", err, "runtime_id", runtimeID)
 			writeError(w, http.StatusInternalServerError, "failed to update runtime")
 			return
 		}
-		rt = updated
-		changed = true
 	}
-
+	if visibilityChanged {
+		h.PublishRuntimeRefresh(uuidToString(rt.WorkspaceID), "member", uuidToString(member.UserID), "update")
+	}
 	if req.CustomName != nil {
-		// An empty / whitespace-only name clears the override (NULL), so the
-		// runtime falls back to its daemon-proposed Name.
-		trimmed := strings.TrimSpace(*req.CustomName)
-		customName := pgtype.Text{String: trimmed, Valid: trimmed != ""}
-
-		if req.ApplyToMachine && rt.DaemonID.Valid {
-			// Non-admins may only relabel their own runtimes on the machine;
-			// owners/admins rename every runtime sharing the daemon_id. A NULL
-			// owner filter means "all runtimes on this machine".
-			var ownerFilter pgtype.UUID
-			if !roleAllowed(member.Role, "owner", "admin") {
-				ownerFilter = member.UserID
-			}
-			rows, err := h.Queries.UpdateAgentRuntimeCustomNameByDaemon(r.Context(), db.UpdateAgentRuntimeCustomNameByDaemonParams{
-				CustomName:  customName,
-				WorkspaceID: rt.WorkspaceID,
-				DaemonID:    rt.DaemonID,
-				OwnerID:     ownerFilter,
-			})
-			if err != nil {
-				slog.Error("UpdateAgentRuntimeCustomNameByDaemon failed", "error", err, "runtime_id", runtimeID)
-				writeError(w, http.StatusInternalServerError, "failed to update runtime")
-				return
-			}
-			// The actor always owns (or admins) the runtime addressed by :id,
-			// so it is among the updated rows — surface it in the response.
-			for _, row := range rows {
-				if uuidToString(row.ID) == uuidToString(runtimeUUID) {
-					rt = row
-					break
-				}
-			}
-			changed = true
-		} else {
-			updated, err := h.Queries.UpdateAgentRuntimeCustomName(r.Context(), db.UpdateAgentRuntimeCustomNameParams{
-				CustomName: customName,
-				ID:         runtimeUUID,
-			})
-			if err != nil {
-				slog.Error("UpdateAgentRuntimeCustomName failed", "error", err, "runtime_id", runtimeID)
-				writeError(w, http.StatusInternalServerError, "failed to update runtime")
-				return
-			}
-			rt = updated
-			changed = true
-		}
+		h.publish(personalMachineNameEvent, "", "member", uuidToString(member.UserID), map[string]any{"action": "update"})
 	}
-
-	if changed {
-		// Notify connected clients that runtime metadata changed so the
-		// list/detail pages refresh — matches the pattern used by
-		// DeleteAgentRuntime.
-		h.publish(protocol.EventDaemonRegister, uuidToString(rt.WorkspaceID), "member", uuidToString(member.UserID), map[string]any{
-			"action": "update",
-		})
+	resp, err := h.personalRuntimeResponses(r.Context(), member.UserID, []db.AgentRuntime{rt})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read runtime")
+		return
 	}
-
-	writeJSON(w, http.StatusOK, runtimeToResponse(rt))
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(w, http.StatusOK, resp[0])
 }
 
 func canEditRuntime(member db.Member, rt db.AgentRuntime) bool {
@@ -1063,10 +986,12 @@ func (h *Handler) ListAgentRuntimes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := make([]AgentRuntimeResponse, len(runtimes))
-	for i, rt := range runtimes {
-		resp[i] = runtimeToResponse(rt)
+	resp, err := h.personalRuntimeResponses(r.Context(), member.UserID, runtimes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list runtimes")
+		return
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
 
 	writeJSON(w, http.StatusOK, resp)
 }

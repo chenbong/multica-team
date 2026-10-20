@@ -140,6 +140,14 @@ func (h *Handler) infoFlowRequestPrivateBinding(ctx context.Context, tx pgx.Tx, 
 	if !manage {
 		return 0, infoFlowActionFailure(403, "Insufficient binding management permissions")
 	}
+	var occupied bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_binding WHERE issue_id=$1 AND conversation_kind='private' AND (binder_id IS DISTINCT FROM $2 OR conversation_id<>$3))`, actor.Issue, actor.User, sender).Scan(&occupied)
+	if err != nil {
+		return 0, err
+	}
+	if occupied {
+		return 0, infoFlowActionFailure(409, "该任务已绑定其他私聊，请先解除原绑定")
+	}
 	for _, row := range rows {
 		if row.Agent == t.LeaderAgentID && row.Binding.RobotChatID != "" && sh.infoFlowPrivateView(ctx, row.Binding, actor.Workspace, row.Agent).State == "active" {
 			return 200, nil

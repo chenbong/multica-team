@@ -130,13 +130,13 @@ test("unbound Chat fallback also retains inline human labels without changing it
   assert.deepEqual(chat[0][8], ["alice", "bob"]);
 });
 
-test("issue Markdown and AT reminder checkpoint independently across restart and failed ACK", async t => {
+test("combined issue reply checkpoints once across send failure, restart and failed ACK", async t => {
   const f = fixture(t), calls = [];
   const item = { id: "mention-delivery", content: "**Reply**\n\n- Original content", comment_id: "c1", conversation: { kind: "group", id: "42" }, binding, notify_users: ["alice", "bob"] };
   let failAt = true, failAck = true, acked = false, acks = 0;
   const sender = async (conversation, content, options) => {
     calls.push({ conversation, content, options });
-    if (options.notificationOnly && failAt) throw Error("AT transport failed");
+    if (failAt) throw Error("combined transport failed");
     return { messageid: "1234567890123456789" };
   };
   const request = async path => {
@@ -145,7 +145,7 @@ test("issue Markdown and AT reminder checkpoint independently across restart and
   };
   const relay = f.bridge.issueRelay; relay.send = sender; relay.request = request;
   await relay.poll();
-  assert.equal(relay.sentParts[item.id].next, 1);
+  assert.equal(relay.sentParts[item.id].next, 0);
   assert.deepEqual(relay.sentParts[item.id].notifyUsers, ["alice", "bob"]);
   assert.equal(acks, 0);
   f.bridge.stop(); failAt = false;
@@ -156,9 +156,9 @@ test("issue Markdown and AT reminder checkpoint independently across restart and
   assert.equal(acks, 1);
   failAck = false; await restored.poll();
   assert.equal(acks, 2);
-  assert.equal(calls.filter(x => !x.options.notificationOnly).length, 1);
-  assert.equal(calls.filter(x => x.options.notificationOnly).length, 2);
-  assert.deepEqual(calls[2].options, { atUsers: ["alice", "bob"], notificationOnly: true });
+  assert.equal(calls.filter(x => !x.options.notificationOnly).length, 2);
+  assert.equal(calls.filter(x => x.options.notificationOnly).length, 0);
+  assert.deepEqual(calls[1].options.atUsers, ["alice", "bob"]);
   assert.match(calls[0].content, /\*\*Reply\*\*/);
   assert.equal(item.content, "**Reply**\n\n- Original content");
 });
@@ -168,16 +168,16 @@ test("changed issue notification audiences pause retries instead of notifying a 
   const item = { id: "changed-audience", content: "answer", conversation: { kind: "group", id: "42" }, binding, notify_users: ["alice"] };
   let bodies = 0, notices = 0;
   f.bridge.issueRelay.send = async (_c, _text, options) => {
-    if (options.notificationOnly) { notices++; throw Error("AT failed"); }
-    bodies++; return {};
+    if (options.notificationOnly) { notices++; throw Error("unexpected TEXT"); }
+    bodies++; throw Error("combined send failed");
   };
   f.bridge.issueRelay.request = async () => ({ deliveries: [item] });
   await f.bridge.issueRelay.poll();
   item.notify_users = ["mallory"]; await f.bridge.issueRelay.poll();
-  assert.equal(bodies, 1); assert.equal(notices, 1);
+  assert.equal(bodies, 1); assert.equal(notices, 0);
 });
 
-test("issue delivery strips only internal AT links on the wire and ACK retry never resends either message", async t => {
+test("issue combined delivery preserves ordinary links and ACK retry never resends", async t => {
   const f = fixture(t), wire = [];
   const original = "**结果**\n\n- [@小明](mention://member/member-id)\n- [文档](https://example.test/docs)";
   const item = { id: "plain-mention-delivery", content: original, comment_id: "c1", conversation: { kind: "group", id: "42" }, binding, notify_users: ["alice", "bob"] };
@@ -195,17 +195,17 @@ test("issue delivery strips only internal AT links on the wire and ACK retry nev
     return { deliveries: acked ? [] : [item] };
   };
   await f.bridge.issueRelay.poll();
-  assert.equal(wire.length, 2);
+  assert.equal(wire.length, 1);
   assert.equal(wire[0].header.msgtype, "MD");
-  assert.match(wire[0].body[0].content, /\*\*结果\*\*\n\n- @小明\n- \[文档\]\(https:\/\/example.test\/docs\)/);
-  assert.doesNotMatch(wire[0].body[0].content, /mention:\/\//);
-  assert.match(wire[0].body[0].content, /\[完整对话链接\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1#comment-c1\)/);
-  assert.deepEqual(wire[1].body[0], { type: "AT", atall: false, atuserids: ["alice", "bob"] });
-  assert.doesNotMatch(wire[1].body[1].content, /https?:|完整对话链接/);
+  assert.match(wire[0].body[1].content, /\*\*结果\*\*\n\n- @小明\n- \[文档\]\(https:\/\/example.test\/docs\)/);
+  assert.doesNotMatch(wire[0].body[1].content, /mention:\/\//);
+  assert.match(wire[0].body[1].content, /\[完整对话链接\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1#comment-c1\)/);
+  assert.deepEqual(wire[0].body[0], { type: "AT", atall: false, atuserids: ["alice", "bob"] });
+  assert.match(wire[0].body[1].content, /@alice @bob/);
   assert.equal(item.content, original);
   await f.bridge.issueRelay.poll();
   assert.equal(acked, true);
-  assert.equal(wire.length, 2);
+  assert.equal(wire.length, 1);
 });
 
 test("denied workspace user gets received reaction and owner notice but never starts Chat", async t => {
@@ -218,7 +218,7 @@ test("denied workspace user gets received reaction and owner notice but never st
   assert.equal(f.sent.length, 1);
   assert.match(f.sent[0].content, /没有工作区权限/);
   assert.match(f.sent[0].content, /完整对话链接\]\(http:\/\/localhost:8004\/team\/issues\/TEST-1\)\*\*$/);
-  assert.deepEqual(f.sent[0].options, {});
+  assert.deepEqual(f.sent[0].options.atUsers || [], []);
 });
 
 test("comment-only result reports no invoke permission and never says run started", async t => {
@@ -332,10 +332,10 @@ test("outbound replies preserve content, append footer, have no @ and ack only a
   await f.bridge.issueRelay.poll();
   assert.equal(f.sent.length, 1);
   assert.ok(f.sent[0].content.startsWith(withReplyMode(content, "issue", binding.identifier)));
-  assert.deepEqual(f.sent[0].options, {});
+  assert.deepEqual(f.sent[0].options.atUsers || [], []);
 });
 
-test("user mirror uses trusted username, original comment link and one 1800-byte summary without forced AT", async t => {
+test("user mirror uses trusted username, original comment link and one 8192-unit summary without forced AT", async t => {
   const f = fixture(t);
   f.config.multica.issueWebUrl = "http://127.0.0.1:8004";
   const item = { id: "user-mirror", author_type: "user", author_name: "alice", author_agent_id: agent,
@@ -346,8 +346,8 @@ test("user mirror uses trusted username, original comment link and one 1800-byte
   assert.equal(f.sent.length, 1);
   assert.ok(f.sent[0].content.startsWith("**[任务模式] TEST-1**\n\n@alice：中文"));
   assert.ok(f.sent[0].content.endsWith("**[完整对话链接](http://127.0.0.1:8004/team/issues/TEST-1#comment-user-comment)**"));
-  assert.ok(Buffer.byteLength(f.sent[0].content) <= 1800);
-  assert.deepEqual(f.sent[0].options, {});
+  assert.ok(f.sent[0].content.length <= 8192);
+  assert.deepEqual(f.sent[0].options.atUsers || [], []);
   assert.equal(acks.length, 1);
   assert.equal(item.content.startsWith("@"), false);
 });
@@ -407,8 +407,8 @@ test("ack failure and process restart do not resend a checkpointed single summar
   await f.bridge.issueRelay.poll();
   const sentCount = f.sent.length;
   assert.equal(sentCount, 1);
-  assert.ok(f.sent.every(r => r.content.startsWith("**[任务模式] TEST-1**\n\n") && r.content.includes("**[完整对话链接](") && Buffer.byteLength(r.content) <= 1800));
-  assert.equal(f.bridge.issueRelay.sentParts.delivery.format, "summary-v1");
+  assert.ok(f.sent.every(r => r.content.startsWith("**[任务模式] TEST-1**\n\n") && r.content.includes("**[完整对话链接](") && r.content.length <= 8192));
+  assert.equal(f.bridge.issueRelay.sentParts.delivery.format, "combined-v2");
   f.bridge.issueRelay.stop();
   const restored = new IssueRelay(f.config, {}, async () => { throw new Error("unexpected duplicate send"); }, { warn() {} });
   t.after(() => restored.stop());
@@ -434,10 +434,10 @@ for (const kind of ["private", "group"]) test(`${kind} failed first summary send
   assert.equal(attempts, 1);
   assert.equal(acknowledgements.length, 0);
   assert.equal(f.bridge.issueRelay.sentParts.delivery.next, 0);
-  assert.equal(f.bridge.issueRelay.sentParts.delivery.format, "summary-v1");
+  assert.equal(f.bridge.issueRelay.sentParts.delivery.format, "combined-v2");
   f.bridge.stop();
   const restored = new IssueRelay(f.config, {}, async (_c, text, options) => {
-    attempts++; assert.ok(Buffer.byteLength(text) <= 1800); assert.deepEqual(options, {});
+    attempts++; assert.ok(text.length <= 8192); assert.deepEqual(options.atUsers || [], []);
     assert.ok(text.endsWith("**[完整对话链接](http://localhost:8004/team/issues/TEST-1#comment-c1)**"));
     return kind === "private" ? { msgkey: "1836339350307196087" } : { messageid: "1836339350307196087" };
   }, { warn() {} });
@@ -494,7 +494,7 @@ test("completed legacy checkpoint retries only Ack with every original exact mes
 
 test("oversized fresh link never sends or acknowledges a reply that cannot fit its footer", async t => {
   const f = fixture(t);
-  f.config.multica.issueWebUrl = "https://entry.example.test/" + "path".repeat(500);
+  f.config.multica.issueWebUrl = "https://entry.example.test/" + "path".repeat(2500);
   const item = { id: "delivery", content: "正文", binding, conversation: { kind: "private", id: "alice" } };
   let acks = 0;
   f.bridge.issueRelay.request = async path => {
@@ -606,4 +606,19 @@ test("more than 500 permanently invalid inputs do not occupy the normal inbox ca
   };
   await f.send("good", { conversation: { kind: "group", id: "43" }, messageId: "2000" });
   assert.equal(handled, 1);
+});
+test("a stale private delivery is checked again before sending and cannot block another target", async t => {
+  const f=fixture(t);
+  const stale={id:"stale-private",content:"private result",conversation:{kind:"private",id:"alice"},binding,requires_check:true};
+  const valid={...stale,id:"valid-private",conversation:{kind:"private",id:"bob"}};
+  const sent=[],acks=[];
+  f.bridge.issueRelay.send=async(c,text)=>{sent.push(c.id);return {msgkey:"123"}};
+  f.bridge.issueRelay.request=async path=>{
+    if(path.endsWith("/check"))return {allowed:path.includes("valid-private")};
+    if(path.endsWith("/ack")){acks.push(path);return {}}
+    return {deliveries:[stale,valid]};
+  };
+  await f.bridge.issueRelay.poll();
+  assert.deepEqual(sent,["bob"]);
+  assert.equal(acks.length,1);
 });
