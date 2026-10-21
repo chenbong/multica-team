@@ -67,6 +67,10 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
     名单之外的命令一个字节都不变（`ducx` 这类本来就正常的 CLI 完全不受影响），名单为空则不生成任何包装器。
     「添加电脑」下发的命令同样可以预置这一行（`deploy/host.env` 里的
     `MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS=ducc`），用户复制即可，无需在每台机器上手工维护脚本。
+13. **输入框默认按 Enter 发送**。上游 `send` 快捷键默认是 ⌘/Ctrl+Enter，overlay 改成 Enter
+    （`overlays/send-on-enter-web-patch.py`）。Shift+Enter 换行（富文本编辑器里分段、续写列表、代码块换行），
+    输入法组字时的 Enter 不会误发送，单行标题编辑器仍不响应 Enter；习惯原行为的用户可在
+    「设置 → 快捷键」里改回 ⌘/Ctrl+Enter。
 
 ## 可选：OneAPI 模型目录
 
