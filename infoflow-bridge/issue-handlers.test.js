@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHandlers, RobotRuntime } from "./src/robots.js";
 import { Bridge } from "./src/bridge.js";
+import { privateContent } from "./src/inbound-content.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -11,6 +12,8 @@ function fixture() {
   registerHandlers({
     wsClient: { on: (event, fn) => handlers.set(event, fn) },
     client: {}, robot: { name: "fixture", appId: "12" },
+    getPrivateMessage: async (raw,event) => privateContent(raw,event),
+    getGroupMessage: async (raw,event) => privateContent(raw,event),
     bridge: { handleMessage: async message => received.push(message) },
     logger: { log() {}, warn() {} },
   });

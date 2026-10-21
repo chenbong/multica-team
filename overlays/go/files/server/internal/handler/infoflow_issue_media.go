@@ -21,6 +21,8 @@ type infoFlowAttachment struct {
 	DataBase64  string `json:"data_base64"`
 }
 
+var errInfoFlowMediaUpload = errors.New("temporary attachment upload failure")
+
 func (h *Handler) infoFlowUploadAttachments(r *http.Request, attachments []infoFlowAttachment, issueID pgtype.UUID, creating bool) ([]string, []string, error) {
 	if len(attachments) > 5 {
 		return nil, nil, errors.New("too many attachments")
@@ -70,6 +72,9 @@ func (h *Handler) infoFlowUploadAttachments(r *http.Request, attachments []infoF
 		capture := &infoFlowCapture{}
 		h.UploadFile(capture, upload)
 		if capture.status < 200 || capture.status >= 300 {
+			if capture.status >= 500 {
+				return ids, urls, errInfoFlowMediaUpload
+			}
 			return ids, urls, errors.New("attachment upload failed")
 		}
 		var out struct {
@@ -81,7 +86,7 @@ func (h *Handler) infoFlowUploadAttachments(r *http.Request, attachments []infoF
 			urls = append(urls, out.URL)
 		}
 		if err != nil || out.ID == "" || out.URL == "" {
-			return ids, urls, errors.New("invalid upload result")
+			return ids, urls, errInfoFlowMediaUpload
 		}
 		ids = append(ids, out.ID)
 	}

@@ -50,6 +50,7 @@ type infoFlowRelayRequest struct {
 	IssueRef           string               `json:"issue_ref,omitempty"`
 	Content            string               `json:"content,omitempty"`
 	ReplyToMessageID   string               `json:"reply_to_message_id,omitempty"`
+	RequireRobotQuote  bool                 `json:"require_robot_quote,omitempty"`
 	HasAttachments     bool                 `json:"has_attachments,omitempty"`
 	Attachments        []infoFlowAttachment `json:"attachments,omitempty"`
 	ExpectedBindingID  string               `json:"expected_binding_id,omitempty"`
@@ -71,6 +72,7 @@ type infoFlowBindingView struct {
 }
 
 type infoFlowRelayResponse struct {
+	InputReceived      *bool                `json:"input_received,omitempty"`
 	CanReconcileGroup  bool                 `json:"can_reconcile_group,omitempty"`
 	BindingRevalidated bool                 `json:"binding_revalidated,omitempty"`
 	ConversationMode   string               `json:"conversation_mode,omitempty"`
@@ -109,6 +111,7 @@ type infoFlowBinding struct {
 	AssignmentVersion int64
 	RobotChatID       string
 	RobotName         string
+	SyncEnabled       bool
 }
 
 type infoFlowPrivateView struct {
@@ -481,6 +484,31 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sh, flush := h.infoFlowScoped(tx)
+	if req.RequireRobotQuote {
+		if req.Conversation.Kind != "group" || req.ReplyToMessageID == "" || req.Command != "" || (req.Operation != "binding" && req.Operation != "message") {
+			infoFlowError(w, 400, "invalid robot quote")
+			return
+		}
+		var known bool
+		err = tx.QueryRow(r.Context(), `SELECT EXISTS(
+ SELECT 1 FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id
+ WHERE b.workspace_id=$1 AND b.conversation_kind='group' AND b.conversation_id=$2
+ AND b.issue_id IS NOT NULL AND b.generation=d.generation
+ AND (d.external_message_id=$3 OR $3=ANY(d.external_message_ids))
+ UNION ALL
+ SELECT 1 FROM infoflow_conversation_notice n JOIN infoflow_issue_binding b ON b.id=n.binding_id
+ WHERE n.workspace_id=$1 AND n.conversation_kind='group' AND n.conversation_id=$2
+ AND n.kind='bound' AND b.issue_id IS NOT NULL AND b.generation=n.generation
+ AND $3=ANY(n.external_message_ids))`, req.WorkspaceID, req.Conversation.ID, req.ReplyToMessageID).Scan(&known)
+		if err != nil {
+			infoFlowError(w, 500, "robot quote lookup")
+			return
+		}
+		if !known {
+			writeJSON(w, 200, infoFlowRelayResponse{Handled: true, Silent: true})
+			return
+		}
+	}
 	if req.Operation == "binding" && (req.Command == "help" || req.Command == "status") {
 		sh.infoFlowConversationCommand(w, r, tx, req)
 		return
@@ -678,6 +706,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			resp.InputReceived = &accepted
 			if !accepted && (req.ExpectedBindingID != uuidToString(b.ID) || req.ExpectedGeneration != uuidToString(b.Generation) || !b.IssueID.Valid) {
 				infoFlowError(w, 409, "preflight version")
 				return
@@ -1035,7 +1064,11 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		attachmentIDs, urls, uploadErr := sh.infoFlowUploadAttachments(memberReq, req.Attachments, b.IssueID, req.Operation == "create")
 		uploads = append(uploads, urls...)
 		if uploadErr != nil {
-			infoFlowError(w, 400, "upload failed")
+			status := 400
+			if errors.Is(uploadErr, errInfoFlowMediaUpload) {
+				status = http.StatusServiceUnavailable
+			}
+			infoFlowError(w, status, "upload failed")
 			return
 		}
 		capture := &infoFlowCapture{}
@@ -1155,7 +1188,7 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 		if req.Conversation.Kind == "private" && (req.Operation == "bind" || req.Operation == "create") && req.RobotChatID != "" {
 			b.RobotChatID, b.RobotName = req.RobotChatID, strings.TrimSpace(req.RobotName)
 		}
-		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END,assignment_version=$5,robot_chat_id=$6,robot_name=$7 WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation, b.AssignmentVersion, b.RobotChatID, b.RobotName)
+		_, err = tx.Exec(r.Context(), `UPDATE infoflow_issue_binding SET sync_enabled=CASE WHEN issue_id IS DISTINCT FROM $2 THEN true ELSE sync_enabled END,issue_id=$2,binder_id=$3,generation=$4,bound_at=CASE WHEN generation<>$4 THEN clock_timestamp() ELSE bound_at END,assignment_version=$5,robot_chat_id=$6,robot_name=$7 WHERE id=$1`, b.ID, b.IssueID, b.BinderID, b.Generation, b.AssignmentVersion, b.RobotChatID, b.RobotName)
 		if err != nil {
 			infoFlowError(w, 500, "binding update")
 			return

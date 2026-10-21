@@ -44,9 +44,11 @@ jobs:
       - name: Test transport-independent Bridge behavior with fakes
         working-directory: infoflow-bridge
         run: >-
-          node --test chat.test.js conversation-context.test.js
+          node --test chat.test.js conversation-context.test.js inbound-content.test.js reply-images.test.js reply-images-integration.test.js
           issue-relay.test.js issue-relay-reliability.test.js issue-groups.test.js web-group-bindings.test.js issue-review-regressions.test.js issue-multigroup.test.js issue-private-multi.test.js web-private-bindings.test.js reply-mode.test.js
           reactions.test.js task-status-notifications.test.js group-info.test.js conversation-notices.test.js robot-directory.test.js admin-form.test.js private-bind-metadata.test.js issue-handlers.test.js receipt-handoff.test.js reply-mentions.test.js reply-title.test.js group-markdown.test.js reply-format.test.js infoflow-markdown.test.js
+      - name: Verify configured Web release acceptance
+        run: python3 -m unittest discover -s deploy -p test_verify_web_release.py -v
       - name: Verify standalone restart credentials and private state exclusions
         run: |
           python3 -m unittest discover -s infoflow-bridge/test -p 'test_bridgectl.py' -v

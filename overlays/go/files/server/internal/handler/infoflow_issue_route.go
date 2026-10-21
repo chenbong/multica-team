@@ -10,11 +10,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const infoFlowBindingColumns = `id,issue_id,binder_id,generation,bound_at,conversation_kind,group_topology,group_state,COALESCE(leader_robot_id,''),leader_verified_at,assignment_version,robot_chat_id,robot_name`
+const infoFlowBindingColumns = `id,issue_id,binder_id,generation,bound_at,conversation_kind,group_topology,group_state,COALESCE(leader_robot_id,''),leader_verified_at,assignment_version,robot_chat_id,robot_name,sync_enabled`
 
 func infoFlowScanBinding(row pgx.Row, extra ...any) (infoFlowBinding, error) {
 	var b infoFlowBinding
-	fields := []any{&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt, &b.Kind, &b.GroupTopology, &b.GroupState, &b.LeaderRobotID, &b.LeaderVerifiedAt, &b.AssignmentVersion, &b.RobotChatID, &b.RobotName}
+	fields := []any{&b.ID, &b.IssueID, &b.BinderID, &b.Generation, &b.BoundAt, &b.Kind, &b.GroupTopology, &b.GroupState, &b.LeaderRobotID, &b.LeaderVerifiedAt, &b.AssignmentVersion, &b.RobotChatID, &b.RobotName, &b.SyncEnabled}
 	err := row.Scan(append(fields, extra...)...)
 	return b, err
 }
@@ -46,6 +46,7 @@ func infoFlowGroupQuoteBinding(ctx context.Context, tx pgx.Tx, req infoFlowRelay
 	rows, err := tx.Query(ctx, `SELECT DISTINCT b.id::text, (b.issue_id IS NOT NULL AND b.generation=x.generation AND b.issue_id=x.issue_id) AS current FROM infoflow_issue_binding b JOIN (
 	 SELECT binding_id,generation,issue_id FROM infoflow_issue_source WHERE message_id=$3
 	 UNION ALL SELECT d.binding_id,d.generation,c.issue_id FROM infoflow_issue_delivery d JOIN comment c ON c.id=d.comment_id WHERE d.external_message_id=$3 OR $3=ANY(d.external_message_ids)
+	 UNION ALL SELECT binding_id,generation,issue_id FROM infoflow_conversation_notice WHERE kind='bound' AND $3=ANY(external_message_ids)
 	) x ON x.binding_id=b.id WHERE b.conversation_kind=$4 AND b.conversation_id=$1 AND b.workspace_id=$2 AND ($4='group' OR (b.robot_id=$5 AND b.agent_id::text=lower($6)))`, req.Conversation.ID, req.WorkspaceID, req.ReplyToMessageID, req.Conversation.Kind, req.RobotID, req.AgentID)
 	if err != nil {
 		return "", false, err
@@ -67,7 +68,7 @@ func infoFlowGroupQuoteBinding(ctx context.Context, tx pgx.Tx, req infoFlowRelay
 	}
 	if len(ids) == 0 {
 		var elsewhere bool
-		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_source WHERE message_id=$1) OR EXISTS(SELECT 1 FROM infoflow_issue_delivery WHERE external_message_id=$1 OR $1=ANY(external_message_ids))`, req.ReplyToMessageID).Scan(&elsewhere)
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_source WHERE message_id=$1) OR EXISTS(SELECT 1 FROM infoflow_issue_delivery WHERE external_message_id=$1 OR $1=ANY(external_message_ids)) OR EXISTS(SELECT 1 FROM infoflow_conversation_notice WHERE $1=ANY(external_message_ids))`, req.ReplyToMessageID).Scan(&elsewhere)
 		return "", elsewhere, err
 	}
 	if len(ids) != 1 || stale {

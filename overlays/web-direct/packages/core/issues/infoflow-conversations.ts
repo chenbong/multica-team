@@ -84,3 +84,11 @@ export function useUnbindIssueInfoFlowConversation(workspaceId: string, issueId:
 export function useCancelIssueInfoFlowRequest(workspaceId: string, issueId: string) {
   return useConversationMutation<InfoFlowConversationRequestTarget>(workspaceId, issueId, (id, target) => api.cancelIssueInfoFlowRequest(id, target));
 }
+
+export function useUpdateIssueInfoFlowSync(workspaceId: string, issueId: string) {
+  return useConversationMutation<{bindingId: string; expectedGeneration: string; syncEnabled: boolean}>(
+    workspaceId, issueId, (id, target) => api.updateIssueInfoFlowSync(id, target.bindingId, {
+      expected_generation: target.expectedGeneration, sync_enabled: target.syncEnabled,
+    }),
+  );
+}

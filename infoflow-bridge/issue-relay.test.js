@@ -307,6 +307,59 @@ test("authorized media is encoded for the attributed backend upload and always c
   assert.equal(cleaned, true);
 });
 
+test("partial image failure rejects the whole input and redelivery cannot restart it", async t => {
+  const f = fixture(t);
+  let cleaned = 0, staged = 0;
+  f.bridge.issueRelay.stageImages = async () => { staged++; return { paths: [], failed: ["第2张图片下载失败"], cleanup: async () => { cleaned++; } }; };
+  await f.send("分析两张图", { images: [{}, {}] });
+  assert.equal(f.requests.filter(x => x.body.operation === "message").length, 0);
+  assert.equal(cleaned, 1);
+  assert.match(f.sent[0].content, /整条消息未提交/);
+  await f.send("分析两张图", { images: [{}, {}] });
+  assert.equal(staged, 1);
+  assert.equal(f.sent.length, 1);
+});
+
+test("accepted image input keeps a durable local receipt for the other fragments sharing its message ID", async t => {
+  const f=fixture(t),file=join(f.dir,'image.png');writeFileSync(file,Buffer.from([1,2,3]));
+  let staged=0,posts=0;
+  f.bridge.issueRelay.stageImages=async()=>{staged++;return {paths:[file],failed:[],cleanup:async()=>{}};};
+  f.bridge.issueRelay.request=async(path,body)=>{if(body.operation==='message')posts++;return {handled:true,silent:true,can_comment:true,binding,...(body.operation==='message'?{comment_id:'stored-comment'}:{})};};
+  await f.send('Complete original input',{images:[{}]});
+  await f.send('Complete original input',{images:[{}]});
+  assert.equal(posts,1);assert.equal(staged,1);
+});
+
+test("unsupported files produce the task link without posting text or downloading", async t => {
+  const f = fixture(t);
+  f.bridge.issueRelay.stageImages = () => assert.fail("file must not download");
+  await f.send("分析附件", { unsupportedFile: true });
+  assert.equal(f.requests.filter(x => x.body.operation === "message").length, 0);
+  assert.match(f.sent[0].content, /暂不支持文件/);
+  assert.match(f.sent[0].content, /TEST-1/);
+});
+
+test("image POST attempts are bounded and an unknown outcome is checked without repeating execution", async t => {
+  const f = fixture(t);
+  const file = join(f.dir, "picture.png"); writeFileSync(file, Buffer.from([1,2,3]));
+  f.bridge.issueRelay.stageImages = async () => ({ paths:[file], failed:[], cleanup:async()=>{} });
+  let posts=0, accepted=false;
+  f.bridge.issueRelay.request = async (path, body) => {
+    if(body.operation === "binding")return {handled:true,silent:true,can_comment:true,binding,...(posts>=3?{input_received:accepted}:{})};
+    if(body.operation === "message"){posts++; throw new Error("lost response");}
+    return {};
+  };
+  await f.send("图片", {images:[{}]});
+  await f.bridge.issueRelay.drain(JSON.stringify(["group","42"]));
+  await f.bridge.issueRelay.drain(JSON.stringify(["group","42"]));
+  assert.equal(posts,3);
+  accepted=true;
+  await f.bridge.issueRelay.drain(JSON.stringify(["group","42"]));
+  assert.equal(posts,3);
+  assert.equal(Object.keys(f.bridge.issueRelay.inbox).length,0);
+  assert.equal(f.sent.length,0);
+});
+
 test("new issue media requires an explicit creation preflight even in an unbound chat", async t => {
   const f = fixture(t);
   f.bridge.issueRelay.stageImages = async () => { throw new Error("unauthorized create must not download media"); };

@@ -9,7 +9,7 @@ def extend(changes):
     add("packages/core/package.json", '    "./issues": "./issues/index.ts",',
         '    "./issues": "./issues/index.ts",\n    "./issues/infoflow-groups": "./issues/infoflow-groups.ts",\n    "./issues/infoflow-group-binding": "./issues/infoflow-group-binding.ts",\n    "./issues/infoflow-conversations": "./issues/infoflow-conversations.ts",')
     add("packages/core/api/client.ts", 'import { configStore } from "../config";',
-        'import { configStore } from "../config";\nimport { InfoFlowGroupsSchema, InfoFlowGroupBindingSchema, InfoFlowGroupTargetSchema, infoFlowGroupURL, infoFlowGroupBindingStatus, type InfoFlowGroup, type InfoFlowGroupBindingWire, type InfoFlowGroupBindingStatus, type InfoFlowGroupTarget } from "./infoflow-groups-schema";\nimport { InfoFlowConversationsSchema, InfoFlowConversationTargetSchema, InfoFlowConversationBindingIdSchema, InfoFlowConversationRequestTargetSchema, infoFlowConversationsStatus, type InfoFlowConversationsWire, type InfoFlowConversationsStatus, type InfoFlowConversationTarget, type InfoFlowConversationRequestTarget } from "./infoflow-conversations-schema";')
+        'import { configStore } from "../config";\nimport { InfoFlowGroupsSchema, InfoFlowGroupBindingSchema, InfoFlowGroupTargetSchema, infoFlowGroupURL, infoFlowGroupBindingStatus, type InfoFlowGroup, type InfoFlowGroupBindingWire, type InfoFlowGroupBindingStatus, type InfoFlowGroupTarget } from "./infoflow-groups-schema";\nimport { InfoFlowConversationsSchema, InfoFlowConversationTargetSchema, InfoFlowConversationBindingIdSchema, InfoFlowConversationRequestTargetSchema, InfoFlowConversationSyncSchema, infoFlowConversationsStatus, type InfoFlowConversationsWire, type InfoFlowConversationsStatus, type InfoFlowConversationTarget, type InfoFlowConversationRequestTarget } from "./infoflow-conversations-schema";')
     anchor = '  async moveIssue(id: string, data: MoveIssueRequest): Promise<Issue> {'
     add("packages/core/api/client.ts", anchor, '''  async getIssueInfoFlowGroups(id: string): Promise<InfoFlowGroup[]> {
     const result = parseWithFallback<{ groups: { group_id: string; name?: string; url: string }[] } | null>(
@@ -79,6 +79,19 @@ def extend(changes):
     return infoFlowConversationsStatus(result);
   }
 
+  async updateIssueInfoFlowSync(id: string, bindingId: string, target: {expected_generation: string; sync_enabled: boolean}): Promise<InfoFlowConversationsStatus> {
+    const binding = InfoFlowConversationBindingIdSchema.safeParse(bindingId);
+    const input = InfoFlowConversationSyncSchema.safeParse(target);
+    if (!binding.success || !input.success) throw new Error("Invalid InfoFlow sync target");
+    const result = parseWithFallback<InfoFlowConversationsWire | null>(
+      await this.fetch(`/api/issues/${encodeURIComponent(id)}/infoflow-conversations/${encodeURIComponent(binding.data)}/sync`, {
+        method: "PUT", body: JSON.stringify(input.data),
+      }), InfoFlowConversationsSchema, null, { endpoint: "PUT /api/issues/:id/infoflow-conversations/:bindingId/sync" },
+    );
+    if (!result) throw new Error("Invalid InfoFlow conversation status");
+    return infoFlowConversationsStatus(result);
+  }
+
   async cancelIssueInfoFlowRequest(id: string, target: InfoFlowConversationRequestTarget): Promise<InfoFlowConversationsStatus> {
     const input = InfoFlowConversationRequestTargetSchema.safeParse(target);
     if (!input.success) throw new Error("Invalid InfoFlow conversation request target");
@@ -141,7 +154,10 @@ def extend(changes):
             '  "infoflow_groups": ' + json.dumps(copy, ensure_ascii=False) + ',\n  "inline_run":')
     conversation_labels = {
         "en": {"bind": "Bind InfoFlow conversation", "description": "Group and your private conversation can both be linked to this task.",
-            "sync_scope": "Each task supports one group and one private chat. New task comments and replies are shared across all bound conversations, including private chats and groups. Original messages are not echoed to their source. Historical messages are not replayed.",
+            "sync_scope": "Each task supports one group and one private chat. New comments and replies go only to conversations with sync enabled. Original messages are not echoed to their source.",
+            "sync_group": "Sync to group", "sync_private": "Sync to private conversation",
+            "sync_help": "Turning sync off keeps incoming instructions active and cancels unsent content. Resuming does not replay history.",
+            "sync_failed": "Unable to update sync",
             "sync_short": "New messages are shared across bound private chats and groups.",
             "kind": "Conversation type", "group": "Group", "private": "My private conversation", "my_private": "Me and the assigned agent's robot",
             "private_routing": "A private conversation can link to several tasks. Reply to a task message or include its number when the target is ambiguous.",
@@ -159,7 +175,10 @@ def extend(changes):
             "cancel_request": "Cancel request", "cancel_group": "Cancel group request", "cancel_private": "Cancel private request",
             "cancel_group_note": "Cancellation stops binding confirmation, but does not withdraw group invitations already sent."},
         "zh-Hans": {"bind": "绑定如流对话", "description": "任务可同时关联群聊和你自己的私聊。",
-            "sync_scope": "每个任务最多绑定 1 个群聊和 1 个私聊。此任务的新评论和回复会同步到所有绑定对话，包括私聊和群聊。原始消息不回传来源对话，不补发历史消息。",
+            "sync_scope": "每个任务最多绑定 1 个群聊和 1 个私聊。仅向开启同步的对话推送新评论和回复，原始消息不回传来源。",
+            "sync_group": "同步到群聊", "sync_private": "同步到私聊",
+            "sync_help": "关闭后仍可从如流派活，但不再推送任务内容；待发消息会取消，恢复后不补发。",
+            "sync_failed": "无法修改同步状态",
             "sync_short": "新消息会同步到全部绑定的私聊和群聊。",
             "kind": "对话类型", "group": "群聊", "private": "我的私聊", "my_private": "我与任务负责智能体的机器人",
             "private_routing": "同一私聊可关联多个任务。出现多个候选时，请引用任务消息或注明任务编号。",

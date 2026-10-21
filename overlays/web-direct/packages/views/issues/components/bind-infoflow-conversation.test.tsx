@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError } from "@multica/core/api";
@@ -7,10 +7,11 @@ import { infoFlowConversationURL, type InfoFlowConversationsStatus } from "@mult
 import en from "../../locales/en/issues.json";
 import { BindInfoFlowConversation } from "./bind-infoflow-conversation";
 
-const state = vi.hoisted(() => ({ user: "user-a", get: vi.fn(), post: vi.fn(), remove: vi.fn(), cancel: vi.fn(), legacy: vi.fn() }));
+const state = vi.hoisted(() => ({ user: "user-a", get: vi.fn(), post: vi.fn(), remove: vi.fn(), cancel: vi.fn(), sync: vi.fn(), legacy: vi.fn() }));
 vi.mock("@multica/core/api", async (original) => ({ ...await original<typeof import("@multica/core/api")>(), api: {
   getIssueInfoFlowConversations: state.get, bindIssueInfoFlowConversation: state.post, unbindIssueInfoFlowConversation: state.remove,
   cancelIssueInfoFlowRequest: state.cancel,
+  updateIssueInfoFlowSync: state.sync,
   getIssueInfoFlowGroupBinding: state.legacy, getIssueInfoFlowGroups: vi.fn().mockResolvedValue([]),
 } }));
 vi.mock("@multica/core/auth", () => ({ useAuthStore: Object.assign((selector: (value: { user: { id: string } }) => unknown) => selector({ user: { id: state.user } }), { getState: () => ({ user: { id: state.user } }) }) }));
@@ -23,6 +24,7 @@ beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
   state.get.mockReset().mockResolvedValue(fresh()); state.post.mockReset().mockResolvedValue(fresh()); state.remove.mockReset().mockResolvedValue(fresh());
   state.cancel.mockReset().mockResolvedValue(fresh());
+  state.sync.mockReset().mockResolvedValue(fresh());
   state.legacy.mockReset().mockResolvedValue({ enabled: false, canManage: false, binding: null, request: null, groups: [] });
 });
 afterEach(() => { cleanup(); client.clear(); });
@@ -33,6 +35,55 @@ async function open(managementURL?: string) {
 }
 
 describe("unified InfoFlow dialog", () => {
+  it.each(["group", "private"] as const)("uses the same bordered card and inline action row for %s", async (kind) => {
+    const current = fresh();
+    current.group.binding = { bindingId: id, groupId: "123", name: "Existing group", state: "active", reason: "", generation: id };
+    current.private.bindings = [{ bindingId: id, robotId: "robot", robotName: "Existing robot", robotChatId: "456", state: "active", reason: "", generation: id }];
+    state.get.mockResolvedValue(current);
+    const user = await open();
+    if (kind === "private") await user.click(screen.getByRole("tab", { name: en.infoflow_conversations.private }));
+    const card = screen.getByRole("region", { name: kind === "group" ? `${en.infoflow_groups.target}：123 · Existing group` : "Existing robot" });
+    expect(card).toHaveClass("rounded-lg", "border", "p-3", "min-w-0");
+    const openLink = within(card).getByRole("link", { name: kind === "group" ? en.infoflow_groups.open : en.infoflow_conversations.open_private });
+    const remove = within(card).getByRole("button", { name: kind === "group" ? en.infoflow_conversations.unbind_group : `${en.infoflow_conversations.unbind_private} Existing robot` });
+    expect(openLink.parentElement).toBe(remove.parentElement);
+    expect(openLink.parentElement).toHaveClass("flex", "flex-wrap", "items-center", "gap-2");
+    expect(within(card).getByRole("switch", { name: kind === "group" ? en.infoflow_conversations.sync_group : en.infoflow_conversations.sync_private })).toBeChecked();
+    expect(within(card).getByText(kind === "group" ? en.infoflow_groups.success : en.infoflow_conversations.private_success)).toBeVisible();
+  });
+  it("saves each sync switch immediately and leaves the other destination unchanged", async () => {
+    const current=fresh();
+    current.group.binding={bindingId:id,groupId:"123",name:"Group",state:"active",reason:"",generation:id,syncEnabled:true};
+    current.private.bindings=[{bindingId:id,robotId:"r",robotName:"Robot",robotChatId:"456",state:"active",reason:"",generation:id,syncEnabled:true}];
+    const paused={...current,group:{...current.group,binding:{...current.group.binding,syncEnabled:false}}};
+    let persisted=current;
+    state.get.mockImplementation(async()=>persisted);
+    state.sync.mockImplementation(async()=>{persisted=paused;return persisted;});
+    const user=await open();
+    await user.click(screen.getByRole("switch",{name:en.infoflow_conversations.sync_group}));
+    await waitFor(()=>expect(state.sync).toHaveBeenCalledWith("task",id,{expected_generation:id,sync_enabled:false}));
+    await waitFor(()=>expect(screen.getByRole("switch",{name:en.infoflow_conversations.sync_group})).not.toBeChecked());
+    await user.click(screen.getByRole("tab",{name:en.infoflow_conversations.private}));
+    expect(screen.getByRole("switch",{name:en.infoflow_conversations.sync_private})).toBeChecked();
+  });
+  it("keeps the persisted switch state and displays an error after a failed save", async () => {
+    const current=fresh();
+    current.group.binding={bindingId:id,groupId:"123",state:"active",reason:"",generation:id,syncEnabled:true};
+    state.get.mockResolvedValue(current);state.sync.mockRejectedValue(new Error("Unable to save fixture"));
+    const user=await open();
+    await user.click(screen.getByRole("switch",{name:en.infoflow_conversations.sync_group}));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Unable to save fixture");
+    expect(screen.getByRole("switch",{name:en.infoflow_conversations.sync_group})).toBeChecked();
+  });
+  it("allows readers to open the bound group without granting sync permission", async () => {
+    const current=fresh();current.group.canManage=false;current.private.canManage=false;
+    current.group.binding={bindingId:id,groupId:"123",state:"active",reason:"",generation:id,syncEnabled:false};
+    state.get.mockResolvedValue(current);const user=await open();
+    expect(screen.getByRole("link",{name:en.infoflow_groups.open})).toBeInTheDocument();
+    expect(screen.getByRole("switch",{name:en.infoflow_conversations.sync_group})).toHaveAttribute("aria-disabled","true");
+    await user.click(screen.getByRole("switch",{name:en.infoflow_conversations.sync_group}));
+    expect(state.sync).not.toHaveBeenCalled();
+  });
   it("keeps the cross-conversation disclosure visible for both binding types without another confirmation", async () => {
     const user = await open();
     expect(screen.getByText(en.infoflow_conversations.sync_scope)).toBeVisible();
@@ -40,12 +91,18 @@ describe("unified InfoFlow dialog", () => {
     expect(screen.getByText(en.infoflow_conversations.sync_scope)).toBeVisible();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
-  it("shows an always-visible disclosure on an existing binding without requiring rebind", async () => {
+  it("keeps opening links and sync disclosure inside the dialog only", async () => {
     const current = fresh();
     current.group.binding = { bindingId: id, groupId: "123", name: "Existing group", state: "active", reason: "" };
     state.get.mockResolvedValue(current);
     render(view());
-    expect(await screen.findByText(en.infoflow_conversations.sync_short)).toBeVisible();
+    const user=userEvent.setup();
+    await screen.findByRole("button",{name:en.infoflow_conversations.bind});
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.queryByText(en.infoflow_conversations.sync_short)).not.toBeInTheDocument();
+    expect(screen.queryByText(en.infoflow_conversations.sync_scope)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button",{name:en.infoflow_conversations.bind}));
+    expect(screen.getByRole("link",{name:en.infoflow_groups.open})).toBeInTheDocument();
     expect(state.post).not.toHaveBeenCalled();
   });
   it("previews the assigned robot name before private binding", async () => {
@@ -125,8 +182,9 @@ describe("unified InfoFlow dialog", () => {
   });
   it("shows coexisting verified links without any multi-group dropdown", async () => {
     state.get.mockResolvedValue({ ...fresh(), group: { ...fresh().group, binding: { bindingId: id, groupId: "123", state: "active", reason: "" } }, private: { ...fresh().private, bindings: [{ bindingId: id, robotId: "assigned", robotChatId: "9007199254740993", robotName: "Assigned robot", state: "active", reason: "" }] } });
-    render(view());
-    expect(await screen.findByRole("link", { name: en.infoflow_groups.open })).toHaveAttribute("href", infoFlowConversationURL("123", "group"));
+    const user=await open();
+    expect(screen.getByRole("link", { name: en.infoflow_groups.open })).toHaveAttribute("href", infoFlowConversationURL("123", "group"));
+    await user.click(screen.getByRole("tab",{name:en.infoflow_conversations.private}));
     expect(screen.getByRole("link", { name: en.infoflow_conversations.open_private })).toHaveAttribute("href", infoFlowConversationURL("9007199254740993", "private"));
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });

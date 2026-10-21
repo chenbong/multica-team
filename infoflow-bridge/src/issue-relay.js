@@ -12,6 +12,7 @@ import { pollRobotDirectory } from "./robot-directory.js";
 import { groupUsername } from "./issue-groups.js";
 import { formatCommandNotice } from "./commands.js";
 import { notifyUsers } from "./reply-mentions.js";
+import { readReplyImage } from "./reply-images.js";
 
 const DEFERRED_BINDING = Symbol("deferred-binding");
 const RECEIPT_ATTEMPTED = Symbol("receipt-attempted");
@@ -19,7 +20,7 @@ const RECEIPT_ATTEMPTED = Symbol("receipt-attempted");
 // The service credential only authorizes the trusted inbound bridge. Never put
 // it in agent prompts, CLI profiles, robot admin responses, or daemon requests.
 export class IssueRelay {
-  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null, getPrivateRobotInfo = null, getRobotAvailable = () => true, privateRobotInfoTimeoutMs = 10000, acknowledgeReceipt = null, now = Date.now } = {}) {
+  constructor(config, multica, send, logger = console, { fetchImpl = fetch, token = process.env.INFOFLOW_ISSUE_RELAY_TOKEN || "", stageImages = null, groups = null, getPrivateRobotInfo = null, getRobotAvailable = () => true, privateRobotInfoTimeoutMs = 10000, acknowledgeReceipt = null, now = Date.now, replyImages = null } = {}) {
     this.config = config;
     this.multica = multica;
     this.send = send;
@@ -33,6 +34,7 @@ export class IssueRelay {
     this.privateRobotInfoTimeoutMs = privateRobotInfoTimeoutMs;
     this.acknowledgeReceipt = acknowledgeReceipt;
     this.now = now;
+    this.replyImages = replyImages;
     this.enabled = config.issueRelay?.enabled === true;
     this.queues = new Map();
     this.stopped = false;
@@ -204,9 +206,21 @@ export class IssueRelay {
         this.logger.warn("issue relay inbox is full; input was not accepted");
         return true;
       }
+      const incomingImages = Array.isArray(message.images) ? message.images : [];
+      const inlineBytes = incomingImages.reduce((n,image) => {
+        if (!image?.inline || typeof image.content !== "string" || /^https?:\/\//i.test(image.content)) return n;
+        const encoded=image.content.replace(/^data:image\/[^;]+;base64,/i, "").replace(/\s+/g, "");
+        const padding=encoded.endsWith("==")?2:encoded.endsWith("=")?1:0;
+        return n+Math.max(0,Math.floor(encoded.length*3/4)-padding);
+      }, 0);
+      const mediaRejection = message.mediaRejection || (incomingImages.length > 5 ? "一次最多发送 5 张图片，请分开发送。" :
+        inlineBytes > 20*1024*1024 ? "图片合计超过 20MB，请分开发送。" : null);
       const input = { conversation: message.conversation, user: message.user, text: message.text, messageId: String(message.messageId),
+        ...(mediaRejection ? { mediaRejection } : {}),
+        ...(message.unsupportedFile ? { unsupportedFile: true } : {}),
+        ...(message.requireRobotQuote ? { requireRobotQuote: true } : {}),
         ...(typeof message.displayText === "string" && message.displayText ? { displayText: message.displayText } : {}),
-        replyToMessageId: message.replyToMessageId || null, images: message.images || [], context: message.context || null,
+        replyToMessageId: message.replyToMessageId || null, images: mediaRejection || message.unsupportedFile ? [] : incomingImages, context: message.context || null,
         ...(message.receipt ? { receipt: message.receipt } : {}),
         ...(message.conversation.kind === "group" ? { notifyUsers: notifyUsers(message.conversation, message.user, message.notifyUsers || []) } : {}) };
       this.inbox[id] = { key, input, createdAt: Date.now() };
@@ -258,7 +272,7 @@ export class IssueRelay {
         if (record.quarantined) { this.archiveQuarantined(id, record); continue; }
         // Receipt means only "received", not authorization or execution. Apply
         // it once to Chat, task inputs, commands and permission notices alike.
-        await this.confirmReceipt(id, record);
+        if (!record.input.requireRobotQuote) await this.confirmReceipt(id, record);
         if (record.chatSubmitted) { delete this.inbox[id]; this.saveInbox(); continue; }
         if (record.chatSubmitting) {
           const error = new Error("Chat submission outcome uncertain; inspect retained input before retrying");
@@ -266,6 +280,7 @@ export class IssueRelay {
           throw error;
         }
         const result = await this.handleSerial(record.input, record, blockedBindings);
+        if (record.quoteVerified) await this.confirmReceipt(id, record);
         if (result === DEFERRED_BINDING) continue;
         if (id === currentId) handled = result;
         // A recovered unbound Chat input cannot be dropped silently. The main
@@ -282,7 +297,7 @@ export class IssueRelay {
         // Only terminal, non-selected routing decisions are completed here.
         // Accepted mutations still rely on server receipts/permission checks;
         // transport failures and failed notice sends remain in the inbox.
-        if (record.routingNotice && result === true) this.completeRoutingDecision(id);
+        if ((record.routingNotice || record.mediaCommitted) && result === true) this.completeRoutingDecision(id, record.mediaCommitted ? "accepted-media" : "no-route");
         delete this.inbox[id];
         this.saveInbox();
       } catch (error) {
@@ -329,13 +344,13 @@ export class IssueRelay {
     this.saveInbox();
   }
 
-  completeRoutingDecision(id) {
+  completeRoutingDecision(id, disposition = "no-route") {
     // Keep small per-input tombstones rather than an expiring/in-memory seen
     // set: delayed SDK replays must not become executable after a topology
     // change. No raw text, identity, task list or credentials are retained.
     mkdirSync(this.decisionsPath, { recursive: true, mode: 0o700 });
     const path = joinPath(this.decisionsPath, id);
-    writeFileSync(path + ".tmp", JSON.stringify({ disposition: "no-route", completedAt: Date.now() }), { mode: 0o600 });
+    writeFileSync(path + ".tmp", JSON.stringify({ disposition, completedAt: Date.now() }), { mode: 0o600 });
     renameSync(path + ".tmp", path);
   }
 
@@ -346,7 +361,7 @@ export class IssueRelay {
     renameSync(this.inboxPath + ".tmp", this.inboxPath);
   }
 
-  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [], notifyUsers: recipients = [], displayText = null }, record = {}, blockedBindings = new Set()) {
+  async handleSerial({ conversation, user, text, messageId, replyToMessageId, images = [], notifyUsers: recipients = [], displayText = null, unsupportedFile = false, requireRobotQuote = false, mediaRejection = null }, record = {}, blockedBindings = new Set()) {
       const notificationUsers = notifyUsers(conversation, user, recipients);
       const sendNotice = result => this.sendNotice(conversation, result);
       // Missing/rounded identifiers cannot provide safe retry deduplication.
@@ -378,6 +393,13 @@ export class IssueRelay {
         content,
         ...(notificationUsers.length > 1 ? { notify_users: notificationUsers } : {}),
         ...(replyToMessageId ? { reply_to_message_id: String(replyToMessageId) } : {}),
+        ...(requireRobotQuote ? { require_robot_quote: true } : {}),
+      };
+      const rejectMedia = async (binding, notice) => {
+        record.routingNotice = { handled: true, silent: false, binding, notice };
+        this.saveInbox();
+        await sendNotice(record.routingNotice);
+        return true;
       };
       let staged;
       let result;
@@ -390,7 +412,7 @@ export class IssueRelay {
           // not retrofit today's binding onto it, even after a restart.
           throw Object.assign(new Error("unversioned prepared input requires operator review"), { status: 409 });
         }
-        if (record.preflightPending || (!wasPrepared && (versionedOperation ||
+        if (record.preflightPending || (images.length && record.mediaPrepared === false) || (!wasPrepared && (versionedOperation ||
             (this.groups && conversation.kind === "group" && parsed.operation === "binding" && !parsed.command)))) {
           // Routing is server-authoritative: preserve the text/task numbers and
           // exact quoted message ID, including when checking a pinned retry.
@@ -403,6 +425,8 @@ export class IssueRelay {
             throw Object.assign(new Error("binding changed during input preparation"), { status: 409 });
           }
           if (!preflight.binding && !preflight.handled && parsed.operation === "message") {
+            if (unsupportedFile) return rejectMedia(null, "暂不支持文件，请在任务网页上传。");
+            if (mediaRejection) return rejectMedia(null, mediaRejection);
             record.chatHandoff = true;
             this.saveInbox();
             return false;
@@ -459,12 +483,15 @@ export class IssueRelay {
             await sendNotice(preflight);
             return true;
           }
+          if (requireRobotQuote && preflight.can_comment) record.quoteVerified = true;
           if (versionedOperation) {
             if (!body.expected_binding_id) throw new Error("binding version is missing from preflight");
             record.preflightPending = false;
             this.saveInbox();
           }
         }
+        if (unsupportedFile) return rejectMedia(preflight?.binding, "暂不支持文件，请在任务网页上传。");
+        if (mediaRejection) return rejectMedia(preflight?.binding, mediaRejection);
         if (images.length && ((!wasPrepared && parsed.operation === "create") ||
             (parsed.operation === "message" && record.mediaPrepared === false))) {
           if (!preflight && parsed.operation === "create") {
@@ -476,24 +503,31 @@ export class IssueRelay {
             return true;
           }
           if (images.length > 5) {
-            await sendNotice({ ...preflight, notice: "一次最多发送 5 张图片，请分开发送。" });
-            return true;
+            return rejectMedia(preflight?.binding, "一次最多发送 5 张图片，请分开发送。");
           }
           if (!this.stageImages) throw new Error("issue image staging is not configured");
-          staged = await this.stageImages(images);
+          record.stageAttempts = (record.stageAttempts || 0) + 1;
+          this.saveInbox();
+          try { staged = await this.stageImages(images); }
+          catch (error) {
+            if (!error.mediaPermanent && record.stageAttempts < 3) throw error;
+            return rejectMedia(preflight?.binding, "图片接收失败，未提交到任务，请重新发送。");
+          }
+          if (staged.failed.length || staged.paths.length !== images.length) {
+            return rejectMedia(preflight?.binding, "图片接收失败，整条消息未提交到任务。" +
+              (staged.failed.length ? "\n" + staged.failed.join("\n") : "") + "\n请重新发送。");
+          }
           body.attachments = [];
           let totalBytes = 0;
           for (const path of staged.paths) {
             const bytes = await readFile(path);
             totalBytes += bytes.length;
             if (totalBytes > 20 * 1024 * 1024) {
-              await sendNotice({ ...preflight, notice: "图片合计超过 20MB，请分开发送。" });
-              return true;
+              return rejectMedia(preflight?.binding, "图片合计超过 20MB，请分开发送。");
             }
             const content_type = ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" })[extname(path).toLowerCase()] || "application/octet-stream";
             body.attachments.push({ filename: basename(path), content_type, data_base64: bytes.toString("base64") });
           }
-          if (staged.failed.length) body.content += "\n\n图片附件处理失败：\n" + staged.failed.join("\n");
           record.mediaPrepared = true;
         }
         if (!wasPrepared && conversation.kind === "private" && ["bind", "create"].includes(parsed.operation)) {
@@ -502,9 +536,25 @@ export class IssueRelay {
         }
         record.preparedBody = body;
         this.saveInbox();
-        result = await this.request("issue-relay", body);
+        if (images.length && record.uploadAttempts >= 3) {
+          const receipt = await this.request("issue-relay", { ...body, attachments: undefined, operation: "binding" });
+          if (receipt.input_received === true) { record.mediaCommitted = true; this.saveInbox(); return true; }
+          if (receipt.input_received === false) return rejectMedia(receipt.binding,
+            "图片上传失败，整条消息未提交到任务，请重新发送。");
+          throw new Error("image submission receipt is not yet confirmed");
+        }
+        if (images.length) { record.uploadAttempts = (record.uploadAttempts || 0) + 1; this.saveInbox(); }
+        try { result = await this.request("issue-relay", body); }
+        catch (error) {
+          if (images.length && [400, 413].includes(error.status)) return rejectMedia(preflight?.binding,
+            "图片格式或大小不受支持，整条消息未提交到任务，请检查后重新发送。");
+          if (images.length && error.status === 409) return rejectMedia(preflight?.binding,
+            "任务绑定已变化，请确认任务后重新发送图片。");
+          throw error;
+        }
       } finally { await staged?.cleanup(); }
       this.validateDecision(result);
+      if (images.length && result.comment_id) { record.mediaCommitted = true; this.saveInbox(); }
       if (result.handled && ["help", "status"].includes(parsed.command)) {
         // Freeze read-only command results across retries; never reinterpret
         // them as task input after the conversation's bindings change.
@@ -751,10 +801,6 @@ export class IssueRelay {
             if (checked.binding.group.state !== "active" || checked.binding.generation !== item.binding?.generation) throw new Error("group delivery paused after assignment change");
             route = this.groups.selectSender(checked.observation, { ...item, binding: checked.binding }, route.pin);
           }
-          const content = legacy
-            ? withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], binding), "issue", binding.identifier, binding.title)
-            : formatReply(userLabel + parts[index], { mode: "issue", identifier: binding.identifier, title: binding.title, label: route?.pin.label || "",
-              url: replyUrl(this.config.multica, { binding, commentId: item.comment_id }) });
           if (item.conversation.kind === "group") checkpoints[item.id].transport ||= {};
           const options = item.conversation.kind === "group" ? {
             atUsers: legacy ? [] : notificationUsers, deliveryState: checkpoints[item.id].transport, saveDelivery: save,
@@ -769,6 +815,22 @@ export class IssueRelay {
             // Custom sender adapters must honor the same boundary too.
             await options.beforeSend();
           }
+          if (!legacy && authorType === "agent" && this.replyImages && !checkpoints[item.id].imageReply && !checkpoints[item.id].transport?.content) {
+            let original = parts[index];
+            if (item.image_notice && original.endsWith(item.image_notice)) original = original.slice(0, -item.image_notice.length);
+            const prepared = await this.replyImages.prepare(original, {
+              attachments: item.image_attachments || [], total: item.image_count, createdAt: item.comment_created_at,
+              workspaceId: scope.workspace_id, beforeTransfer: options.beforeSend,
+              download: (image, timeout) => this.downloadReplyImage(item.id, image.id, scope, timeout),
+            });
+            if (prepared) { checkpoints[item.id].imageReply = prepared; save(); }
+          }
+          const presented = checkpoints[item.id].imageReply?.content ?? parts[index];
+          const content = legacy
+            ? withReplyMode((route?.pin.label || "") + this.presentReplyPart(parts[index], binding), "issue", binding.identifier, binding.title)
+            : formatReply(userLabel + presented, { mode: "issue", identifier: binding.identifier, title: binding.title, label: route?.pin.label || "",
+              url: replyUrl(this.config.multica, { binding, commentId: item.comment_id }) });
+          if (options.beforeSend) await options.beforeSend();
           const receipt = await (route?.send || this.send)(item.conversation, content, options);
           // Private sendToUser returns msgkey, whereas the group send API uses
           // messageid. Both are the exact original ID quoted by the IM client.
@@ -801,10 +863,21 @@ export class IssueRelay {
         };
         if (this.groups && item.conversation?.kind === "group") await this.groups.deliveryLock(item.id, deliver);
         else await deliver();
-        } catch (error) { this.logger.warn("issue relay delivery pending: " + error.message); }
+        } catch (error) { this.logger.warn(this.replyImages ? "issue relay delivery pending; payload omitted" : "issue relay delivery pending: " + error.message); }
       }
     } catch (error) { this.logger.warn("issue relay delivery pending: " + error.message); }
     finally { this.polling = false; }
+  }
+
+  async downloadReplyImage(deliveryId, attachmentId, scope, timeout) {
+    const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+    if (!uuid.test(deliveryId) || !uuid.test(attachmentId) || this.token.length < 32) throw new Error("invalid reply image scope");
+    const base = String(this.config.multica.serverUrl || "").replace(/\/+$/, "");
+    const response = await this.fetch(`${base}/api/integrations/infoflow/issue-deliveries/${deliveryId}/images/${attachmentId}`, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(timeout),
+      headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" }, body: JSON.stringify(scope),
+    });
+    return readReplyImage(response);
   }
 }
 

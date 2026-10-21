@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // A poll result is not authority to send after an unbind or reassignment.
@@ -23,18 +25,26 @@ func (h *Handler) InfoFlowIssueDeliveryCheck(w http.ResponseWriter, r *http.Requ
 		infoFlowError(w, 400, "invalid delivery check")
 		return
 	}
-	tx, err := h.TxStarter.Begin(r.Context())
+	allowed, err := h.infoFlowDeliveryAllowed(r.Context(), req.infoFlowScope, id)
 	if err != nil {
-		infoFlowError(w, 500, "begin")
+		infoFlowError(w, 500, "delivery check")
 		return
 	}
-	defer tx.Rollback(r.Context())
+	writeJSON(w, 200, map[string]bool{"allowed": allowed})
+}
+
+func (h *Handler) infoFlowDeliveryAllowed(ctx context.Context, req infoFlowScope, id pgtype.UUID) (bool, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
 	var conversation infoFlowConversation
 	var bindingID string
-	err = tx.QueryRow(r.Context(), `SELECT b.conversation_kind,b.conversation_id,b.id::text
+	err = tx.QueryRow(ctx, `SELECT b.conversation_kind,b.conversation_id,b.id::text
 		FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id
 		JOIN comment c ON c.id=d.comment_id JOIN issue i ON i.id=b.issue_id
-		WHERE d.id=$1 AND b.workspace_id=$3 AND d.generation=b.generation AND d.acked_at IS NULL
+		WHERE d.id=$1 AND b.workspace_id=$3 AND d.generation=b.generation AND d.acked_at IS NULL AND d.cancelled_at IS NULL AND b.sync_enabled
 		AND c.issue_id=b.issue_id AND c.workspace_id=b.workspace_id AND c.deleted_at IS NULL
 		AND c.created_at>=GREATEST(b.bound_at,b.broadcast_started_at)
 		AND i.infoflow_assignment_version=b.assignment_version
@@ -42,39 +52,35 @@ func (h *Handler) InfoFlowIssueDeliveryCheck(w http.ResponseWriter, r *http.Requ
 		OR (b.conversation_kind='group' AND b.leader_robot_id=$2))`,
 		id, req.RobotID, req.WorkspaceID, req.AgentID).Scan(&conversation.Kind, &conversation.ID, &bindingID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, 200, map[string]bool{"allowed": false})
-		return
+		return false, nil
 	}
 	if err != nil {
-		infoFlowError(w, 500, "delivery")
-		return
+		return false, err
 	}
-	if err = infoFlowLock(r.Context(), tx, req.infoFlowScope, conversation); err != nil {
-		infoFlowError(w, 500, "lock")
-		return
+	if err = infoFlowLock(ctx, tx, req, conversation); err != nil {
+		return false, err
 	}
-	binding, err := infoFlowLoadBindingID(r.Context(), tx, req.infoFlowScope, conversation, bindingID)
+	binding, err := infoFlowLoadBindingID(ctx, tx, req, conversation, bindingID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, 200, map[string]bool{"allowed": false})
-		return
+		return false, nil
 	}
 	if err != nil {
-		infoFlowError(w, 500, "binding")
-		return
+		return false, err
 	}
 	scoped, _ := h.infoFlowScoped(tx)
 	allowed := false
+	authors := []string{strings.ToLower(req.AgentID)}
 	if conversation.Kind == "group" {
-		view := scoped.infoFlowGroupView(r.Context(), binding, req.WorkspaceID)
+		view := scoped.infoFlowGroupView(ctx, binding, req.WorkspaceID)
 		allowed = binding.IssueID.Valid && view.State == "active" && view.LeaderRobotID == req.RobotID && view.LeaderAgentID == strings.ToLower(req.AgentID)
+		authors = view.AgentIDs
 	} else {
-		view := scoped.infoFlowPrivateView(r.Context(), binding, req.WorkspaceID, req.AgentID)
+		view := scoped.infoFlowPrivateView(ctx, binding, req.WorkspaceID, req.AgentID)
 		allowed = binding.IssueID.Valid && view.State == "active"
 		if allowed {
-			_, _, err = scoped.infoFlowIdentity(r.Context(), conversation.ID, req.WorkspaceID)
+			_, _, err = scoped.infoFlowIdentity(ctx, conversation.ID, req.WorkspaceID)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				infoFlowError(w, 500, "identity")
-				return
+				return false, err
 			}
 			allowed = err == nil
 		}
@@ -82,12 +88,14 @@ func (h *Handler) InfoFlowIssueDeliveryCheck(w http.ResponseWriter, r *http.Requ
 	// Recheck the generation after the shared lock; an unbind may have won
 	// between the initial delivery lookup and acquiring it.
 	if allowed {
-		err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id
-			WHERE d.id=$1 AND d.generation=b.generation AND b.issue_id=$2 AND d.acked_at IS NULL)`, id, binding.IssueID).Scan(&allowed)
+		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM infoflow_issue_delivery d JOIN infoflow_issue_binding b ON b.id=d.binding_id
+			WHERE d.id=$1 AND d.generation=b.generation AND b.issue_id=$2 AND b.sync_enabled
+			AND d.acked_at IS NULL AND d.cancelled_at IS NULL
+			AND EXISTS(SELECT 1 FROM comment c WHERE c.id=d.comment_id AND c.created_at>=GREATEST(b.bound_at,b.broadcast_started_at)
+			AND (c.author_type<>'agent' OR c.author_id=ANY($3::uuid[]))))`, id, binding.IssueID, authors).Scan(&allowed)
 		if err != nil {
-			infoFlowError(w, 500, "generation")
-			return
+			return false, err
 		}
 	}
-	writeJSON(w, 200, map[string]bool{"allowed": allowed})
+	return allowed, nil
 }

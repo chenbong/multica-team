@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -36,6 +37,10 @@ type infoFlowDelivery struct {
 	Binding          *infoFlowBindingView `json:"binding"`
 	NotifyUsers      []string             `json:"notify_users"`
 	RequiresCheck    bool                 `json:"requires_check"`
+	CommentCreatedAt string               `json:"comment_created_at,omitempty"`
+	ImageAttachments []infoFlowReplyImage `json:"image_attachments,omitempty"`
+	ImageCount       int                  `json:"image_count,omitempty"`
+	ImageNotice      string               `json:"image_notice,omitempty"`
 }
 
 // Bindings subscribe to new task content, independent of the original input
@@ -172,6 +177,9 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 	if view == nil {
 		return nil, nil
 	}
+	if !b.SyncEnabled {
+		return nil, nil
+	}
 	authors := []string{s.AgentID}
 	if c.Kind == "group" {
 		if view.Group == nil || view.Group.State != "active" || view.Group.LeaderRobotID != s.RobotID || view.Group.LeaderAgentID != strings.ToLower(s.AgentID) {
@@ -223,6 +231,13 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 		return nil, err
 	}
 	for _, v := range candidates {
+		var imageCount int
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM attachment WHERE comment_id=$1 AND issue_id=$2 AND workspace_id=$3 AND content_type LIKE 'image/%'`, v.comment, b.IssueID, s.WorkspaceID).Scan(&imageCount); err != nil {
+			return nil, err
+		}
+		if imageCount > 0 {
+			v.content += fmt.Sprintf("\n\n图片：%d 张，请打开任务链接查看。", imageCount)
+		}
 		notifyUsers := []string{}
 		if c.Kind == "group" && v.authorType == "agent" {
 			notifyUsers, err = infoFlowReplyAudience(ctx, tx, v.comment, parseUUID(s.WorkspaceID), b.IssueID)
@@ -240,7 +255,7 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 	// The binding generation and deployment cutoff still fence stale work.
 	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,COALESCE(s.message_id,''),CASE WHEN c.author_type='member' THEN $8 ELSE c.author_id::text END,CASE WHEN c.author_type='member' THEN split_part(lower(u.email),'@',1) ELSE COALESCE(a.name,'智能体') END,CASE WHEN c.author_type='member' THEN 'user' ELSE c.author_type END,COALESCE(d.notify_users,'{}'::text[]),d.notify_users IS NULL FROM infoflow_issue_delivery d LEFT JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON c.author_type='agent' AND a.id=c.author_id AND a.workspace_id=c.workspace_id LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
 		`+infoFlowDeliveryOrigin+`
-		WHERE d.binding_id=$1 AND d.generation=$2 AND d.acked_at IS NULL AND c.issue_id=$3 AND c.workspace_id=$4 AND c.deleted_at IS NULL AND c.created_at >= $6
+		WHERE d.binding_id=$1 AND d.generation=$2 AND d.acked_at IS NULL AND d.cancelled_at IS NULL AND c.issue_id=$3 AND c.workspace_id=$4 AND c.deleted_at IS NULL AND c.created_at >= $6
 		AND ((c.author_type='agent' AND c.author_id=ANY($5::uuid[])) OR (c.author_type='member' AND u.id IS NOT NULL))
 		ORDER BY d.created_at,d.id LIMIT $7`, b.ID, b.Generation, b.IssueID, s.WorkspaceID, authors, cutoff, limit, s.AgentID)
 	if err != nil {
@@ -286,6 +301,11 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 			}
 		}
 		if _, err = tx.Exec(ctx, `UPDATE infoflow_issue_delivery SET notify_users=$2 WHERE id=$1 AND binding_id=$3 AND generation=$4 AND notify_users IS NULL`, v.ID, v.NotifyUsers, b.ID, b.Generation); err != nil {
+			return nil, err
+		}
+	}
+	for index := range out {
+		if err := sh.infoFlowReplyImages(ctx, tx, s, &out[index]); err != nil {
 			return nil, err
 		}
 	}

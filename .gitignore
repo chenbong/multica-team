@@ -18,6 +18,8 @@ infoflow-bridge/state.json.tmp
 **/*.issue-group-deliveries.json*
 **/*.issue-group-invites.json*
 infoflow-bridge/.infoflow-images-*/
+**/reply-images.json*
+**/.reply-image-*/
 infoflow-bridge/bridge.pid
 infoflow-bridge/bridge-watchdog.pid
 infoflow-bridge/logs/

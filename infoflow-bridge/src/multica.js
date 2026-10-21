@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, basename, extname } from "node:path";
+import { readReplyImage } from "./reply-images.js";
 
 // Thin wrapper over the Multica CLI. The CLI carries the signed-in account, so
 // the bridge never handles a Multica credential itself — it only picks which
@@ -62,6 +63,23 @@ export class Multica {
   chatSession(id) { return this.request(`/api/chat/sessions/${encodeURIComponent(id)}`); }
   chatMessages(id) { return this.request(`/api/chat/sessions/${encodeURIComponent(id)}/messages`); }
   chatPending(id) { return this.request(`/api/chat/sessions/${encodeURIComponent(id)}/pending-task`); }
+  async downloadChatReplyImage(sessionId, messageId, image, timeout = 10000) {
+    const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+    if (![sessionId, messageId, image.id].every(v => typeof v === "string" && uuid.test(v)) ||
+        image.uploader_type !== "agent" || image.workspace_id !== this.workspaceId ||
+        image.chat_session_id !== sessionId || image.chat_message_id !== messageId) throw new Error("invalid chat reply image scope");
+    // Re-read the authorized session; never follow a model-supplied attachment URL.
+    const messages = await this.chatMessages(sessionId);
+    const message = messages.find(m => m.id === messageId && m.role === "assistant");
+    if (!message?.attachments?.some(a => a.id === image.id && a.uploader_type === "agent")) throw new Error("chat reply image no longer available");
+    if (this.profile && !/^[a-zA-Z0-9._-]+$/.test(this.profile)) throw new Error("Invalid profile");
+    const config = JSON.parse(await readFile(this.profile ? join(homedir(), ".multica", "profiles", this.profile, "config.json") : join(homedir(), ".multica", "config.json"), "utf8"));
+    const response = await fetch(`${(this.serverUrl || config.server_url).replace(/\/+$/, "")}/api/attachments/${image.id}/download`, {
+      headers: { Authorization: `Bearer ${config.token}`, "X-Workspace-ID": this.workspaceId },
+      redirect: "error", signal: AbortSignal.timeout(timeout),
+    });
+    return readReplyImage(response);
+  }
   sendChatMessage(id, content, attachmentIds = []) {
     return this.request(`/api/chat/sessions/${encodeURIComponent(id)}/messages`, {
       method: "POST", body: { content, attachment_ids: attachmentIds },

@@ -16,6 +16,10 @@ export const InfoFlowConversationTargetSchema = z.discriminatedUnion("kind", [
 ]);
 export type InfoFlowConversationTarget = z.infer<typeof InfoFlowConversationTargetSchema>;
 export const InfoFlowConversationBindingIdSchema = z.string().uuid();
+export const InfoFlowConversationSyncSchema = z.object({
+  expected_generation: z.string().uuid(),
+  sync_enabled: z.boolean(),
+}).strict();
 
 export const InfoFlowConversationRequestTargetSchema = z.object({
   kind: z.enum(["group", "private"]),
@@ -47,6 +51,8 @@ const ConversationGroupSchema = z.object({
     name: z.string().max(256).default(""),
     state: z.enum(["pending", "active"]),
     reason: z.string().max(256).default(""),
+    generation: z.string().uuid().optional(),
+    sync_enabled: z.boolean().default(true),
   }).nullable().default(null),
   request: GroupRequestSchema,
   groups: InfoFlowGroupBindingSchema.shape.groups,
@@ -76,6 +82,8 @@ const ConversationPrivateSchema = z.object({
     robot_chat_id: z.union([z.literal(""), InfoFlowGroupIdSchema]).default(""),
     state: z.enum(["active", "needs_rebind"]),
     reason: z.string().max(256).default(""),
+    generation: z.string().uuid().optional(),
+    sync_enabled: z.boolean().default(true),
   })).max(100).default([]),
   request: PrivateRequestSchema,
   robot: PrivateRobotSchema,
@@ -95,7 +103,7 @@ export interface InfoFlowConversationsStatus {
   enabled: boolean;
   group: {
     canManage: boolean;
-    binding: { bindingId?: string; groupId: string; name?: string; state: "pending" | "active"; reason: string } | null;
+    binding: { bindingId?: string; groupId: string; name?: string; state: "pending" | "active"; reason: string; generation?: string; syncEnabled?: boolean } | null;
     request: { requestId: string; groupId: string; state: "queued" | "pending" | "failed" | "active"; reason: string; generation?: string; canCancel?: boolean } | null;
     groups: { groupId: string; name: string }[];
   };
@@ -103,7 +111,7 @@ export interface InfoFlowConversationsStatus {
     eligible: boolean;
     canManage: boolean;
     reason: string;
-    bindings: { bindingId: string; robotId: string; robotName: string; robotChatId: string; state: "active" | "needs_rebind"; reason: string }[];
+    bindings: { bindingId: string; robotId: string; robotName: string; robotChatId: string; state: "active" | "needs_rebind"; reason: string; generation?: string; syncEnabled?: boolean }[];
     request: { requestId: string; state: "queued" | "pending" | "failed"; reason: string; generation?: string; canCancel?: boolean } | null;
     robot?: { state: "unknown" | "ready" | "missing" | "ambiguous" | "unavailable"; robotId?: string; name?: string; robotChatId?: string };
   };
@@ -120,7 +128,8 @@ export function infoFlowConversationsStatus(value: InfoFlowConversationsWire): I
     enabled: value.enabled,
     group: {
       canManage: group.canManage,
-      binding: group.binding ? { ...group.binding, bindingId: value.group.binding?.binding_id } : null,
+      binding: group.binding ? { ...group.binding, bindingId: value.group.binding?.binding_id,
+        generation: value.group.binding?.generation, syncEnabled: value.group.binding?.sync_enabled } : null,
       request: groupRequest && (group.request || groupCancel) ? {
         requestId: groupRequest.request_id, groupId: groupRequest.group_id, state: groupRequest.state, reason: groupRequest.reason,
         ...(groupRequest.generation ? { generation: groupRequest.generation } : {}), ...(groupCancel ? { canCancel: true } : {}),
@@ -140,6 +149,7 @@ export function infoFlowConversationsStatus(value: InfoFlowConversationsWire): I
       bindings: privateCanManage ? value.private.bindings.map((binding) => ({
         bindingId: binding.binding_id, robotId: binding.robot_id, robotName: binding.robot_name,
         robotChatId: binding.robot_chat_id,
+        generation: binding.generation, syncEnabled: binding.sync_enabled,
         // Ineligible assignments can retain historical bindings, not active destinations.
         state: value.private.eligible ? binding.state : "needs_rebind",
         reason: binding.reason || (!value.private.eligible ? value.private.reason : ""),

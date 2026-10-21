@@ -12,12 +12,13 @@ export function issueRequest(text) {
 }
 
 export class ChatRelay {
-  constructor(config, multica, reply, stageImages, logger = console) {
+  constructor(config, multica, reply, stageImages, logger = console, { replyImages = null } = {}) {
     this.config = config;
     this.multica = multica;
     this.reply = reply;
     this.stageImages = stageImages;
     this.logger = logger;
+    this.replyImages = replyImages;
     const scope = JSON.stringify([config.robotId, config.multica.profile, config.multica.workspaceId]);
     this.path = config.statePath + ".chat-" + createHash("sha256").update(scope).digest("hex").slice(0, 16) + ".json";
     try { this.state = JSON.parse(readFileSync(this.path, "utf8")); }
@@ -135,9 +136,17 @@ export class ChatRelay {
           const answer = messages.find((message) => message.role === "assistant" && message.task_id === taskId);
           if (answer) {
             let content = answer.failure_reason ? "回复失败：" + answer.failure_reason : answer.content || "本轮已完成，没有文字回复。";
-            if (answer.attachments?.length) content += "\n\n本轮生成了附件，请在网页版聊天中查看。";
             // Retain pending delivery on a send failure; restart resumes polling.
             pending.replyProgress ||= {};
+            if (this.replyImages && !answer.failure_reason && !pending.replyProgress.format && !pending.replyProgress.imageReply) {
+              const prepared = await this.replyImages.prepare(content, {
+                attachments: answer.attachments || [], createdAt: answer.created_at, workspaceId: this.config.multica.workspaceId,
+                download: (image, timeout) => this.multica.downloadChatReplyImage(pending.sessionId, answer.id, image, timeout),
+              });
+              if (prepared) { pending.replyProgress.imageReply = prepared; this.save(); }
+            }
+            if (pending.replyProgress.imageReply) content = pending.replyProgress.imageReply.content;
+            else if (answer.attachments?.length) content += "\n\n本轮生成了附件，请在网页版聊天中查看。";
             await this.reply(pending.conversation, pending.user, content, { sessionId: pending.sessionId, notifyUsers: pending.notifyUsers || [],
               replyProgress: pending.replyProgress, saveProgress: () => this.save() });
             delete this.state.pending[taskId];
@@ -150,7 +159,7 @@ export class ChatRelay {
             this.save();
           }
         } catch (error) {
-          this.logger.warn("chat reply poll failed: " + error.message);
+          this.logger.warn(this.replyImages ? "chat reply poll failed; payload omitted" : "chat reply poll failed: " + error.message);
         }
       }
     } finally { this.polling = false; }

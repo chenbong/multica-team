@@ -1,15 +1,16 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Loader2, MessageSquare } from "lucide-react";
 import { useAuthStore } from "@multica/core/auth";
 import {
   infoFlowConversationURL, infoFlowGroupLabel, isInfoFlowConversationsUnavailable, parseInfoFlowGroupTarget,
-  useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest,
+  useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest, useUpdateIssueInfoFlowSync,
   type InfoFlowConversationsStatus,
 } from "@multica/core/issues/infoflow-conversations";
 import { Button, buttonVariants } from "@multica/ui/components/ui/button";
 import { Input } from "@multica/ui/components/ui/input";
+import { Switch } from "@multica/ui/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@multica/ui/components/ui/tabs";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@multica/ui/components/ui/dialog";
 import { useT } from "../../i18n";
@@ -22,10 +23,11 @@ export function BindInfoFlowConversation({ workspaceId, issueId, managementURL =
   const bind = useBindIssueInfoFlowConversation(workspaceId, issueId);
   const unbind = useUnbindIssueInfoFlowConversation(workspaceId, issueId);
   const cancel = useCancelIssueInfoFlowRequest(workspaceId, issueId);
+  const sync = useUpdateIssueInfoFlowSync(workspaceId, issueId);
   const [open, setOpen] = useState(false);
   const status = !query.isError && userId ? query.data : undefined;
   const canManage = status?.enabled === true && (status.group.canManage || status.private.canManage || status.group.request?.canCancel || status.private.request?.canCancel);
-  const busy = bind.isPending || unbind.isPending || cancel.isPending;
+  const busy = bind.isPending || unbind.isPending || cancel.isPending || sync.isPending;
   // Only endpoint absence is a compatibility signal. A denied or malformed
   // unified response must not fall back to an older permission check.
   if (query.isError && isInfoFlowConversationsUnavailable(query.error) && !open) {
@@ -35,28 +37,17 @@ export function BindInfoFlowConversation({ workspaceId, issueId, managementURL =
   const privates = status?.private.bindings.filter((binding) => binding.state === "active" && binding.robotChatId) || [];
   if (!open && !canManage && !group && !privates.length) return null;
   return <>
-    {group && <a href={infoFlowConversationURL(group.groupId, "group")} title={infoFlowGroupLabel(group.groupId, group.name)} className={buttonVariants({ variant: "outline", size: "sm" })}>
-      <MessageSquare aria-hidden="true" />{t(($) => $.infoflow_groups.open)}
-    </a>}
-    {privates.map((binding) => <a key={binding.bindingId} href={infoFlowConversationURL(binding.robotChatId, "private")}
-      className={buttonVariants({ variant: "outline", size: "sm" })}
-      title={binding.robotName || binding.robotId}>
-      <MessageSquare aria-hidden="true" />{t(($) => $.infoflow_conversations.open_private)}
-    </a>)}
     <Dialog open={open} onOpenChange={(value) => { if (!busy) setOpen(value); }}>
-      {canManage && <DialogTrigger render={<Button type="button" variant="outline" size="sm" />}>
+      {(canManage || group || privates.length > 0) && <DialogTrigger render={<Button type="button" variant="outline" size="sm" />}>
         <MessageSquare aria-hidden="true" />{t(($) => $.infoflow_conversations.bind)}
       </DialogTrigger>}
       {open && <ConversationDialog key={`${userId}:${workspaceId}:${issueId}`} status={status} readError={query.isError || !userId}
-        refreshing={query.isFetching} refresh={() => { void query.refetch(); }} bind={bind} unbind={unbind} cancel={cancel} managementURL={managementURL} />}
+        refreshing={query.isFetching} refresh={() => { void query.refetch(); }} bind={bind} unbind={unbind} cancel={cancel} sync={sync} managementURL={managementURL} />}
     </Dialog>
-    {(group || privates.length > 0) && <span role="note" className="max-w-xs text-caption text-muted-foreground">
-      {t(($) => $.infoflow_conversations.sync_short)}
-    </span>}
   </>;
 }
 
-function ConversationDialog({ status, readError, refreshing, refresh, bind, unbind, cancel, managementURL }: {
+function ConversationDialog({ status, readError, refreshing, refresh, bind, unbind, cancel, sync, managementURL }: {
   status?: InfoFlowConversationsStatus;
   readError: boolean;
   refreshing: boolean;
@@ -65,6 +56,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
   bind: ReturnType<typeof useBindIssueInfoFlowConversation>;
   unbind: ReturnType<typeof useUnbindIssueInfoFlowConversation>;
   cancel: ReturnType<typeof useCancelIssueInfoFlowRequest>;
+  sync: ReturnType<typeof useUpdateIssueInfoFlowSync>;
 }) {
   const { t } = useT("issues");
   const inputId = useId();
@@ -81,7 +73,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
   const [input, setInput] = useState(reserved || group?.request?.groupId || "");
   const [error, setError] = useState("");
   const inFlight = useRef(false);
-  const busy = bind.isPending || unbind.isPending || cancel.isPending;
+  const busy = bind.isPending || unbind.isPending || cancel.isPending || sync.isPending;
   const groupActive = group?.binding?.state === "active";
   const groupFailed = group?.request?.state === "failed";
   const groupWaiting = !groupActive && !groupFailed && (group?.binding?.state === "pending" || !!group?.request);
@@ -149,6 +141,13 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
     catch (cause) { setError(cause instanceof Error ? cause.message : t(($) => $.infoflow_conversations.failed)); }
     finally { inFlight.current = false; }
   }
+  async function changeSync(bindingId: string, generation: string | undefined, enabled: boolean, permitted: boolean) {
+    if (!permitted || !generation || busy || inFlight.current || refreshing || readError) return;
+    inFlight.current = true; setError("");
+    try { await sync.mutateAsync({bindingId, expectedGeneration:generation, syncEnabled:enabled}); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : t(($) => $.infoflow_conversations.sync_failed)); }
+    finally { inFlight.current = false; }
+  }
   return <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-lg" showCloseButton={!busy}>
     <form className="grid gap-4" onSubmit={(event) => void submit(event)}>
       <DialogHeader>
@@ -164,15 +163,26 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
         </TabsList>
         <TabsContent value="group" className="grid gap-3 pt-2">
           <p className="text-caption text-muted-foreground">{t(($) => $.infoflow_groups.warning)}</p>
-          {group?.binding && <div className="grid gap-2">
-            <p className="break-words">{t(($) => $.infoflow_groups.target)}：{infoFlowGroupLabel(group.binding.groupId, group.binding.name)}</p>
-            {groupActive ? <p role="status">{t(($) => $.infoflow_groups.success)}</p> :
-              <p className="text-caption">{t(($) => $.infoflow_conversations.group_pending)}</p>}
-            {groupCanManage && group.binding.bindingId && <Button type="button" variant="outline" disabled={busy || refreshing}
-              aria-label={t(($) => $.infoflow_conversations.unbind_group)} onClick={() => { void remove(group.binding!.bindingId!, groupCanManage); }}>
-              {t(($) => $.infoflow_conversations.unbind)}
-            </Button>}
-          </div>}
+          {group?.binding && <ConversationBindingCard
+            title={`${t(($) => $.infoflow_groups.target)}：${infoFlowGroupLabel(group.binding.groupId, group.binding.name)}`}
+            status={groupActive ? t(($) => $.infoflow_groups.success) : t(($) => $.infoflow_conversations.group_pending)}
+            sync={groupActive ? {
+              id: `${inputId}-group-sync`, label: t(($) => $.infoflow_conversations.sync_group),
+              checked: group.binding.syncEnabled !== false,
+              disabled: !groupCanManage || !group.binding.bindingId || !group.binding.generation || busy || refreshing,
+              pending: sync.isPending,
+              onCheckedChange: (value) => { void changeSync(group.binding!.bindingId!, group.binding!.generation, value, groupCanManage); },
+            } : undefined}
+            actions={<>
+              {groupActive && <a href={infoFlowConversationURL(group.binding.groupId, "group")}
+                title={infoFlowGroupLabel(group.binding.groupId, group.binding.name)}
+                className={buttonVariants({ variant: "outline", size: "sm" })}>{t(($) => $.infoflow_groups.open)}</a>}
+              {groupCanManage && group.binding.bindingId && <Button type="button" variant="outline" size="sm" disabled={busy || refreshing}
+                aria-label={t(($) => $.infoflow_conversations.unbind_group)} onClick={() => { void remove(group.binding!.bindingId!, groupCanManage); }}>
+                {t(($) => $.infoflow_conversations.unbind)}
+              </Button>}
+            </>}
+          />}
           {groupCanManage && !groupActive && <>
             {reserved ? <p className="text-caption text-muted-foreground">{t(($) => $.infoflow_conversations.reserved)}</p> : <fieldset className="grid gap-3" disabled={busy}>
               <legend className="sr-only">{t(($) => $.infoflow_groups.bind)}</legend>
@@ -210,7 +220,7 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
           {groupFailed && <p role="alert">{reasonLabel(group?.request?.reason, t(($) => $.infoflow_groups.failed))}</p>}
         </TabsContent>
         <TabsContent value="private" className="grid gap-3 pt-2">
-          {privateRobot?.name && <p className="break-words">{t(($) => $.infoflow_conversations.private_robot)}：{privateRobot.name}</p>}
+          {privateRobot?.name && <p className="break-words">{`${t(($) => $.infoflow_conversations.private_robot)}：${privateRobot.name}`}</p>}
           {privateRobot?.state === "missing" && <p role="status">
             {managementURL ? <a href={managementURL} target="_blank" rel="noreferrer" className="underline underline-offset-4">
               {t(($) => $.infoflow_conversations.bind_robot_first)}
@@ -221,19 +231,25 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
           {privateStatus?.reason && reasonLabel(privateStatus.reason) !== t(($) => $.infoflow_conversations.private_restriction) &&
             <p className="text-caption">{reasonLabel(privateStatus.reason)}</p>}
           {privateStatus?.eligible && !privateCanManage && <p>{t(($) => $.infoflow_conversations.no_manage)}</p>}
-          {privateCanManage && privateStatus.bindings.map((binding) => <div key={binding.bindingId} className="grid gap-2 rounded-lg border p-3">
-            <p className="break-all">{binding.robotName || binding.robotId}</p>
-            <p role="status">{binding.state === "active" ? t(($) => $.infoflow_conversations.private_success) : t(($) => $.infoflow_conversations.needs_rebind)}</p>
-            {binding.state === "needs_rebind" && <p className="text-caption text-muted-foreground">{reasonLabel(binding.reason, t(($) => $.infoflow_conversations.reassignment))}</p>}
-            <div className="flex flex-wrap gap-2">
+          {privateCanManage && privateStatus.bindings.map((binding) => <ConversationBindingCard key={binding.bindingId}
+            title={binding.robotName || binding.robotId}
+            status={binding.state === "active" ? t(($) => $.infoflow_conversations.private_success) : t(($) => $.infoflow_conversations.needs_rebind)}
+            details={binding.state === "needs_rebind" && <p className="text-caption text-muted-foreground">{reasonLabel(binding.reason, t(($) => $.infoflow_conversations.reassignment))}</p>}
+            sync={binding.state === "active" ? {
+              id: `${inputId}-private-sync-${binding.bindingId}`, label: t(($) => $.infoflow_conversations.sync_private),
+              checked: binding.syncEnabled !== false, disabled: !binding.generation || busy || refreshing,
+              pending: sync.isPending,
+              onCheckedChange: (value) => { void changeSync(binding.bindingId, binding.generation, value, privateCanManage); },
+            } : undefined}
+            actions={<>
               {binding.state === "active" && binding.robotChatId && <a href={infoFlowConversationURL(binding.robotChatId, "private")} className={buttonVariants({ variant: "outline", size: "sm" })}>
                 {t(($) => $.infoflow_conversations.open_private)}
               </a>}
               <Button type="button" variant="outline" size="sm" disabled={busy || refreshing}
                 aria-label={`${t(($) => $.infoflow_conversations.unbind_private)} ${binding.robotName || binding.robotId}`}
                 onClick={() => { void remove(binding.bindingId, privateCanManage); }}>{t(($) => $.infoflow_conversations.unbind)}</Button>
-            </div>
-          </div>)}
+            </>}
+          />)}
           {privateWaiting && <p role="status" className="flex items-center gap-2"><Loader2 aria-hidden="true" className="size-4 animate-spin" />
             {reasonLabel(privateStatus?.request?.reason, t(($) => $.infoflow_conversations.private_waiting))}
           </p>}
@@ -259,4 +275,35 @@ function ConversationDialog({ status, readError, refreshing, refresh, bind, unbi
       </DialogFooter>
     </form>
   </DialogContent>;
+}
+
+function ConversationBindingCard({ title, status, details, sync, actions }: {
+  title: string;
+  status: string;
+  details?: ReactNode;
+  sync?: {
+    id: string;
+    label: string;
+    checked: boolean;
+    disabled: boolean;
+    pending: boolean;
+    onCheckedChange: (value: boolean) => void;
+  };
+  actions: ReactNode;
+}) {
+  const { t } = useT("issues");
+  return <section aria-label={title} data-slot="infoflow-binding-card" className="grid min-w-0 gap-2 rounded-lg border p-3">
+    <p className="min-w-0 break-words [overflow-wrap:anywhere]">{title}</p>
+    <p role="status">{status}</p>
+    {details}
+    {sync && <>
+      <div className="flex items-center justify-between gap-3">
+        <label htmlFor={sync.id}>{sync.label}</label>
+        <Switch id={sync.id} checked={sync.checked} disabled={sync.disabled}
+          aria-busy={sync.pending} onCheckedChange={sync.onCheckedChange} />
+      </div>
+      <p className="text-caption text-muted-foreground">{t(($) => $.infoflow_conversations.sync_help)}</p>
+    </>}
+    <div data-slot="infoflow-binding-actions" className="flex flex-wrap items-center gap-2">{actions}</div>
+  </section>;
 }

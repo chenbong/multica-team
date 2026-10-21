@@ -1,15 +1,25 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest } from "./infoflow-conversations";
+import { useBindIssueInfoFlowConversation, useIssueInfoFlowConversations, useUnbindIssueInfoFlowConversation, useCancelIssueInfoFlowRequest, useUpdateIssueInfoFlowSync } from "./infoflow-conversations";
 import { ApiError } from "../api";
 
-const state = vi.hoisted(() => ({ user: "user-a" as string | undefined, query: vi.fn(), mutation: vi.fn(), get: vi.fn(), post: vi.fn(), remove: vi.fn(), cancel: vi.fn(), set: vi.fn(), invalidate: vi.fn() }));
+const state = vi.hoisted(() => ({ user: "user-a" as string | undefined, query: vi.fn(), mutation: vi.fn(), get: vi.fn(), post: vi.fn(), remove: vi.fn(), cancel: vi.fn(), sync: vi.fn(), set: vi.fn(), invalidate: vi.fn() }));
 vi.mock("@tanstack/react-query", () => ({ useQuery: (options: unknown) => state.query(options), useMutation: (options: unknown) => state.mutation(options), useQueryClient: () => ({ setQueryData: state.set, invalidateQueries: state.invalidate }) }));
 vi.mock("../auth", () => ({ useAuthStore: Object.assign((selector: (value: { user?: { id: string } }) => unknown) => selector({ user: state.user ? { id: state.user } : undefined }), { getState: () => ({ user: state.user ? { id: state.user } : undefined }) }) }));
-vi.mock("../api", async (original) => ({ ...await original<typeof import("../api")>(), api: { getIssueInfoFlowConversations: state.get, bindIssueInfoFlowConversation: state.post, unbindIssueInfoFlowConversation: state.remove, cancelIssueInfoFlowRequest: state.cancel } }));
+vi.mock("../api", async (original) => ({ ...await original<typeof import("../api")>(), api: { getIssueInfoFlowConversations: state.get, bindIssueInfoFlowConversation: state.post, unbindIssueInfoFlowConversation: state.remove, cancelIssueInfoFlowRequest: state.cancel, updateIssueInfoFlowSync: state.sync } }));
 beforeEach(() => { vi.clearAllMocks(); state.user = "user-a"; });
 const fresh = () => ({ enabled: true, group: { canManage: true, binding: null, request: null, groups: [] }, private: { eligible: true, canManage: true, reason: "", bindings: [], request: null } });
 describe("unified InfoFlow conversation query and mutations", () => {
+  it("saves a versioned sync switch without updating another account's cache",async()=>{
+    state.sync.mockResolvedValue(fresh());useUpdateIssueInfoFlowSync("workspace","issue");
+    const options=state.mutation.mock.calls[0]?.[0],scope=options.onMutate();
+    await options.mutationFn({bindingId:"binding",expectedGeneration:"generation",syncEnabled:false});
+    expect(state.sync).toHaveBeenCalledWith("issue","binding",{expected_generation:"generation",sync_enabled:false});
+    expect(state.set).not.toHaveBeenCalled();
+    state.user="user-b";options.onSuccess(fresh(),{},scope);
+    expect(state.set).not.toHaveBeenCalled();
+    expect(()=>options.mutationFn({})).toThrow("Authentication changed");
+  });
   it("isolates private destinations by account, workspace and issue", () => {
     useIssueInfoFlowConversations("workspace-a", "issue-a");
     expect(state.query.mock.calls[0]?.[0].queryKey).toEqual(["issues", "infoflow-conversations", "user-a", "workspace-a", "issue-a"]);

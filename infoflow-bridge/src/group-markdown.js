@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import { infoflowMarkdown } from "./infoflow-markdown.js";
 import { MAX_REPLY_LENGTH, replyFenceSuffix } from "./reply-format.js";
 import { notifyUsers, MAX_NOTIFY_USERS } from "./reply-mentions.js";
+import { markdownImages, trimImageMarkdown } from "./markdown-images.js";
 
 // InfoFlow substitutes AT before Markdown parsing, even inside code and URLs.
 // Keep URI destinations equivalent via percent encoding. Within code, mask only
@@ -34,6 +35,15 @@ export function combinedMarkdown(content, recipients, omitted = 0) {
   const hint = footer ? "\n\n...（回复较长，全文请在下方链接查看。）" : "\n\n...（内容较长，后续已省略。）";
   const budget = MAX_REPLY_LENGTH - suffix.length - hint.length;
   if (budget < 0) throw new Error("notification metadata exceeds message budget");
+  if (markdownImages(body).length) {
+    let available = budget, summary, fence;
+    do {
+      summary = trimImageMarkdown(body, available);
+      fence = replyFenceSuffix(summary);
+      available -= Math.max(1, summary.length + fence.length - budget);
+    } while (summary.length + fence.length > budget && available >= 0);
+    return summary + fence + hint + suffix;
+  }
   const chars = [];
   let used = 0;
   for (const char of body) {

@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Multica, TERMINAL_RUN_STATUSES, latestRun } from "./multica.js";
 import { ChatRelay, issueRequest } from "./chat.js";
@@ -19,7 +19,7 @@ export class Bridge {
   // Enough id history to cover a redelivery burst without growing the state file.
   static SEEN_MESSAGE_LIMIT = 200;
 
-  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null, getRobotAvailable = undefined, acknowledgeReceipt = null } = {}) {
+  constructor(config, sender, logger = console, { getImageAccessToken = null, issueGroups = null, getPrivateRobotInfo = null, getRobotAvailable = undefined, acknowledgeReceipt = null, replyImages = null } = {}) {
     this.config = config;
     this.sender = sender;
     this.logger = logger;
@@ -35,13 +35,14 @@ export class Bridge {
           notificationText(url), metadata.replyProgress, metadata.saveProgress,
           `[回复提醒]\n回复已更新，请查看上一条消息。${url ? `\n完整对话链接：${url}` : ""}`);
       },
-      (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger);
+      (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger, { replyImages });
     this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
       stageImages: (images) => stageInboundImages(images, this.logger, this.getImageAccessToken),
       groups: issueGroups,
       getPrivateRobotInfo,
       getRobotAvailable,
       acknowledgeReceipt,
+      replyImages,
     });
     this.issueRelay.fallback = (message, handoff) => this.handleMessage({ ...message, skipIssueRelay: true, handoff });
   }
@@ -67,7 +68,7 @@ export class Bridge {
     return pending.finally(() => { if (this.inboundQueues.get(key) === pending) this.inboundQueues.delete(key); });
   }
 
-  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null, notifyUsers: recipients = [], displayText = null }) {
+  async #handleMessage({ conversation, user: rawUser, text, messageId, images = [], acknowledge = null, receipt = null, replyToMessageId = null, context = null, skipIssueRelay = false, handoff = null, notifyUsers: recipients = [], displayText = null, unsupportedFile = false, requireRobotQuote = false, mediaRejection = null }) {
     const inboundImages = Array.isArray(images) ? images : [];
     const body = String(text ?? "").trim() || (inboundImages.length > 0 ? "（图片消息，详见附件）" : "");
     if (!conversation?.id || !rawUser || body === "") return;
@@ -92,7 +93,13 @@ export class Bridge {
     // The relay has persistent, server-side deduplication and authenticates the
     // real sender before an owner-profile command or Chat fallback. A receipt
     // only confirms the SDK message was received, never grants invocation.
-    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt, notifyUsers: recipients, displayText })) return;
+    if (requireRobotQuote && !this.issueRelay.enabled) return;
+    if (!skipIssueRelay && await this.issueRelay.handle({ conversation, user, text: body, messageId, images: inboundImages, replyToMessageId, context, acknowledge, receipt, notifyUsers: recipients, displayText, unsupportedFile, requireRobotQuote, mediaRejection })) return;
+    if (mediaRejection) { await this.reply(conversation,user,mediaRejection); return; }
+    if (unsupportedFile) {
+      await this.reply(conversation, user, "暂不支持文件，请在任务网页上传。");
+      return;
+    }
 
     if (!this.#allowed(user, conversation)) {
       this.logger.warn(`rejected ${conversation.kind} message from ${user}: not in allowUsers`);
@@ -408,13 +415,27 @@ function sleep(ms) {
 export async function stageInboundImages(images, logger = console, getImageAccessToken = null) {
   const list = Array.isArray(images) ? images.filter(Boolean) : [];
   if (list.length === 0) return { paths: [], failed: [], cleanup: async () => {} };
+  if (list.length > 5) return { paths: [], failed: ["一次最多发送 5 张图片，请分开发送。"], cleanup: async () => {} };
 
   const directory = await mkdtemp(join(process.cwd(), ".infoflow-images-"));
   const paths = [];
   const failed = [];
+  let totalBytes = 0;
   for (let index = 0; index < list.length; index += 1) {
     try {
-      paths.push(await downloadInboundImage(list[index], directory, index + 1, getImageAccessToken));
+      let file;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          file = await downloadInboundImage(list[index], directory, index + 1, getImageAccessToken);
+          break;
+        } catch (error) {
+          if (error.mediaPermanent || attempt === 2) throw error;
+          if (error.mediaRetryAfterMs) await sleep(error.mediaRetryAfterMs * (2 ** attempt));
+        }
+      }
+      totalBytes += (await stat(file)).size;
+      if (totalBytes > MAX_INBOUND_IMAGE_BYTES) throw mediaError("图片合计超过 20MB，请分开发送。");
+      paths.push(file);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       failed.push("第" + (index + 1) + "张图片：" + detail);
@@ -439,12 +460,14 @@ async function downloadInboundImage(image, directory, index, getImageAccessToken
   const inlineContent = descriptor.inline && typeof descriptor.content === "string" ? descriptor.content.trim() : "";
 
   if (inlineContent !== "" && !/^https?:\/\//i.test(inlineContent)) {
-    const encoded = inlineContent.replace(/^data:image\/[^;]+;base64,/i, "");
+    const encoded = inlineContent.replace(/^data:image\/[^;]+;base64,/i, "").replace(/\s+/g, "");
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw mediaError("图片编码无效");
+    if (encoded.length > Math.ceil(MAX_INBOUND_IMAGE_BYTES / 3) * 4) throw mediaError("图片超过 20MB 限制");
     return writeInboundImage(Buffer.from(encoded, "base64"), directory, index, "");
   }
 
   const candidates = imageUrlCandidates(descriptor);
-  if (candidates.length === 0) throw new Error("消息中没有可下载的图片地址");
+  if (candidates.length === 0) throw mediaError("消息中没有可下载的图片地址");
 
   let lastError = null;
   for (const candidate of candidates) {
@@ -472,7 +495,7 @@ function imageUrlCandidates(image) {
     const value = image?.[field];
     if (typeof value !== "string" || !/^https?:\/\//i.test(value) || seen.has(value)) continue;
     seen.add(value);
-    candidates.push({ url: value, needsAuth });
+    candidates.push({ url: value, needsAuth: needsAuth || ["apiin.im.baidu.com","api.im.baidu.com"].includes(new URL(value).hostname) });
   }
   if (typeof image?.content === "string" && /^https?:\/\//i.test(image.content) && !seen.has(image.content)) {
     candidates.push({ url: image.content, needsAuth: false });
@@ -490,17 +513,35 @@ async function fetchInboundImage(candidate, directory, index, getImageAccessToke
       if (token) headers.Authorization = "Bearer-" + token;
     }
     const response = await fetch(candidate.url, { headers, redirect: "follow", signal: controller.signal });
-    if (!response.ok) throw new Error("HTTP " + response.status);
+    if (!response.ok) {
+      const error = new Error("图片下载失败（HTTP " + response.status + "）");
+      error.mediaPermanent = response.status !== 429 && response.status < 500;
+      if (response.status === 429) error.mediaRetryAfterMs = 1000;
+      throw error;
+    }
 
     const advertisedSize = Number(response.headers.get("content-length"));
     if (Number.isFinite(advertisedSize) && advertisedSize > MAX_INBOUND_IMAGE_BYTES) {
-      throw new Error("图片超过 20MB 限制");
+      throw mediaError("图片超过 20MB 限制");
     }
-
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length === 0) throw new Error("返回空内容");
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body || []) {
+      size += chunk.length;
+      if (size > MAX_INBOUND_IMAGE_BYTES) { controller.abort(); throw mediaError("图片超过 20MB 限制"); }
+      chunks.push(Buffer.from(chunk));
+    }
+    const bytes = Buffer.concat(chunks);
+    if (bytes.length === 0) throw mediaError("返回空内容");
     const contentType = response.headers.get("content-type") || "";
     const prefix = bytes.subarray(0, 128).toString("utf8").trimStart().toLowerCase();
+    if (contentType.toLowerCase().includes("json") || prefix.startsWith("{")) {
+      let result;
+      try { result = JSON.parse(bytes.toString("utf8")); } catch { /* Reject malformed responses below. */ }
+      if (Number(result?.code) === 1300019) {
+        throw Object.assign(new Error("图片下载触发如流限流，请稍后重试"), { mediaRetryAfterMs: 1000 });
+      }
+    }
     if (
       contentType.toLowerCase().includes("json") ||
       contentType.toLowerCase().includes("text/html") ||
@@ -509,7 +550,7 @@ async function fetchInboundImage(candidate, directory, index, getImageAccessToke
       prefix.startsWith("<!doctype") ||
       prefix.startsWith("<html")
     ) {
-      throw new Error("下载接口返回的不是图片数据");
+      throw mediaError("下载接口返回的不是图片数据");
     }
     return writeInboundImage(bytes, directory, index, contentType);
   } catch (error) {
@@ -521,12 +562,17 @@ async function fetchInboundImage(candidate, directory, index, getImageAccessToke
 }
 
 async function writeInboundImage(bytes, directory, index, contentType) {
-  if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new Error("图片内容为空");
-  if (bytes.length > MAX_INBOUND_IMAGE_BYTES) throw new Error("图片超过 20MB 限制");
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw mediaError("图片内容为空");
+  if (bytes.length > MAX_INBOUND_IMAGE_BYTES) throw mediaError("图片超过 20MB 限制");
   const extension = imageExtension(bytes, contentType);
+  if (extension === ".bin" || extension === ".svg") throw mediaError("暂不支持该图片格式，请使用 PNG、JPEG、GIF、WebP 或 BMP");
   const filePath = join(directory, "infoflow-image-" + String(index).padStart(2, "0") + extension);
   await writeFile(filePath, bytes, { mode: 0o600 });
   return filePath;
+}
+
+function mediaError(message) {
+  return Object.assign(new Error(message), { mediaPermanent: true });
 }
 
 function imageExtension(bytes, contentType) {
@@ -535,13 +581,5 @@ function imageExtension(bytes, contentType) {
   if (bytes.subarray(0, 4).toString("ascii") === "GIF8") return ".gif";
   if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return ".webp";
   if (bytes.subarray(0, 2).toString("ascii") === "BM") return ".bmp";
-  const mime = String(contentType).split(";", 1)[0].trim().toLowerCase();
-  return {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/gif": ".gif",
-    "image/webp": ".webp",
-    "image/bmp": ".bmp",
-    "image/svg+xml": ".svg",
-  }[mime] ?? ".bin";
+  return ".bin";
 }

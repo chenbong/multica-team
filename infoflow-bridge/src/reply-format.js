@@ -1,4 +1,5 @@
 import { inlineMarkdown } from "./inline-markdown.js";
+import { markdownImages, trimImageMarkdown } from "./markdown-images.js";
 
 // IM-only presentation. Never apply this to prompts, comments, or stored task
 // content. The caller supplies the authoritative route, not model-written text.
@@ -76,6 +77,15 @@ export function formatReply(content, { mode = "chat", identifier = null, title =
   const suffix = hint + footer;
   const budget = limit - measure(prefix + suffix);
   if (budget < 0) throw new Error("reply metadata exceeds message budget");
+  if (markdownImages(text).length) {
+    let available = budget, summary, fence;
+    do {
+      summary = trimImageMarkdown(text, available, measure);
+      fence = replyFenceSuffix(summary);
+      available -= Math.max(1, measure(summary + fence) - budget);
+    } while (measure(summary + fence) > budget && available >= 0);
+    return prefix + summary + fence + suffix;
+  }
   const chars = [];
   let used = 0;
   for (const char of text) {

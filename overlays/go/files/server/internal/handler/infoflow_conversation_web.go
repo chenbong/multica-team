@@ -25,6 +25,8 @@ type infoFlowOwnPrivate struct {
 	RobotChatID string `json:"robot_chat_id"`
 	State       string `json:"state"`
 	Reason      string `json:"reason"`
+	Generation  string `json:"generation"`
+	SyncEnabled bool   `json:"sync_enabled"`
 }
 type infoFlowPrivateWebRequestView struct {
 	RequestID  string `json:"request_id"`
@@ -166,7 +168,7 @@ func (h *Handler) infoFlowConversationView(ctx context.Context, tx pgx.Tx, ws st
 	}
 	for _, row := range rows {
 		v := sh.infoFlowPrivateView(ctx, row.Binding, ws, row.Agent)
-		out.Private.Bindings = append(out.Private.Bindings, infoFlowOwnPrivate{BindingID: uuidToString(row.Binding.ID), RobotID: row.Robot, RobotName: row.Binding.RobotName, RobotChatID: row.Binding.RobotChatID, State: v.State, Reason: v.Reason})
+		out.Private.Bindings = append(out.Private.Bindings, infoFlowOwnPrivate{BindingID: uuidToString(row.Binding.ID), RobotID: row.Robot, RobotName: row.Binding.RobotName, RobotChatID: row.Binding.RobotChatID, State: v.State, Reason: v.Reason, Generation: uuidToString(row.Binding.Generation), SyncEnabled: row.Binding.SyncEnabled})
 	}
 	return out, nil
 }

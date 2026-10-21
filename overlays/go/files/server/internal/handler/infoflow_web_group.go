@@ -17,14 +17,15 @@ import (
 )
 
 type infoFlowWebState struct {
-	BindingID  string `json:"binding_id,omitempty"`
-	GroupID    string `json:"group_id"`
-	Name       string `json:"name,omitempty"`
-	State      string `json:"state"`
-	Reason     string `json:"reason"`
-	RequestID  string `json:"request_id,omitempty"`
-	Generation string `json:"generation,omitempty"`
-	CanCancel  bool   `json:"can_cancel,omitempty"`
+	BindingID   string `json:"binding_id,omitempty"`
+	GroupID     string `json:"group_id"`
+	Name        string `json:"name,omitempty"`
+	State       string `json:"state"`
+	Reason      string `json:"reason"`
+	RequestID   string `json:"request_id,omitempty"`
+	Generation  string `json:"generation,omitempty"`
+	CanCancel   bool   `json:"can_cancel,omitempty"`
+	SyncEnabled bool   `json:"sync_enabled"`
 }
 type infoFlowGroupOption struct {
 	GroupID string `json:"group_id"`
@@ -133,7 +134,7 @@ func (h *Handler) infoFlowWebView(ctx context.Context, tx pgx.Tx, ws string, iss
 		if e != nil {
 			return out, e
 		}
-		out.Binding = &infoFlowWebState{BindingID: uuidToString(b.ID), GroupID: group, Name: name, State: v.State, Reason: v.Reason}
+		out.Binding = &infoFlowWebState{BindingID: uuidToString(b.ID), GroupID: group, Name: name, State: v.State, Reason: v.Reason, Generation: uuidToString(b.Generation), SyncEnabled: b.SyncEnabled}
 	}
 	var id, gid, state, reason string
 	var expires time.Time

@@ -18,11 +18,32 @@ function respond(body: unknown, status = 200) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("unified InfoFlow conversation API", () => {
+  it("saves one versioned boolean sync setting without accepting an arbitrary scope", async () => {
+    const fetch=respond(status());
+    await client().updateIssueInfoFlowSync("TEST/1",bindingId,{expected_generation:requestId,sync_enabled:false});
+    expect(String(fetch.mock.calls[0]?.[0])).toContain(`/api/issues/TEST%2F1/infoflow-conversations/${bindingId}/sync`);
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({method:"PUT",body:JSON.stringify({expected_generation:requestId,sync_enabled:false})});
+  });
+  it.each([{sync_enabled:"false",expected_generation:requestId},{sync_enabled:false},{sync_enabled:false,expected_generation:requestId,sender:"other"}])("rejects malformed sync mutation %# before sending",async target=>{
+    const fetch=respond(status());
+    await expect(client().updateIssueInfoFlowSync("TEST-1",bindingId,target as never)).rejects.toThrow("Invalid InfoFlow sync target");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each(["false",0,null])("rejects malformed sync state %j", async value=>{
+    const wire=status();respond({...wire,group:{...wire.group,binding:{...wire.group.binding,sync_enabled:value}}});
+    await expect(client().getIssueInfoFlowConversations("TEST-1")).rejects.toThrow("Invalid InfoFlow conversation status");
+  });
+  it("retains independent disabled sync and binding generations",async()=>{
+    const wire=status();respond({...wire,group:{...wire.group,binding:{...wire.group.binding,sync_enabled:false,generation:requestId}}});
+    const out=await client().getIssueInfoFlowConversations("TEST-1");
+    expect(out.group.binding).toMatchObject({syncEnabled:false,generation:requestId});
+    expect(out.private.bindings[0]?.syncEnabled).toBe(true);
+  });
   it("preserves coexisting group and own private associations with exact int64 IDs", async () => {
     const fetch = respond(status());
     const result = await client().getIssueInfoFlowConversations("TEST/1");
-    expect(result.group.binding).toEqual({ bindingId, groupId: "9007199254740993", state: "active", reason: "" });
-    expect(result.private.bindings).toEqual([{ bindingId, robotId: "robot-a", robotChatId: "9223372036854775807", robotName: "Assigned robot", state: "active", reason: "" }]);
+    expect(result.group.binding).toEqual({ bindingId, groupId: "9007199254740993", state: "active", reason: "", syncEnabled: true });
+    expect(result.private.bindings).toEqual([{ bindingId, robotId: "robot-a", robotChatId: "9223372036854775807", robotName: "Assigned robot", state: "active", reason: "", syncEnabled: true }]);
     expect(String(fetch.mock.calls[0]?.[0])).toContain("/api/issues/TEST%2F1/infoflow-conversations");
   });
   it("defaults optional fields without granting permissions", async () => {

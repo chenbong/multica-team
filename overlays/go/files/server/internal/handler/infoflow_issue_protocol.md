@@ -8,7 +8,14 @@ the relay. Bridge must never fall back to Chat on HTTP errors or `handled:true`.
 `/api/integrations/infoflow/issue-relay` accepts:
 
 ```json
-{"robot_id":"robot","agent_id":"agent UUID","workspace_id":"workspace UUID","conversation":{"kind":"private|group","id":"external conversation ID"},"sender":"external username","message_id":"stable external message ID","operation":"message|bind|binding|unbind|create","issue_ref":"UUID or PREFIX-123","content":"plain or Markdown text","reply_to_message_id":"optional external message ID","attachments":[{"filename":"image.png","content_type":"image/png","data_base64":"..."}]}
+{"robot_id":"robot","agent_id":"agent UUID","workspace_id":"workspace UUID","conversation":{"kind":"private|group","id":"external conversation ID"},"sender":"external username","message_id":"stable external message ID","operation":"message|bind|binding|unbind|create","issue_ref":"UUID or PREFIX-123","content":"plain or Markdown text","reply_to_message_id":"optional external message ID","require_robot_quote":false,"attachments":[{"filename":"image.png","content_type":"image/png","data_base64":"..."}]}
+
+`require_robot_quote=true` is used only for group replies without an AT. It
+requires a current-generation robot delivery or bound notice in this exact
+group/workspace; otherwise the input is silently ignored. Pinned read-only
+`binding` admission responses include `input_received` (an explicit boolean)
+when checking an earlier submission, allowing bounded image upload retries to
+resolve unknown POST outcomes without starting another agent run.
 ```
 
 `agent_id` is a resolved UUID; Bridge may resolve configured agent names once

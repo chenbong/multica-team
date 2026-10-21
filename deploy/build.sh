@@ -73,6 +73,10 @@ REMOTE_API_URL="$REMOTE_API_URL" \
 FRONTEND_ORIGIN="$FRONTEND_ORIGIN" \
   ./node_modules/.bin/next build --webpack
 
+if [ -n "${MULTICA_WEB_BUILD_CONFIG:-}" ]; then
+  python3 "$INSTANCE_DIR/deploy/verify-web-release.py" "$WEB_TREE" --config "$MULTICA_WEB_BUILD_CONFIG"
+fi
+
 if [ -n "$(git -C "$INSTANCE_DIR/multica" status --porcelain)" ]; then
   echo "build changed the multica submodule; refusing to continue" >&2
   git -C "$INSTANCE_DIR/multica" status --short >&2

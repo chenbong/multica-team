@@ -7,9 +7,19 @@ import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
 import { mentionedReplyUsers } from "./reply-mentions.js";
 import { groupRobotEntries } from "./group-robot-entries.js";
 import { infoflowMarkdown } from "./infoflow-markdown.js";
+import { createInboundMessageReader, containsFile } from "./inbound-content.js";
+import { replyImageConfig, ReplyImages } from "./reply-images.js";
 
 const INITIAL_RECONNECT_DELAY_MS = 5000;
 const MAX_INITIAL_RECONNECT_DELAY_MS = 120000;
+
+// The SDK logs whole request bodies by default, including bearer image URLs.
+// Keep connection diagnostics at this layer without persisting message payloads.
+export function privateSdkLogger(logger) {
+  return { info() {}, debug() {}, trace() {},
+    warn() { logger.warn("InfoFlow SDK warning; payload omitted"); },
+    error() { logger.warn("InfoFlow SDK error; payload omitted"); } };
+}
 
 // Owns one InfoFlow connection per configured robot and keeps that set in step
 // with whatever the admin page saved, so a change never needs a process restart.
@@ -18,6 +28,8 @@ export class RobotRuntime {
     this.config = config;
     this.logger = logger;
     this.instances = new Map();
+    const imageConfig = replyImageConfig();
+    this.replyImages = imageConfig ? new ReplyImages(imageConfig) : null;
     this.issueGroups = config.issueRelay?.enabled ? new IssueGroups({
       statePath: config.statePath,
       entries: (workspaceId, agentIds, options) => this.groupRobotEntries(workspaceId, agentIds, options),
@@ -169,12 +181,14 @@ export class RobotRuntime {
       appSecret: robot.appSecret,
       agentId: robot.appId,
       baseUrl: robot.baseUrl,
+      logger: privateSdkLogger(this.logger),
     });
 
     const send = (conversation, content, options = {}) =>
       sendRobotReply(client, conversation, content, options, this.config.issueRelay?.enabled === true);
 
     const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger, {
+      replyImages: this.replyImages,
       getImageAccessToken: () => client.getAccessToken(),
       issueGroups: this.issueGroups,
       getPrivateRobotInfo: () => client.robot.getInfo(),
@@ -212,6 +226,7 @@ export class RobotRuntime {
       appKey: robot.appKey,
       appSecret: robot.appSecret,
       baseUrl: robot.baseUrl,
+      logger: privateSdkLogger(this.logger),
       // Only override what the deployment configured, so an unconfigured clone
       // keeps whatever gateway the SDK ships with.
       ...(DEFAULT_WS_GATEWAY ? { wsGateway: DEFAULT_WS_GATEWAY } : {}),
@@ -400,22 +415,18 @@ export function parseGroupBlocks(blocks) {
   const { text, images } = parseConversationBlocks(blocks);
   return { text, images };
 }
-export function registerHandlers({ wsClient, client, bridge, robot, logger, issueGroups = null }) {
-  for (const event of ["private.text", "private.markdown", "private.richtext", "private.image"]) {
+export function registerHandlers({ wsClient, client, bridge, robot, logger, issueGroups = null, getPrivateMessage = null, getGroupMessage = null }) {
+  const readPrivate = getPrivateMessage || createInboundMessageReader(client, robot.appId);
+  const readGroup = getGroupMessage || createInboundMessageReader(client, robot.appId, 2);
+  for (const event of ["private.text", "private.markdown", "private.richtext", "private.image", "private.file"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
       // Despite the names, FromUserId is the readable username and FromUserName is
       // a numeric uid. Replies are addressed by username.
       const user = raw.FromUserId ?? raw.FromUserName;
       if (botOrigin(raw) || issueGroups?.isBot(raw, user)) return;
-      const rawContent = raw.Content ?? raw.content ?? raw.Text ?? raw.text;
-      const imageContent =
-        event === "private.image" && typeof rawContent === "string" ? rawContent : "";
-      const images = imageContent
-        ? [{ type: "IMAGE", inline: true, content: imageContent }]
-        : [];
-      const text = event === "private.image" ? "" : rawContent;
-      const body = String(text ?? "").trim() || (images.length > 0 ? "（图片消息，详见附件）" : "");
+      const { text, images, unsupportedFile, replyToMessageId, mediaRejection, displayText } = await readPrivate(raw, event);
+      const body = String(text ?? "").trim() || (mediaRejection ? "（消息读取失败）" : unsupportedFile ? "（文件消息）" : images.length > 0 ? "（图片消息，详见附件）" : "");
       if (!user || body === "") {
         logger.warn(`[${robot.name}] ${event} without a usable sender/content:`, JSON.stringify(raw).slice(0, 600));
         return;
@@ -425,9 +436,12 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
         conversation: { kind: "private", id: user },
         user,
         text: body,
+        ...(displayText && displayText !== text ? { displayText } : {}),
         images,
+        unsupportedFile,
+        mediaRejection,
         messageId: messageIdString(raw.MsgId ?? raw.msgId),
-        replyToMessageId: privateReplyMessageId(raw),
+        replyToMessageId: replyToMessageId || privateReplyMessageId(raw),
         receipt: receiptOptions(raw, "private", robot.appId),
         context: conversationContext({ conversation: { kind: "private", id: user }, sender: user }),
         acknowledge: () => acknowledge(client, raw, "private", robot.appId, logger),
@@ -435,7 +449,7 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
     });
   }
 
-  for (const event of ["group.text", "group.markdown", "group.mixed", "group.image"]) {
+  for (const event of ["group.text", "group.markdown", "group.mixed", "group.image", "group.richtext", "group.file"]) {
     wsClient.on(event, async (message) => {
       const raw = message?.data?.raw ?? {};
       const observedGroupId = raw.groupid ?? raw.groupId;
@@ -444,21 +458,29 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
       if (observedGroupId != null) void bridge.issueRelay?.observeGroupEvent?.({
         groupId: observedGroupId, appId: robot.appId, client,
       });
-      // MESSAGE_RECEIVE is the @robot / slash-command delivery. ALL_MESSAGE_FORWARD
-      // copies every message in the group and would turn small talk into runs.
-      if (raw.eventtype && raw.eventtype !== "MESSAGE_RECEIVE") return;
+      // Unmentioned replies only arrive through ALL_MESSAGE_FORWARD. Admit quote
+      // candidates to the task relay, which verifies an outbound robot receipt.
+      // All ordinary forwarded traffic must remain silent.
+      const forwarded = raw.eventtype === "ALL_MESSAGE_FORWARD";
+      if (raw.eventtype && raw.eventtype !== "MESSAGE_RECEIVE" && !forwarded) return;
 
       const groupId = messageIdString(raw.groupid ?? raw.groupId);
       const header = raw.message?.header ?? {};
       const user = header.fromuserid ?? raw.fromuserid;
       if (botOrigin(raw) || issueGroups?.isBot(raw, user)) return;
-      const blocks = Array.isArray(raw.message?.body) ? raw.message.body : [];
-      const mentionsRobot = blocks.some((block) => String(block?.type ?? "").toUpperCase() === "AT" && (block.robotid !== undefined || block.name));
-      const parsed = parseConversationBlocks(blocks);
-      const text = parsed.text || (parsed.images.length > 0 ? "（图片消息，详见附件）" : "");
-      const displayText = parseConversationBlocks(blocks, { preserveHumanMentions: true }).text || text;
-
-      if (!groupId || !user || text === "" || !mentionsRobot) return;
+      const blocks = (Array.isArray(raw.message?.body) ? raw.message.body : []).map(block =>
+        ["REPLYDATA", "REPLY", "QUOTE"].includes(String(block?.type ?? "").toUpperCase())
+          ? { ...block, content: "", text: "" } : block);
+      const mentionsRobot = blocks.some((block) => String(block?.type ?? "").toUpperCase() === "AT" &&
+        (block.robotid != null || block.agentId != null || block.robotName != null || block.name === robot.name));
+      let parsed = parseConversationBlocks(blocks);
+      if (!groupId || !user || (!mentionsRobot && !parsed.replyToMessageId)) return;
+      if (forwarded && (mentionsRobot || !parsed.replyToMessageId || !bridge.issueRelay?.enabled)) return;
+      if (parsed.images.length) parsed = await readGroup({...raw,message:{...raw.message,body:blocks}},event);
+      const unsupportedFile = event === "group.file" || containsFile(blocks) || parsed.unsupportedFile;
+      const text = parsed.text || (parsed.mediaRejection ? "（消息读取失败）" : unsupportedFile ? "（文件消息）" : parsed.images.length > 0 ? "（图片消息，详见附件）" : "");
+      const displayText = parsed.displayText || parseConversationBlocks(blocks, { preserveHumanMentions: true }).text || text;
+      if (text === "") return;
       logger.log(`[${robot.name}] <- ${user} (${event} group ${groupId}): ${text.slice(0, 200)}`);
       await bridge.handleMessage({
         conversation: { kind: "group", id: groupId },
@@ -466,6 +488,9 @@ export function registerHandlers({ wsClient, client, bridge, robot, logger, issu
         text,
         ...(displayText !== text ? { displayText } : {}),
         images: parsed.images,
+        unsupportedFile,
+        mediaRejection: parsed.mediaRejection,
+        requireRobotQuote: !mentionsRobot,
         messageId: messageIdString(header.messageid ?? raw.messageid),
         replyToMessageId: parsed.replyToMessageId,
         receipt: receiptOptions(raw, "group", robot.appId),
