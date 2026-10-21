@@ -359,7 +359,22 @@ CHANGES = {
     SIDEBAR: [
         (
             'import { JoinDiscordCard } from "./join-discord-card";\n',
-            'import { SidebarShortcutLinks, SidebarCommunityLink } from "./sidebar-shortcut-links";\n',
+            'import { SidebarShortcutLinks, SidebarCommunityLink } from "./sidebar-shortcut-links";\n'
+            'import { CustomAppsNav, CustomDashboardNavItem } from "./custom-apps-nav";\n',
+        ),
+        (
+            # "My dashboard" is the last item of the Work group.
+            "                })}\n              </SidebarMenu>\n            </SidebarGroupContent>\n          </SidebarGroup>\n\n"
+            "          <SidebarGroup>\n            <SidebarGroupLabel>{t(($) => $.sidebar.ai_team_group)}</SidebarGroupLabel>\n",
+            "                })}\n                <CustomDashboardNavItem className={NAV_ITEM_CLASS_NAME} />\n"
+            "              </SidebarMenu>\n            </SidebarGroupContent>\n          </SidebarGroup>\n\n"
+            "          <SidebarGroup>\n            <SidebarGroupLabel>{t(($) => $.sidebar.ai_team_group)}</SidebarGroupLabel>\n",
+        ),
+        (
+            # The POPOs group (user-hosted pages framed in the shell) sits
+            # after the AI-team group.
+            '          </SidebarGroup>\n        </SidebarContent>\n',
+            '          </SidebarGroup>\n\n          <CustomAppsNav className={NAV_ITEM_CLASS_NAME} />\n        </SidebarContent>\n',
         ),
         (
             'import { HelpLauncher } from "./help-launcher";\n',
@@ -388,6 +403,14 @@ CHANGES = {
             'className={NAV_ITEM_CLASS_NAME} />\n',
         ),
     ],
+    "packages/views/layout/index.ts": [
+        (
+            'export { NavigationProgress } from "./navigation-progress";\n',
+            'export { NavigationProgress } from "./navigation-progress";\n'
+            'export { CustomDashboardPage } from "./custom-dashboard-page";\n'
+            'export { CustomPageView } from "./custom-page-view";\n',
+        ),
+    ],
     "apps/web/app/layout.tsx": [
         (
             '  variable: "--font-mono",\n  fallback:',
@@ -395,19 +418,19 @@ CHANGES = {
         ),
     ],
     "packages/views/locales/en/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"InfoFlow community",\n    "quick_links": {"title":"Common links","mobile_control":"Mobile control link","loading":"Loading...","unavailable":"Unavailable","copied":"Copied","copy_failed":"Copy failed, try again","model_trace":"OneAPI model quality probe","quickstart_wishlist":"Quick start & wishlist","official_docs":"Official documentation"},\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "custom_apps": {"title":"POPOs","open_in_new_tab":"Open in new tab","my_dashboard":"My dashboard","add_page":"Add page","add_page_hint":"Paste a page link, e.g. a popo work. Your dashboard is saved in this browser only.","url_placeholder":"e.g. xxx.popo.baidu-int.com","url_label":"Page link","title_label":"Name (optional)","add":"Add","cancel":"Cancel","invalid_url":"Invalid link, or an address of Multica itself","exists":"This page is already on your dashboard","full":"Your dashboard holds at most {{count}} pages","dashboard_empty":"No pages yet. Use “Add page”, or pin one from POPOs or an issue\'s linked pages.","refresh":"Refresh","fullscreen":"Open in Multica","remove":"Remove","move_left":"Move earlier","move_right":"Move later","resize":"Drag to resize (arrow keys work too)","loading":"Loading...","linked_issues_failed":"Could not load linked issues","linked_issues":"Linked issues","no_linked_issues":"No issue is linked to this page yet","add_to_dashboard":"Add to my dashboard","remove_from_sidebar":"Remove from POPOs","remove_from_dashboard":"On my dashboard, click to remove","added_to_dashboard":"On my dashboard","section_title":"Linked pages","bind":"Link page","unbind":"Unlink","bind_placeholder":"Paste a page link","bind_failed":"Could not link the page, try again","section_empty":"No linked pages","reload_loop":"This page kept reloading inside Multica, so loading was paused. Its sign-in or cookies usually do not work when embedded; open it in a new tab.","retry":"Retry","popos_add":"Add to POPOs","popos_add_hint":"Paste a page link, e.g. a popo work. POPOs is saved in this browser only and is not added to your dashboard; pin a page to put it there.","popos_exists":"This page is already in POPOs","popos_full":"POPOs holds at most {{count}} pages","filter":"Filter dashboard","filter_source":"Source","filter_issue":"Issues","filter_clear":"Clear filters","filter_no_issues":"No page on the dashboard is linked to an issue yet","filter_empty":"No page matches the filters","source_popos":"POPOs","source_issue":"Issue pages","source_manual":"Added by hand","not_frameable":"This link cannot be shown inside Multica"},\n    "infoflow_community":"InfoFlow community",\n    "quick_links": {"title":"Common links","mobile_control":"Mobile control link","loading":"Loading...","unavailable":"Unavailable","copied":"Copied","copy_failed":"Copy failed, try again","model_trace":"OneAPI model quality probe","quickstart_wishlist":"Quick start & wishlist","official_docs":"Official documentation"},\n'),
     ],
     "packages/views/locales/zh-Hans/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"如流交流群",\n    "quick_links": {"title":"常用链接","mobile_control":"手机控制链接","loading":"加载中...","unavailable":"暂不可用","copied":"已复制","copy_failed":"复制失败，请重试","model_trace":"OneAPI降智探测","quickstart_wishlist":"快速上手 & 许愿板","official_docs":"官方文档"},\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "custom_apps": {"title":"POPOs","open_in_new_tab":"新标签页打开","my_dashboard":"我的看板","add_page":"添加页面","add_page_hint":"粘贴页面链接，例如 popo 作品地址。看板只保存在当前浏览器。","url_placeholder":"例如 xxx.popo.baidu-int.com","url_label":"页面链接","title_label":"名称（可选）","add":"添加","cancel":"取消","invalid_url":"链接无效，或是 multica 自身的地址","exists":"看板里已经有这个页面","full":"看板最多放 {{count}} 个页面","dashboard_empty":"还没有页面。点击「添加页面」，或在 POPOs、issue 的「关联页面」里点图钉加到看板。","refresh":"刷新","fullscreen":"在 multica 中打开","remove":"移除","move_left":"前移","move_right":"后移","resize":"拖动调整大小（也可用方向键）","loading":"加载中...","linked_issues_failed":"关联 issue 加载失败","linked_issues":"关联 issue","no_linked_issues":"还没有 issue 绑定这个页面","add_to_dashboard":"加到我的看板","remove_from_sidebar":"从 POPOs 移除","remove_from_dashboard":"已在我的看板，点击移出","added_to_dashboard":"已在我的看板","section_title":"关联页面","bind":"绑定页面","unbind":"解绑","bind_placeholder":"粘贴页面链接","bind_failed":"绑定失败，请重试","section_empty":"还没有绑定页面","reload_loop":"这个页面在 multica 里反复刷新，已暂停加载。通常是它的登录或 Cookie 在嵌入时不可用，请在新标签页打开。","retry":"重试","popos_add":"添加到 POPOs","popos_add_hint":"粘贴页面链接，例如 popo 作品地址。POPOs 只保存在当前浏览器，不会自动加进看板，可以在列表里点图钉加入看板。","popos_exists":"POPOs 里已经有这个页面","popos_full":"POPOs 最多放 {{count}} 个页面","filter":"筛选看板","filter_source":"来源","filter_issue":"关联 issue","filter_clear":"清除筛选","filter_no_issues":"看板里的页面还没有绑定 issue","filter_empty":"没有符合筛选条件的页面","source_popos":"POPOs","source_issue":"issue 关联页面","source_manual":"手动添加","not_frameable":"这个链接不能在 multica 中显示"},\n    "infoflow_community":"如流交流群",\n    "quick_links": {"title":"常用链接","mobile_control":"手机控制链接","loading":"加载中...","unavailable":"暂不可用","copied":"已复制","copy_failed":"复制失败，请重试","model_trace":"OneAPI降智探测","quickstart_wishlist":"快速上手 & 许愿板","official_docs":"官方文档"},\n'),
     ],
     "packages/views/locales/ja/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"InfoFlow コミュニティ",\n    "quick_links": {"title":"よく使うリンク","mobile_control":"モバイル操作リンク","loading":"読み込み中...","unavailable":"利用できません","copied":"コピーしました","copy_failed":"コピーできませんでした","model_trace":"OneAPI モデル品質チェック","quickstart_wishlist":"クイックスタートと要望","official_docs":"公式ドキュメント"},\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "custom_apps": {"title":"POPOs","open_in_new_tab":"新しいタブで開く","my_dashboard":"マイダッシュボード","add_page":"ページを追加","add_page_hint":"ページのリンクを貼り付けてください。ダッシュボードはこのブラウザにのみ保存されます。","url_placeholder":"例: xxx.popo.baidu-int.com","url_label":"ページのリンク","title_label":"名前（任意）","add":"追加","cancel":"キャンセル","invalid_url":"無効なリンク、または Multica 自身のアドレスです","exists":"このページは追加済みです","full":"ダッシュボードは最大 {{count}} ページです","dashboard_empty":"まだページがありません。「ページを追加」するか、課題の関連ページから追加してください。","refresh":"更新","fullscreen":"Multica で開く","remove":"削除","move_left":"前へ","move_right":"後へ","resize":"ドラッグでサイズ変更（矢印キーも可）","loading":"読み込み中...","linked_issues_failed":"関連する課題を読み込めませんでした","linked_issues":"関連する課題","no_linked_issues":"このページに紐づく課題はまだありません","add_to_dashboard":"ダッシュボードに追加","remove_from_sidebar":"POPOs から削除","remove_from_dashboard":"ダッシュボードに追加済み（クリックで外す）","added_to_dashboard":"ダッシュボードに追加済み","section_title":"関連ページ","bind":"ページを紐づけ","unbind":"紐づけ解除","bind_placeholder":"ページのリンクを貼り付け","bind_failed":"紐づけできませんでした","section_empty":"関連ページはありません","reload_loop":"このページは Multica 内で再読み込みを繰り返したため、読み込みを停止しました。埋め込み時はログインや Cookie が使えないことが多いため、新しいタブで開いてください。","retry":"再試行","popos_add":"POPOs に追加","popos_add_hint":"ページのリンクを貼り付けてください。POPOs はこのブラウザにのみ保存され、ダッシュボードには自動で追加されません。ピンで追加できます。","popos_exists":"このページは POPOs に追加済みです","popos_full":"POPOs は最大 {{count}} ページです","filter":"ダッシュボードを絞り込む","filter_source":"追加元","filter_issue":"課題","filter_clear":"絞り込みを解除","filter_no_issues":"ダッシュボードのページはまだ課題に紐づいていません","filter_empty":"条件に合うページはありません","source_popos":"POPOs","source_issue":"課題の関連ページ","source_manual":"手動で追加","not_frameable":"このリンクは Multica 内に表示できません"},\n    "infoflow_community":"InfoFlow コミュニティ",\n    "quick_links": {"title":"よく使うリンク","mobile_control":"モバイル操作リンク","loading":"読み込み中...","unavailable":"利用できません","copied":"コピーしました","copy_failed":"コピーできませんでした","model_trace":"OneAPI モデル品質チェック","quickstart_wishlist":"クイックスタートと要望","official_docs":"公式ドキュメント"},\n'),
     ],
     "packages/views/locales/ko/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"InfoFlow 커뮤니티",\n    "quick_links": {"title":"자주 쓰는 링크","mobile_control":"모바일 제어 링크","loading":"불러오는 중...","unavailable":"사용할 수 없음","copied":"복사됨","copy_failed":"복사하지 못했습니다","model_trace":"OneAPI 모델 품질 검사","quickstart_wishlist":"빠른 시작 및 요청","official_docs":"공식 문서"},\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "custom_apps": {"title":"POPOs","open_in_new_tab":"새 탭에서 열기","my_dashboard":"내 대시보드","add_page":"페이지 추가","add_page_hint":"페이지 링크를 붙여넣으세요. 대시보드는 이 브라우저에만 저장됩니다.","url_placeholder":"예: xxx.popo.baidu-int.com","url_label":"페이지 링크","title_label":"이름 (선택)","add":"추가","cancel":"취소","invalid_url":"잘못된 링크이거나 Multica 자체 주소입니다","exists":"이미 대시보드에 있는 페이지입니다","full":"대시보드에는 최대 {{count}}개 페이지를 둘 수 있습니다","dashboard_empty":"아직 페이지가 없습니다. ‘페이지 추가’를 누르거나 이슈의 연결된 페이지에서 추가하세요.","refresh":"새로고침","fullscreen":"Multica에서 열기","remove":"제거","move_left":"앞으로","move_right":"뒤로","resize":"드래그하여 크기 조절 (방향키도 가능)","loading":"불러오는 중...","linked_issues_failed":"연결된 이슈를 불러오지 못했습니다","linked_issues":"연결된 이슈","no_linked_issues":"이 페이지에 연결된 이슈가 없습니다","add_to_dashboard":"내 대시보드에 추가","remove_from_sidebar":"POPOs에서 제거","remove_from_dashboard":"대시보드에 있음, 클릭하여 제거","added_to_dashboard":"대시보드에 있음","section_title":"연결된 페이지","bind":"페이지 연결","unbind":"연결 해제","bind_placeholder":"페이지 링크 붙여넣기","bind_failed":"페이지를 연결하지 못했습니다","section_empty":"연결된 페이지가 없습니다","reload_loop":"이 페이지가 Multica 안에서 계속 새로고침되어 로딩을 멈췄습니다. 임베드 시 로그인이나 쿠키가 동작하지 않는 경우가 많으니 새 탭에서 여세요.","retry":"다시 시도","popos_add":"POPOs에 추가","popos_add_hint":"페이지 링크를 붙여넣으세요. POPOs는 이 브라우저에만 저장되며 대시보드에 자동으로 추가되지 않습니다. 핀으로 추가하세요.","popos_exists":"이미 POPOs에 있는 페이지입니다","popos_full":"POPOs에는 최대 {{count}}개 페이지를 둘 수 있습니다","filter":"대시보드 필터","filter_source":"출처","filter_issue":"이슈","filter_clear":"필터 지우기","filter_no_issues":"대시보드 페이지에 연결된 이슈가 아직 없습니다","filter_empty":"필터에 맞는 페이지가 없습니다","source_popos":"POPOs","source_issue":"이슈 연결 페이지","source_manual":"직접 추가","not_frameable":"이 링크는 Multica 안에서 표시할 수 없습니다"},\n    "infoflow_community":"InfoFlow 커뮤니티",\n    "quick_links": {"title":"자주 쓰는 링크","mobile_control":"모바일 제어 링크","loading":"불러오는 중...","unavailable":"사용할 수 없음","copied":"복사됨","copy_failed":"복사하지 못했습니다","model_trace":"OneAPI 모델 품질 검사","quickstart_wishlist":"빠른 시작 및 요청","official_docs":"공식 문서"},\n'),
     ],
     "packages/views/locales/fr/layout.json": [
-        ('  "sidebar": {\n', '  "sidebar": {\n    "infoflow_community":"Communauté InfoFlow",\n    "quick_links": {"title":"Liens utiles","mobile_control":"Lien de contrôle mobile","loading":"Chargement...","unavailable":"Indisponible","copied":"Copié","copy_failed":"Échec de la copie, réessayez","model_trace":"Qualité des modèles OneAPI","quickstart_wishlist":"Démarrage rapide et souhaits","official_docs":"Documentation officielle"},\n'),
+        ('  "sidebar": {\n', '  "sidebar": {\n    "custom_apps": {"title":"POPOs","open_in_new_tab":"Ouvrir dans un nouvel onglet","my_dashboard":"Mon tableau de bord","add_page":"Ajouter une page","add_page_hint":"Collez le lien d\'une page. Le tableau de bord est enregistré dans ce navigateur uniquement.","url_placeholder":"ex. xxx.popo.baidu-int.com","url_label":"Lien de la page","title_label":"Nom (facultatif)","add":"Ajouter","cancel":"Annuler","invalid_url":"Lien invalide ou adresse de Multica","exists":"Cette page est déjà sur le tableau de bord","full":"Le tableau de bord contient au plus {{count}} pages","dashboard_empty":"Aucune page. Utilisez « Ajouter une page » ou épinglez-en une depuis un ticket.","refresh":"Actualiser","fullscreen":"Ouvrir dans Multica","remove":"Retirer","move_left":"Avancer","move_right":"Reculer","resize":"Glisser pour redimensionner (ou flèches du clavier)","loading":"Chargement...","linked_issues_failed":"Impossible de charger les tickets liés","linked_issues":"Tickets liés","no_linked_issues":"Aucun ticket n\'est lié à cette page","add_to_dashboard":"Ajouter au tableau de bord","remove_from_sidebar":"Retirer de POPOs","remove_from_dashboard":"Sur mon tableau de bord, cliquer pour retirer","added_to_dashboard":"Sur mon tableau de bord","section_title":"Pages liées","bind":"Lier une page","unbind":"Délier","bind_placeholder":"Collez le lien d\'une page","bind_failed":"Impossible de lier la page","section_empty":"Aucune page liée","reload_loop":"Cette page se rechargeait en boucle dans Multica, le chargement a été suspendu. Sa connexion ou ses cookies ne fonctionnent souvent pas en intégration : ouvrez-la dans un nouvel onglet.","retry":"Réessayer","popos_add":"Ajouter à POPOs","popos_add_hint":"Collez le lien d’une page. POPOs est enregistré dans ce navigateur uniquement et n’est pas ajouté au tableau de bord ; épinglez une page pour l’y mettre.","popos_exists":"Cette page est déjà dans POPOs","popos_full":"POPOs contient au plus {{count}} pages","filter":"Filtrer le tableau de bord","filter_source":"Origine","filter_issue":"Tickets","filter_clear":"Effacer les filtres","filter_no_issues":"Aucune page du tableau de bord n’est liée à un ticket","filter_empty":"Aucune page ne correspond aux filtres","source_popos":"POPOs","source_issue":"Pages de tickets","source_manual":"Ajoutées à la main","not_frameable":"Ce lien ne peut pas s\'afficher dans Multica"},\n    "infoflow_community":"Communauté InfoFlow",\n    "quick_links": {"title":"Liens utiles","mobile_control":"Lien de contrôle mobile","loading":"Chargement...","unavailable":"Indisponible","copied":"Copié","copy_failed":"Échec de la copie, réessayez","model_trace":"Qualité des modèles OneAPI","quickstart_wishlist":"Démarrage rapide et souhaits","official_docs":"Documentation officielle"},\n'),
     ],
     PROXY: [
         (
@@ -903,6 +926,28 @@ runpy.run_path(str(HERE / "math-rendering-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "issue-jump-to-latest-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "onetool-skill-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "personal-machine-name-web-patch.py"))["extend"](CHANGES)
+
+
+# Custom pages bound to issues: issue metadata `page.*` keys (upstream API),
+# shown in an issue-detail section. No backend change.
+CHANGES.setdefault("packages/core/api/client.ts", []).append((
+    "  async getIssue(id: string, options?: { signal?: AbortSignal }): Promise<Issue> {\n",
+    "  async setIssueMetadataKey(id: string, key: string, value: string | number | boolean): Promise<void> {\n"
+    "    await this.fetch(`/api/issues/${encodeURIComponent(id)}/metadata/${encodeURIComponent(key)}`, {\n"
+    "      method: \"PUT\", body: JSON.stringify({ value }),\n"
+    "    });\n"
+    "  }\n\n"
+    "  async deleteIssueMetadataKey(id: string, key: string): Promise<void> {\n"
+    "    await this.fetch(`/api/issues/${encodeURIComponent(id)}/metadata/${encodeURIComponent(key)}`, { method: \"DELETE\" });\n"
+    "  }\n\n"
+    "  async getIssue(id: string, options?: { signal?: AbortSignal }): Promise<Issue> {\n",
+))
+CHANGES.setdefault("packages/views/issues/components/issue-detail.tsx", []).extend([
+    ('import { PluginPanelSection } from "../../plugins";\n',
+     'import { PluginPanelSection } from "../../plugins";\nimport { IssuePagesSection } from "./issue-pages-section";\n'),
+    ("      <PluginPanelSection issueId={issue.id} />\n",
+     "      <PluginPanelSection issueId={issue.id} />\n      <IssuePagesSection issue={issue} />\n"),
+])
 
 
 def apply_patches():
