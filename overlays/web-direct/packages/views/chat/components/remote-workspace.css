@@ -1,0 +1,15 @@
+/* Respond to available chat-pane width, not the browser viewport: the product
+   also has navigation/thread rails. Never stack a file viewer above chat. */
+.remote-workspace { container-type: inline-size; container-name: coding-workspace; }
+.workspace-panes { display: grid; grid-template-columns: minmax(0, 1fr); flex: 1; min-height: 0; }
+.workspace-panes-open { grid-template-columns: 180px minmax(0, 1fr) minmax(280px, 34%); }
+.workspace-explorer, .workspace-editor, .workspace-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.workspace-view-switch { display: none; }
+@container coding-workspace (max-width: 759px) {
+  .workspace-view-switch { display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .workspace-panes-open { grid-template-columns: minmax(110px, 30%) minmax(0, 1fr); }
+  .workspace-panes-open[data-view="code"] > .workspace-chat { display: none; }
+  .workspace-panes-open[data-view="chat"] { grid-template-columns: minmax(0, 1fr); }
+  .workspace-panes-open[data-view="chat"] > .workspace-explorer,
+  .workspace-panes-open[data-view="chat"] > .workspace-editor { display: none; }
+}

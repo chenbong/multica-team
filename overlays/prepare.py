@@ -72,6 +72,8 @@ def main() -> None:
     generated = builtin_env["extend"](UPSTREAM, generated)
     web_panels = runpy.run_path(str(HERE / "resource-web-panels-sql.py"))
     generated = web_panels["extend"](UPSTREAM, FILES, generated)
+    remote_workspace = runpy.run_path(str(HERE / "remote-workspace-go-patch.py"))
+    generated = remote_workspace["extend"](UPSTREAM, FILES, generated)
     for rel, text in generated:
         source = UPSTREAM / rel
         override = HERE / ".generated" / rel

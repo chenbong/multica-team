@@ -1,0 +1,44 @@
+import {chromium,expect} from '@playwright/test';
+import fs from 'node:fs/promises';
+// Uses real ChatPage rendering and test-only controller; no production model/database.
+const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});
+const page=await browser.newPage({viewport:{width:1440,height:960}});const errors=[];page.on('pageerror',e=>errors.push(e.stack));
+await page.goto('http://127.0.0.1:4180/');
+await page.getByRole('button',{name:'文件 / Files',exact:true}).click();
+await page.getByRole('button',{name:'src',exact:true}).click();
+await page.getByRole('button',{name:'auth',exact:true}).click();
+await page.getByRole('button',{name:'login.ts',exact:true}).click();
+const preview=page.getByLabel('只读文件预览 / Read-only file preview',{exact:true});
+await expect(preview).toContainText('LIVE-lab-chat-one');
+console.log('panels',await page.locator('[data-panel]').evaluateAll(els=>els.map(el=>({id:el.id,width:el.getBoundingClientRect().width,display:getComputedStyle(el).display}))));
+await expect(page.locator('[data-panel][id=list]')).not.toBeVisible();
+const info=await (await fetch('http://127.0.0.1:4180/lab-api/info')).json();
+if(!/^\/tmp\/teammesh-live-lab\.[A-Za-z0-9]+$/.test(info.root))throw new Error('not a lab sandbox');
+await fs.access(info.root+'/.teammesh-lab');
+const target=info.root+'/lab-chat-one/src/auth/login.ts';const original=await fs.readFile(target,'utf8');
+const marker='verify_'+Date.now();await fs.writeFile(target,original+'\n// '+marker+'\n');
+await page.getByRole('button',{name:'刷新文件 / Refresh files',exact:true}).click();await expect(preview).toContainText(marker);
+await page.getByRole('button',{name:'文件 / File',exact:true}).click();
+const editor=page.locator('[contenteditable=true]');await editor.fill('请验证所附文件中的随机标记');
+console.log('buttons',await page.getByRole('button').allTextContents());
+await page.getByRole('button',{name:'发送',exact:true}).click();
+await expect(page.getByLabel('Agent 聊天 / Agent chat',{exact:true})).toContainText(marker);
+await page.screenshot({path:'/tmp/teammesh-live-full-desktop.png'});
+console.log('PASS live file changed on disk -> UI -> selected reference -> daemon verified context -> real chat message renderer');
+await page.getByRole('button',{name:'显示会话列表',exact:true}).click();await expect(page.locator('[data-panel][id=list]')).toBeVisible();
+await page.getByText('另一会话：检查隔离',{exact:true}).click();
+await page.getByRole('button',{name:'文件 / Files',exact:true}).click();await page.getByRole('button',{name:'README.md',exact:true}).click();
+await expect(preview).toContainText('lab-chat-two');await expect(preview).not.toContainText(marker);
+console.log('PASS real chat session switching and workdir isolation');
+// Stale preview must leave BOTH the normal composer draft and context chips intact.
+await page.getByRole('button',{name:'文件 / File',exact:true}).click();
+await fs.appendFile(info.root+'/lab-chat-two/README.md','\nchanged-after-attach\n');
+await page.locator('[contenteditable=true]').fill('过期引用发送应该失败并保留草稿');
+await page.getByRole('button',{name:'发送',exact:true}).click();
+await expect(page.locator('[contenteditable=true]')).toContainText('过期引用发送应该失败并保留草稿');
+await expect(page.getByRole('button',{name:'移除引用 / Remove README.md',exact:true})).toBeVisible();
+await expect(page.locator('[data-sonner-toast]')).toContainText('文件内容已变化');
+console.log('PASS stale snapshot rejected, original ChatInput draft and reference retained');
+
+await page.setViewportSize({width:900,height:900});await page.screenshot({path:'/tmp/teammesh-live-full-narrow.png'});
+if(errors.length)throw new Error(errors.join('\n'));await browser.close();

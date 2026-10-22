@@ -1,0 +1,13 @@
+.lab-app {height:100dvh;display:flex;flex-direction:column;overflow:hidden;font-family:system-ui,sans-serif}
+.lab-banner {display:flex;gap:16px;align-items:center;flex-shrink:0;padding:8px 14px;font-size:12px;background:#edf6ff;border-bottom:1px solid #d9e9f7;color:#245479}
+.lab-banner a {margin-left:auto;text-decoration:underline}
+.lab-body {display:flex;flex:1;min-height:0}
+.lab-navigation {width:190px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);padding:12px 8px;display:flex;flex-direction:column;gap:2px}
+.lab-navigation.is-collapsed {width:48px}
+.lab-brand {text-align:left;font-size:13px;font-weight:600;padding:8px}
+.lab-muted {font-size:10px;color:#888;padding:6px}
+.lab-nav-item {padding:5px 12px;font-size:12px;border-radius:5px;color:#666}
+.lab-nav-item.selected {background:#e5e7eb;color:#111;font-weight:600}
+.lab-nav-footer {margin-top:auto;font-size:10px;color:#888;padding:8px}
+.lab-main {display:flex;flex:1;min-width:0;min-height:0;overflow:hidden}
+@media(max-width:800px){.lab-navigation{display:none}.lab-banner span{display:none}}
