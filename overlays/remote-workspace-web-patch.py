@@ -18,8 +18,11 @@ def extend(changes):
     add('packages/core/api/schemas.ts', 'export const SendChatMessageResponseSchema: z.ZodType<SendChatMessageResponse> = z.object({', 'export const SendChatMessageResponseSchema: z.ZodType<SendChatMessageResponse> = z.object({\n  content: z.string().optional(),')
     page='packages/views/chat/chat-page.tsx'
     add(page, 'import { ChatInput } from "./components/chat-input";', 'import { ChatInput } from "./components/chat-input";\nimport { RemoteWorkspace } from "./components/remote-workspace";')
-    add(page, '  const conversation = (\n    <div', '  const conversation = (\n    <RemoteWorkspace sessionId={c.activeSessionId ?? null}>\n    <div')
+    add(page, '  const conversation = (\n    <div', '  const conversation = (\n    <RemoteWorkspace sessionId={c.activeSessionId ?? null} onOpenChange={setWorkspaceOpen} onToggleSessions={() => setWorkspaceSessionsVisible((value) => !value)} sessionsHidden={!workspaceSessionsVisible}>\n    <div')
     add(page, '    </div>\n  );\n\n  // -- Compact:', '    </div>\n    </RemoteWorkspace>\n  );\n\n  // -- Compact:')
+    add(page, '  const isCompact = useIsCompact();', '  const isCompact = useIsCompact();\n  const [workspaceOpen, setWorkspaceOpen] = useState(false);\n  const [workspaceSessionsVisible, setWorkspaceSessionsVisible] = useState(false);')
+    add(page, '      className="flex-1 min-h-0"\n      defaultLayout={defaultLayout}', '      className={workspaceOpen && !workspaceSessionsVisible ? "flex-1 min-h-0 [&>[data-panel][id=list]]:hidden!" : "flex-1 min-h-0"}\n      defaultLayout={defaultLayout}')
+    add(page, '      <ResizableHandle />\n      <ResizablePanel id="detail"', '      <ResizableHandle className={workspaceOpen && !workspaceSessionsVisible ? "hidden" : undefined} />\n      <ResizablePanel id="detail"')
     composer='packages/views/chat/components/chat-input.tsx'
     add(composer, 'import type { ReactNode } from "react";', 'import type { ReactNode } from "react";\nimport type { WorkspaceContext } from "@multica/core/types/remote-workspace";\nimport { RemoteWorkspaceChips, useRemoteWorkspace } from "./remote-workspace";')
     add(composer, '    draftAttachments: Attachment[],\n', '    draftAttachments: Attachment[],\n    workspaceContext?: WorkspaceContext,\n')

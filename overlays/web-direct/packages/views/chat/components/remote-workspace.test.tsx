@@ -36,6 +36,28 @@ describe("remote workspace UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加到聊天 / Add src" }));
     expect(Object.values(useRemoteWorkspaceDrafts.getState().drafts)[0]?.references).toEqual([{ path: "src", kind: "directory" }]);
   });
+  it("notifies the host when files open so the real ChatPage can collapse its thread list", async () => {
+    const onOpenChange = vi.fn();
+    const client = new QueryClient();
+    render(<QueryClientProvider client={client}><RemoteWorkspace sessionId="session" onOpenChange={onOpenChange}><div>Chat</div></RemoteWorkspace></QueryClientProvider>);
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    fireEvent.click(screen.getByRole("button", { name: "文件 / Files" }));
+    await waitFor(() => expect(onOpenChange).toHaveBeenLastCalledWith(true));
+    fireEvent.click(screen.getByRole("button", { name: "文件 / Files" }));
+    await waitFor(() => expect(onOpenChange).toHaveBeenLastCalledWith(false));
+  });
+  it("opens files as editor tabs and closes them without removing chat context", async () => {
+    mount(); fireEvent.click(screen.getByRole("button", { name: "文件 / Files" }));
+    fireEvent.click(await screen.findByRole("button", { name: "main.ts" }));
+    await screen.findByText("export const answer = 42;");
+    expect(screen.getByRole("tab", { name: "main.ts" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("button", { name: "文件 / File" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭文件 / Close main.ts" }));
+    expect(screen.queryByRole("tab", { name: "main.ts" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除引用 / Remove main.ts" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "📄 main.ts" }));
+    expect(await screen.findByRole("tab", { name: "main.ts" })).toBeInTheDocument();
+  });
   it("isolates conversation switches and removes cached source contents", async () => {
     const view = mount(); fireEvent.click(screen.getByRole("button", { name: "文件 / Files" }));
     fireEvent.click(await screen.findByRole("button", { name: "main.ts" })); await screen.findByText("export const answer = 42;");

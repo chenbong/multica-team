@@ -12,12 +12,19 @@ changes. References from a different binding are rejected, not silently remapped
    `remote-workspace-v1`; older/offline clients return an actionable error.
 2. Use a conversation you created, with a private Agent you own on a runtime you
    own. Run one turn so the daemon has prepared and registered its work directory.
-3. Open **Files** in the full Chat page. Expand directories, enter a relative file
+3. Open **Files** in the full Chat page: Explorer on the left, tabbed code preview
+   in the center, Agent chat on the right. Narrow panes switch Code/Chat instead
+   of stacking files above the composer. Expand directories, enter a relative file
    path, or open a file for highlighted read-only preview with line numbers.
 4. Right-click a file/directory → **Add to chat**. The plus button is also available
    for touch/keyboard access. Select code → **Selection** (or context menu).
 5. Review/remove the chips above the composer and send a normal prompt. Failed
    sends preserve chips. Switching accounts/workspaces/chats isolates drafts.
+
+**Copy path** copies the daemon-returned absolute path on the remote machine;
+**Copy relative path** is a separate action. Absolute paths are only returned after
+the existing owner-only checks, not stored in context chips or used as request roots.
+The demo uses an explicitly fictional `/home/demo/projects/teammesh` root.
 
 Directory references specify a scope; they **do not recursively attach files**.
 File references resolve to bounded send-time snapshots; preview/selection
@@ -77,6 +84,13 @@ selection, **not a filesystem sandbox for the Agent**.
   establish Windows junction/UNC behavior. Live Agent/provider and database-backed
   deployment acceptance remain necessary before broad rollout.
 
+## 本地交互实验
+
+新增 [完整聊天页 + 双进程真实文件实验](remote-workspace-local-lab.md)，
+运行 `./scripts/remote-workspace-lab.sh` 后访问 `http://127.0.0.1:4180/`。
+使用真实聊天组件及 daemon 磁盘读取，但账号/会话控制器仍为测试替身，
+不替代生产数据库权限和真实模型执行验收。
+
 ## Verification
 
 ```sh
@@ -99,7 +113,7 @@ Verified during development:
 - Pure ownership policy tests run separately because upstream handler `TestMain`
   exits successfully without running tests when PostgreSQL is unavailable.
 - Server and CLI test binaries compile. Frontend core/views TypeScript checks pass.
-- 101 UI/chat tests and 126 API tests pass (existing regression suites included).
+- 103 UI/chat tests and 126 API tests pass (existing regression suites included).
 - Chromium browser smoke: expansion, right-click, preview, DOM selection, chips,
   mock send, session switching and mobile layout. **Transport is a local fixture**,
   not a production database/Agent integration. Screenshots below show that fixture.

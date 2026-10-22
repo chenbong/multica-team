@@ -25,20 +25,22 @@ type WorkspaceRequest struct {
 	References  []WorkspaceReference `json:"references,omitempty"`
 }
 type WorkspaceEntry struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-	Kind string `json:"kind"`
-	Size int64  `json:"size"`
+	AbsolutePath string `json:"absolute_path"`
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	Kind         string `json:"kind"`
+	Size         int64  `json:"size"`
 }
 type WorkspaceResponse struct {
-	ID         string           `json:"id"`
-	Error      string           `json:"error,omitempty"`
-	Binding    string           `json:"binding,omitempty"`
-	RootName   string           `json:"root_name,omitempty"`
-	Path       string           `json:"path,omitempty"`
-	Entries    []WorkspaceEntry `json:"entries,omitempty"`
-	NextOffset *int             `json:"next_offset,omitempty"`
-	Content    string           `json:"content,omitempty"`
-	Revision   string           `json:"revision,omitempty"`
-	Context    string           `json:"context,omitempty"`
+	AbsolutePath string           `json:"absolute_path,omitempty"`
+	ID           string           `json:"id"`
+	Error        string           `json:"error,omitempty"`
+	Binding      string           `json:"binding,omitempty"`
+	RootName     string           `json:"root_name,omitempty"`
+	Path         string           `json:"path,omitempty"`
+	Entries      []WorkspaceEntry `json:"entries,omitempty"`
+	NextOffset   *int             `json:"next_offset,omitempty"`
+	Content      string           `json:"content,omitempty"`
+	Revision     string           `json:"revision,omitempty"`
+	Context      string           `json:"context,omitempty"`
 }

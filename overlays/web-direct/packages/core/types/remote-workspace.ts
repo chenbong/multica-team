@@ -6,10 +6,11 @@ export interface WorkspaceReference {
   end_line?: number;
 }
 export interface WorkspaceContext { binding: string; references: WorkspaceReference[] }
-export interface WorkspaceEntry { name: string; path: string; kind: "file" | "directory"; size: number }
+export interface WorkspaceEntry { absolute_path?: string; name: string; path: string; kind: "file" | "directory"; size: number }
 export interface WorkspaceResult {
   binding: string;
   root_name: string;
+  absolute_path?: string;
   path?: string;
   entries?: WorkspaceEntry[];
   next_offset?: number;

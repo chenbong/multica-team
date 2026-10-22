@@ -154,3 +154,25 @@ func TestRemoteWorkspaceRootReplacement(t *testing.T) {
 		t.Fatal("replacement root was trusted", result)
 	}
 }
+
+func TestRemoteWorkspaceAbsolutePaths(t *testing.T) {
+	root := workspaceFixture(t)
+	list := readWorkspaceRoot(root, protocol.WorkspaceRequest{Operation: "list", Path: "."})
+	if list.AbsolutePath != root.Path {
+		t.Fatalf("root path: %q", list.AbsolutePath)
+	}
+	for _, entry := range list.Entries {
+		want := filepath.Join(root.Path, filepath.FromSlash(entry.Path))
+		if entry.AbsolutePath != want {
+			t.Fatalf("entry %q got %q want %q", entry.Path, entry.AbsolutePath, want)
+		}
+	}
+	file := readWorkspaceRoot(root, protocol.WorkspaceRequest{Operation: "read", Binding: root.Binding, Path: "main.go"})
+	if file.AbsolutePath != filepath.Join(root.Path, "main.go") {
+		t.Fatalf("file path: %q", file.AbsolutePath)
+	}
+	denied := readWorkspaceRoot(root, protocol.WorkspaceRequest{Operation: "read", Binding: root.Binding, Path: "../secret"})
+	if denied.AbsolutePath != "" || denied.Error == "" {
+		t.Fatal("denied path disclosed", denied)
+	}
+}

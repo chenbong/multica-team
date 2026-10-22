@@ -280,7 +280,7 @@ func readWorkspaceRoot(binding remoteWorkspaceRoot, req protocol.WorkspaceReques
 			if info.IsDir() {
 				kind = "directory"
 			}
-			filtered = append(filtered, protocol.WorkspaceEntry{Name: entry.Name(), Path: relative, Kind: kind, Size: info.Size()})
+			filtered = append(filtered, protocol.WorkspaceEntry{Name: entry.Name(), Path: relative, Kind: kind, Size: info.Size(), AbsolutePath: filepath.Join(binding.Path, filepath.FromSlash(relative))})
 		}
 		sort.Slice(filtered, func(i, j int) bool {
 			if filtered[i].Kind != filtered[j].Kind {
@@ -360,5 +360,6 @@ func readWorkspaceRoot(binding remoteWorkspaceRoot, req protocol.WorkspaceReques
 	default:
 		return fail("invalid_operation")
 	}
+	resp.AbsolutePath = filepath.Join(binding.Path, filepath.FromSlash(name))
 	return resp
 }
