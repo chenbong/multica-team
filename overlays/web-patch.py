@@ -905,6 +905,8 @@ runpy.run_path(str(HERE / "onetool-skill-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "personal-machine-name-web-patch.py"))["extend"](CHANGES)
 
 
+runpy.run_path(str(HERE / "remote-workspace-web-patch.py"))["extend"](CHANGES)
+
 def apply_patches():
     for rel, original, text, unchanged in plan_patches():
         if unchanged:
