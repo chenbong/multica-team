@@ -79,7 +79,7 @@ test("failed /agent lookup retries; successful commands persist dedup across res
   assert.equal(Object.keys(first.issueRelay.inbox).length, 1);
   first.multica.listAgents = async () => [{ id: B, name: "member" }];
   await first.issueRelay.poll();
-  assert.equal(first.agentFor("alice"), "member");
+  assert.equal(first.agentFor("alice"), B);
   first.stop();
   const restored = f.make();
   restored.multica.listAgents = async () => { throw new Error("duplicate command reran lookup"); };
@@ -199,7 +199,7 @@ test("failed /help notification retries, while accepted /agent change does not r
   first.multica.listAgents = async () => [{ id: B, name: "member" }];
   first.sender = async () => { throw new Error("receipt unavailable"); };
   await first.handleMessage(f.message("/agent member", "101"));
-  assert.equal(first.agentFor("alice"), "member"); first.stop();
+  assert.equal(first.agentFor("alice"), B); first.stop();
   const restored = f.make();
   restored.multica.listAgents = async () => assert.fail("completed switch must not query again");
   await restored.handleMessage(f.message("/agent member", "101"));

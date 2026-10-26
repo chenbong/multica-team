@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import {verificationRecipient} from "../src/company-identity.js";
 import { ownedAgents, resolveOwnedAgent, agentBindingIds, assertBindingAvailable } from "../src/admin-agents.js";
 
 const account = { userId: "alice", profile: "alice" };
@@ -86,7 +87,7 @@ async function runSave(input, existing, onCredentials) {
     visibleAccounts: async () => ({ mine: [{ ...account, workspaceId: "a" }] }), ownsRobot: async () => true,
     body: async () => input, send: (_res, status, payload) => replies.push({ status, payload }),
     resolveOwnedAgent: async () => ({ workspace: workspaces[0], agent: { name: "Mine" } }),
-    assertBindingAvailable, DEFAULT_BASE_URL: "https://im.example.test", randomUUID: () => "new-robot",
+    assertBindingAvailable, verificationRecipient, DEFAULT_BASE_URL: "https://im.example.test", randomUUID: () => "new-robot",
     fetchRobotName: async () => { calls.push("credentials"); onCredentials?.(runtime); return "New robot"; },
     saveRobotBinding: async options => { saved.push(options); return { status: "sent" }; },
     snapshot: async () => ({}), logger: { log() {} }, splitList: () => [],

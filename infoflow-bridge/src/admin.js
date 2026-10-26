@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import {verificationRecipient} from "./company-identity.js";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { Accounts } from "./accounts.js";
@@ -13,9 +14,9 @@ import { saveRobotBinding, deleteRobotBinding } from "./robot-binding-notice.js"
 const PAGE = resolve(ROOT, "public/index.html");
 const SESSION_COOKIE = "bridge_admin";
 
-// A local-only admin page: it edits config.local.json and asks the runtime to
-// reconnect. It binds to loopback, and everything except the login endpoints
-// needs a session obtained by receiving a one-time code in 如流.
+// The bind address controls network exposure; hostnames are not an access gate.
+// Everything except the page and login endpoints still requires a session
+// obtained by receiving a one-time code in 如流, plus account ownership checks.
 export function startAdminServer({ runtime, logger = console }) {
   const accounts = new Accounts(logger);
   const auth = new AdminAuth({
@@ -27,10 +28,6 @@ export function startAdminServer({ runtime, logger = console }) {
   });
   const server = createServer(async (request, response) => {
     try {
-      if (!hostIsAllowed(request.headers.host, runtime.config.admin)) {
-        send(response, 403, { error: "only reachable from this machine" });
-        return;
-      }
       await route(request, response, runtime, accounts, auth, logger);
     } catch (error) {
       logger.error(`admin request failed: ${error.message}`);
@@ -165,6 +162,7 @@ async function route(request, response, runtime, accounts, auth, logger) {
         workspaces: await accounts.workspaces(account.profile),
         workspaceId: String(input.workspaceId ?? "").trim() || previous.workspaceId || account.workspaceId,
         agentName: input.agent,
+        agentId: input.agentId,
         listAgents: (workspaceId) => new Multica({ ...runtime.config.multica, profile: account.profile, workspaceId }).listAgents(),
       });
     } catch (error) {
@@ -177,6 +175,7 @@ async function route(request, response, runtime, accounts, auth, logger) {
         id: previous.id ?? input.id,
         workspaceId: binding.workspace.id,
         agent: binding.agent.name,
+        agentId: binding.agent.id,
         appId: input.appId,
       }, runtime.config.multica.workspaceId);
     } catch (error) {
@@ -221,6 +220,7 @@ async function route(request, response, runtime, accounts, auth, logger) {
       purpose: "task",
       profile: account.profile,
       boundByEmail: session.email,
+      boundUserId: account.userId,
       workspaceId: workspace.id,
       workspaceSlug: workspace.slug ?? "",
       appId: input.appId,
@@ -228,12 +228,16 @@ async function route(request, response, runtime, accounts, auth, logger) {
       appSecret,
       baseUrl,
       agent: agent.name,
+      agentId: agent.id,
+      agentName: agent.name,
+      stateAgentRef: (previous.agentId || previous.agent) === agent.id ?
+        previous.stateAgentRef || previous.agent || agent.id : agent.id,
       // Neither list is configured on the page anymore. Groups are open — every
       // member of a group the robot is in can @ it — and a direct chat is limited
       // to whoever created the robot, which is the one person we can name here.
       allowUsers:
         input.allowUsers === undefined
-          ? (previous.allowUsers ?? [session.email.split("@")[0]])
+          ? (previous.allowUsers ?? [verificationRecipient(session.email, runtime.config.admin?.allowedDomains??[session.email.split("@")[1]])])
           : Array.isArray(input.allowUsers)
             ? input.allowUsers
             : splitList(input.allowUsers),
@@ -339,7 +343,10 @@ async function snapshot(runtime, accounts, requestedProfile, session) {
   // Robots are private to the Multica account they are pinned to. The previous
   // response returned other users' robots as read-only rows, which still leaked
   // their names, agents, and delivery scope on the page.
-  const visibleRobots = managed.filter((robot) => list.some((entry) => entry.profile === (robot.profile ?? "")));
+  const visibleRobots = managed.filter(robot => robot.boundByEmail ?
+    robot.boundByEmail.toLowerCase() === session.email.toLowerCase() :
+    list.some(entry => entry.profile === (robot.profile ?? "")));
+  await runtime.refreshBindings?.(visibleRobots);
   const wanted = String(requestedProfile ?? "").trim();
   const active =
     list.find((entry) => entry.profile === wanted) ??
@@ -377,8 +384,9 @@ async function snapshot(runtime, accounts, requestedProfile, session) {
             const raw = await new Multica({ ...config.multica, profile: active.profile, workspaceId: workspace.id }).listAgents();
             return {
               agents: ownedAgents(raw, active.userId).map((agent) => ({
+                id: agent.id,
                 name: agent.name,
-                bindingRobotIds: agentBindingIds(managed, workspace.id, agent.name, config.multica.workspaceId),
+                bindingRobotIds: agentBindingIds(managed, workspace.id, agent.id || agent.name, config.multica.workspaceId, agent.name),
                 model: agent.model,
                 ownerId: agent.owner_id,
                 ownerEmail: active.email,
@@ -451,16 +459,6 @@ function splitList(value) {
     .split(/[\s,，、]+/)
     .map((item) => item.trim())
     .filter(Boolean);
-}
-
-// Guards against a page on another origin resolving a hostname to this address
-// and driving the API through the browser. Loopback is always accepted; a
-// deployment reachable from elsewhere lists the names it answers to.
-function hostIsAllowed(host, admin) {
-  if (!host) return false;
-  const name = host.toLowerCase().replace(/:\d+$/, "");
-  if (["127.0.0.1", "localhost", "[::1]", "::1"].includes(name)) return true;
-  return admin.publicHosts.includes(name);
 }
 
 function cookie(request, name) {

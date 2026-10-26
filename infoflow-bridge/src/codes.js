@@ -1,4 +1,5 @@
 import { open, stat } from "node:fs/promises";
+import { verificationRecipient } from './company-identity.js';
 
 // Multica prints "[DEV] Verification code for <email>: <code>" whenever it has no
 // email backend configured. This watcher turns that line into an InfoFlow direct
@@ -68,8 +69,8 @@ export class VerificationCodeRelay {
     this.recent.push(key);
     if (this.recent.length > DEDUPE_LIMIT) this.recent = this.recent.slice(-DEDUPE_LIMIT);
 
-    const [user, domain] = email.split("@");
-    if (!this.allowedDomains.includes(domain)) {
+    const user = verificationRecipient(email, this.allowedDomains);
+    if (!user) {
       this.logger.warn(`not relaying a code for ${email}: domain is not in the allow list`);
       return;
     }

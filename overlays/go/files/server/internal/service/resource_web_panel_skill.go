@@ -10,52 +10,42 @@ func withResourceWebPanelSkill(skills []AgentSkillData) []AgentSkillData {
 		if skills[index].Name != PlatformSkillName {
 			continue
 		}
-		skills[index].Content = strings.Replace(skills[index].Content, "issue and PR contracts,", "issue panels, issue and PR contracts,", 1)
+		skills[index].Content = strings.Replace(skills[index].Content, "issue and PR contracts,", "personal secrets, issue panels, issue and PR contracts,", 1)
 		skills[index].Content = strings.Replace(skills[index].Content, "| `references/issues.md` | Issues:", "| `references/task-panels.md` | Add a web page to the current issue panel when the user requests it; workspace panels stay manual |\n| `references/issues.md` | Issues:", 1)
-		skills[index].Files = append(skills[index].Files, AgentSkillFileData{Path: "references/task-panels.md", Content: resourceWebPanelSkillReference})
+		skills[index].Files = append(skills[index].Files, AgentSkillFileData{Path: "references/task-panels.md", Content: resourceWebPanelSkillReference}, AgentSkillFileData{Path: "references/personal-secrets.md", Content: personalSecretsSkillReference}, AgentSkillFileData{Path: "scripts/team-mesh-tools.py", Content: platformExpansionTools})
+		skills[index].Content += "\nFor personal credentials needed for a user-requested operation, read references/personal-secrets.md. Never disclose secret values.\n"
 	}
 	return skills
 }
 
-const resourceWebPanelSkillReference = `# Add a page to the current issue panel
+const resourceWebPanelSkillReference = `# Manage the current task panel
 
-Use this only when the user explicitly asks you to add/pin a page or link to
-the current issue's panel (任务面板). Merely encountering a URL is not a request.
-Use the exact supplied HTTP(S) URL, preserving its query and fragment. Supply
-a short descriptive name; if omitted, infer a name, not a different URL.
-Never put credentials into a URL. Added links are shared with issue readers.
+Use only when the user asks to list, add, change or remove pages in the current
+issue panel. Workspace panels remain manual. Chat runs without an issue cannot
+use this tool. The server derives the issue from the authenticated live run;
+there is no user-selectable issue or workspace parameter.
 
-## Command
+    python3 scripts/team-mesh-tools.py panels list
+    python3 scripts/team-mesh-tools.py panels add --name "Dashboard" --url "https://example.test/results"
+    python3 scripts/team-mesh-tools.py panels update --id PANEL_UUID --name "New name" --url "https://example.test/new"
+    python3 scripts/team-mesh-tools.py panels delete --id PANEL_UUID
 
-    multica issue panel add --name "Performance dashboard" --url "https://example.test/dashboard#/results"
+List first to identify a panel's exact UUID. Only operate on the requested
+panel; ask if the name matches multiple items. Names are optional; an empty
+name uses the URL. Keep queries and fragments exactly as supplied. Never put
+credentials in a link. Only HTTP(S) links without embedded credentials pass
+validation. The tool has name and url only for add, and adds the panel UUID for
+update/delete; it cannot target another task. Added pages are visible to all
+issue readers. Existing human-created panels may also be managed on request.
 
-Replace the example name and URL with the requested values and quote both
-as shell arguments. The command sends name and url only. It has no issue-ID
-argument or target scope flag. The server derives the target from your
-authenticated running issue run. A chat without a current issue cannot use it.
-Read the current issue context through the CLI first if it is not already known.
-
-Only the current task token is accepted. Do not obtain or fall back to a
-personal token, daemon credential, another run's token, or database access.
-Never print, copy into a comment, or persist MULTICA_TOKEN.
-
-The command is add-only. Workspace panels (工作区面板) remain manual; there is
-no agent permission to add/edit/remove them, nor to edit/remove issue panels.
-If asked to change a workspace panel, explain that it must be done in the UI.
-
-Successful JSON with already_exists=false means added; already_exists=true
-means that the exact URL is
-already present; reuse that item, without renaming or taking ownership of it.
-A later explicit retry of an uncertain result does not create a duplicate
-link. On a CLI error, stop and report it; do not claim success or bypass the
-boundary. A 403 indicates missing current-issue/live-run authorization; a
-409 web_panel_limit requires a human to remove an existing item first.
-
-If the command is unavailable, ask the workspace owner to update the Multica
-CLI to a version that includes it. Do not work around it with curl, wget,
-Python, personal credentials or direct database writes.
-
-After success, briefly confirm the saved name and link in the conversation.
-The task panel list updates automatically. Do not force it open or reload the
-whole task page; let the user choose when to open the new entry.
+Existing CLI add remains available:
+    multica issue panel add --name "Dashboard" --url "https://example.test/results"
+An add response with already_exists=true means the identical URL already
+exists; do not rename or duplicate it. All operations require the current live
+task token. Never print, persist or copy MULTICA_TOKEN. Do not work around it
+with personal credentials, daemon credentials or direct database writes.
+A 403 indicates the run is unauthorized or has ended; stop and report failure.
+A duplicate URL is a 409 conflict on update. Do not force it open or reload the
+whole page. After success, briefly report the actual changes; the panel list
+updates automatically. Do not claim success on a failed/uncertain request.
 `

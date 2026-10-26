@@ -7,6 +7,10 @@ import { join } from "node:path";
 import { connectionCommand, profileNameFromEmail } from "./connection-commands";
 
 describe("connection commands", () => {
+  it("separates root and child-domain profiles",()=>{
+    expect(profileNameFromEmail("employee@baidu.com")).toBe("employee");
+    expect(profileNameFromEmail("employee@sz.baidu.com")).toBe("employee_sz");
+  });
   it.each(["macosLinux", "windows"] as const)("keeps numbered shell guidance for %s", (platform) => {
     const command = connectionCommand("fixture-installer", platform, {
       email: "user@example.test", token: "fixture-token",
@@ -47,7 +51,7 @@ describe("connection commands", () => {
       installUrl: "https://example.test/custom.sh",
     });
     execFileSync("bash", ["-n"], { input: command });
-    expect(command).toContain('.bcebos.com,.duckdns.org,10.0.0.0/8${no_proxy:+,$no_proxy}');
+    expect(command).toContain('.bcebos.com,.duckdns.org,.ai-chat.host,.baidu-int.com,10.0.0.0/8${no_proxy:+,$no_proxy}');
     expect(command).toContain('export NO_PROXY="$no_proxy"');
     expect(command).toContain("curl -fsSL 'https://example.test/custom.sh' | bash");
     expect(command).toContain("multica --profile test.user config set server_url 'http://api.example.test:8080'");
@@ -65,11 +69,23 @@ describe("connection commands", () => {
     const command = connectionCommand(install, "windows", { email: "user@example.test", token: "fixture" });
     expect(command).toContain(install);
     expect(command).toContain('$env:NO_PROXY = $env:no_proxy');
+    expect(command).toContain('$env:no_proxy = ".bcebos.com,.duckdns.org,.ai-chat.host,.baidu-int.com,10.0.0.0/8" + $(if ($env:no_proxy) { "," + $env:no_proxy } else { "" })');
     expect(command).toContain('$env:PATH = "$env:USERPROFILE\\.baidu-cc');
     expect(command).toContain('$env:USERPROFILE\\.baidu-cx\\baidu-cx\\bin;$env:USERPROFILE\\.comate\\baidu-cx\\bin;$env:PATH');
     expect(command).toContain("multica --profile user ducc setup");
     expect(command).toContain("ducc config model 'Opus 4.8'");
     expect(command).not.toContain("export ");
+  });
+
+  it.each(["", "localhost,custom.example"])("keeps existing proxy exclusions while adding both domains (%s)", (existing) => {
+    const command = connectionCommand("true", "macosLinux", {});
+    const network = command.split("\n\n")[0];
+    const result = execFileSync("/bin/bash", ["--noprofile", "--norc", "-c",
+      `${network}\nprintf '%s\\n%s\\n' "$no_proxy" "$NO_PROXY"`], {
+      env: { PATH: process.env.PATH, no_proxy: existing }, encoding: "utf8",
+    });
+    const expected = ".bcebos.com,.duckdns.org,.ai-chat.host,.baidu-int.com,10.0.0.0/8" + (existing ? `,${existing}` : "");
+    expect(result.trim().split("\n")).toEqual([expected, expected]);
   });
 
   it.each([false, true])("finds both installed CLIs without sourcing a shell (legacy=%s)", (legacy) => {

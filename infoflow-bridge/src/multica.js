@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, basename, extname } from "node:path";
 import { readReplyImage } from "./reply-images.js";
+import { AGENT_UUID } from "./agent-binding.js";
 
 // Thin wrapper over the Multica CLI. The CLI carries the signed-in account, so
 // the bridge never handles a Multica credential itself — it only picks which
@@ -10,7 +11,8 @@ import { readReplyImage } from "./reply-images.js";
 // (~/.multica/config.json); a named one is ~/.multica/profiles/<name>/, which is
 // what keeps one robot's account independent of whoever logged in last.
 export class Multica {
-  constructor({ cli, webUrl, serverUrl = "", workspaceSlug, workspaceId = "", profile = "" }, logger = console) {
+  constructor({ cli, webUrl, serverUrl = "", workspaceSlug, workspaceId = "", profile = "", boundAgentResolver = null }, logger = console) {
+    this.boundAgentResolver = boundAgentResolver;
     this.cli = cli;
     this.serverUrl = serverUrl;
     this.webUrl = webUrl;
@@ -29,8 +31,37 @@ export class Multica {
     return `${this.webUrl}/${this.workspaceSlug}/issues/${ref}`;
   }
 
-  async listAgents() {
-    return this.#json(["agent", "list", "--output", "json"]);
+  async listAgents({ includeArchived = false } = {}) {
+    if (includeArchived) return this.request("/api/agents?include_archived=true");
+    return this.#json(["agent", "list", "--output", "json", ...(includeArchived ? ["--include-archived"] : [])]);
+  }
+
+  async resolveAgent(reference) {
+    let bound = null;
+    if (this.boundAgentResolver) {
+      const binding = this.boundAgentResolver;
+      bound = await binding.resolve();
+      const aliases = [bound.id, bound.name, binding.initialName, binding.robot.agent,
+        binding.robot.agentName, binding.robot.stateAgentRef].filter(Boolean);
+      if (aliases.some(alias => alias === reference || (!AGENT_UUID.test(reference || "") &&
+          String(alias).toLowerCase() === String(reference).toLowerCase()))) return bound;
+      // Preserve an explicit /agent choice separately from the robot binding.
+      // New choices are stored by ID; legacy choices remain workspace-scoped.
+      if (AGENT_UUID.test(reference || "")) {
+        const selected = await this.request(`/api/agents/${encodeURIComponent(reference)}`);
+        if (selected?.id !== reference || selected.workspace_id !== this.workspaceId || selected.archived_at) {
+          throw new Error("所选智能体已不可用，请重新选择；机器人绑定已保留");
+        }
+        return selected;
+      }
+    }
+    const matches = (await this.listAgents()).filter(entry => {
+      if (bound) return entry.workspace_id === this.workspaceId && entry.owner_id === bound.owner_id &&
+        (entry.id === reference || entry.name?.toLowerCase() === String(reference).toLowerCase());
+      return entry.id === reference || entry.name === reference;
+    });
+    if (matches.length !== 1) throw new Error("找不到唯一的智能体，请检查绑定配置");
+    return matches[0];
   }
 
   async request(path, { method = "GET", body } = {}) {

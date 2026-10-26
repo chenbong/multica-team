@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"github.com/go-chi/chi/v5"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
@@ -11,7 +12,7 @@ import (
 	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
-// AddCurrentIssueWebPanel is add-only. The target comes exclusively from the
+// AddCurrentIssueWebPanel manages panels. The target comes exclusively from the
 // authenticated live run, never from a URL parameter or caller-supplied body.
 // All human management and workspace panel endpoints keep their human guards.
 func (h *Handler) AddCurrentIssueWebPanel(w http.ResponseWriter, r *http.Request) {
@@ -40,14 +41,24 @@ func (h *Handler) AddCurrentIssueWebPanel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
+		Name *string `json:"name"`
+		URL  *string `json:"url"`
 	}
-	if !decodeResourceWebPanel(w, r, &body) {
+	if (r.Method == http.MethodPost || r.Method == http.MethodPatch) && !decodeResourceWebPanel(w, r, &body) {
 		return
 	}
-	name, href, valid := validResourceWebPanel(body.Name, body.URL)
-	if !valid {
+	name, href := "", ""
+	if body.Name != nil {
+		name = *body.Name
+	}
+	if body.URL != nil {
+		href = *body.URL
+	}
+	var valid bool
+	if r.Method == http.MethodPost {
+		name, href, valid = validResourceWebPanel(name, href)
+	}
+	if r.Method == http.MethodPost && !valid {
 		writeErrorCode(w, http.StatusBadRequest, "invalid_web_panel", "Use an HTTP(S) URL without embedded credentials; a custom page name is optional and limited to 120 characters")
 		return
 	}
@@ -110,6 +121,98 @@ func (h *Handler) AddCurrentIssueWebPanel(w http.ResponseWriter, r *http.Request
 		}
 	}
 	a := webPanelAccess{scope: "issue", resourceID: task.IssueID, workspaceID: workspaceID, userID: originator, role: role}
+	if r.Method != http.MethodPost {
+		panelID := chi.URLParam(r, "panelId")
+		if r.Method == http.MethodGet {
+			rows, err := tx.Query(r.Context(), `SELECT `+webPanelColumns+` FROM resource_web_panel WHERE issue_id=$1 ORDER BY created_at,id`, task.IssueID)
+			if err != nil {
+				fail(err)
+				return
+			}
+			items := []resourceWebPanel{}
+			for rows.Next() {
+				item, scanErr := scanResourceWebPanel(rows, a)
+				if scanErr != nil {
+					rows.Close()
+					fail(scanErr)
+					return
+				}
+				item.CanManage = true
+				items = append(items, item)
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				fail(err)
+				return
+			}
+			if err = tx.Commit(r.Context()); err != nil {
+				fail(err)
+				return
+			}
+			writeJSON(w, 200, map[string]any{"panels": items})
+			return
+		}
+		id, validID := parseUUIDOrBadRequest(w, panelID, "panel id")
+		if !validID {
+			return
+		}
+		item, err := scanResourceWebPanel(tx.QueryRow(r.Context(), `SELECT `+webPanelColumns+` FROM resource_web_panel WHERE id=$1 AND issue_id=$2`, id, task.IssueID), a)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 404, "Panel not found")
+			return
+		}
+		if err != nil {
+			fail(err)
+			return
+		}
+		if r.Method == http.MethodPatch {
+			name, href = item.Name, item.URL
+			if body.Name != nil {
+				name = *body.Name
+			}
+			if body.URL != nil {
+				href = *body.URL
+				if item.Name == item.URL && body.Name == nil {
+					name = href
+				}
+			}
+			name, href, valid = validResourceWebPanel(name, href)
+			if !valid {
+				writeError(w, 400, "Invalid panel name or URL")
+				return
+			}
+			item, err = scanResourceWebPanel(tx.QueryRow(r.Context(), `UPDATE resource_web_panel SET name=$3,url=$4,updated_at=now() WHERE id=$1 AND issue_id=$2 RETURNING `+webPanelColumns, id, task.IssueID, name, href), a)
+		} else if r.Method == http.MethodDelete {
+			_, err = tx.Exec(r.Context(), `DELETE FROM resource_web_panel WHERE id=$1 AND issue_id=$2`, id, task.IssueID)
+		} else {
+			writeError(w, 405, "Unsupported panel operation")
+			return
+		}
+		if err != nil {
+			var conflict *pgconn.PgError
+			if errors.As(err, &conflict) && conflict.Code == "23505" {
+				writeError(w, 409, "This link is already in the current task panel")
+				return
+			}
+			fail(err)
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			fail(err)
+			return
+		}
+		if h.Bus != nil {
+			h.Bus.Publish(events.Event{Type: "resource_web_panel:changed", WorkspaceID: uuidToString(workspaceID), ActorType: "agent", ActorID: uuidToString(agentID), Payload: map[string]string{"scope": "issue", "resource_id": uuidToString(task.IssueID), "workspace_id": uuidToString(workspaceID)}})
+		}
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(204)
+		} else {
+			item.CanManage = true
+			writeJSON(w, 200, item)
+		}
+		return
+	}
 	panel, err := scanResourceWebPanel(tx.QueryRow(r.Context(), `SELECT `+webPanelColumns+` FROM resource_web_panel WHERE issue_id=$1 AND url=$2`, task.IssueID, href), a)
 	created := false
 	if errors.Is(err, pgx.ErrNoRows) {

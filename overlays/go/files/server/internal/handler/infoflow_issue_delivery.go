@@ -83,7 +83,7 @@ LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
 WHERE c.issue_id=$3 AND c.workspace_id=$4 AND (
  (c.author_type='agent' AND c.author_id=ANY($5::uuid[])) OR
  (c.author_type='member' AND c.type='comment'
-  AND split_part(lower(u.email),'@',2)=$8
+  AND (split_part(lower(u.email),'@',2)=$8 OR ($8='baidu.com' AND split_part(lower(u.email),'@',2) ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.baidu\.com$'))
   AND split_part(lower(u.email),'@',1) ~ '^[a-z0-9][a-z0-9._-]{0,127}$'))
 AND c.deleted_at IS NULL AND c.created_at >= $6 AND c.type IN ('comment','progress_update')
 AND NOT EXISTS (
@@ -253,7 +253,7 @@ func (h *Handler) infoFlowPollBinding(ctx context.Context, s infoFlowScope, c in
 	}
 	// Audience and content snapshots are immutable across independent retries.
 	// The binding generation and deployment cutoff still fence stale work.
-	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,COALESCE(s.message_id,''),CASE WHEN c.author_type='member' THEN $8 ELSE c.author_id::text END,CASE WHEN c.author_type='member' THEN split_part(lower(u.email),'@',1) ELSE COALESCE(a.name,'智能体') END,CASE WHEN c.author_type='member' THEN 'user' ELSE c.author_type END,COALESCE(d.notify_users,'{}'::text[]),d.notify_users IS NULL FROM infoflow_issue_delivery d LEFT JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON c.author_type='agent' AND a.id=c.author_id AND a.workspace_id=c.workspace_id LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
+	rows, err = tx.Query(ctx, `SELECT d.id::text,d.comment_id::text,d.content,COALESCE(s.message_id,''),CASE WHEN c.author_type='member' THEN $8 ELSE c.author_id::text END,CASE WHEN c.author_type='member' THEN CASE WHEN split_part(lower(u.email),'@',2) ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.baidu\.com$' THEN split_part(lower(u.email),'@',1)||'_'||split_part(split_part(lower(u.email),'@',2),'.',1) ELSE split_part(lower(u.email),'@',1) END ELSE COALESCE(a.name,'智能体') END,CASE WHEN c.author_type='member' THEN 'user' ELSE c.author_type END,COALESCE(d.notify_users,'{}'::text[]),d.notify_users IS NULL FROM infoflow_issue_delivery d LEFT JOIN infoflow_issue_source s ON s.id=d.source_id JOIN comment c ON c.id=d.comment_id LEFT JOIN agent a ON c.author_type='agent' AND a.id=c.author_id AND a.workspace_id=c.workspace_id LEFT JOIN "user" u ON c.author_type='member' AND u.id=c.author_id
 		`+infoFlowDeliveryOrigin+`
 		WHERE d.binding_id=$1 AND d.generation=$2 AND d.acked_at IS NULL AND d.cancelled_at IS NULL AND c.issue_id=$3 AND c.workspace_id=$4 AND c.deleted_at IS NULL AND c.created_at >= $6
 		AND ((c.author_type='agent' AND c.author_id=ANY($5::uuid[])) OR (c.author_type='member' AND u.id IS NOT NULL))

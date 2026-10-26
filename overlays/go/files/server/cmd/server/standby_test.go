@@ -57,6 +57,7 @@ func TestStandbyRouterDisablesOutboundAndKeepsRoutes(t *testing.T) {
 	}
 	for _, route := range []string{
 		"POST /auth/verify-code", "POST /api/auth/refresh", "POST /api/daemon-bootstrap-token",
+		"POST /api/integrations/machine-provision/command",
 		"GET /api/me/ducc", "POST /api/me/ducc", "POST /api/daemon/ducc/sync",
 		"PUT /api/skills/{id}/scope", "POST /api/skills/{id}/promote",
 		"POST /api/runtimes/{runtimeId}/delete-offline-machine",

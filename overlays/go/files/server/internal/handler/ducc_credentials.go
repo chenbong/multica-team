@@ -28,6 +28,7 @@ func (h *Handler) duccIdentity(w http.ResponseWriter, r *http.Request) (string, 
 		return "", "", false
 	}
 	name := strings.Split(strings.ToLower(email), "@")[0]
+	if account:=companyEmailAccount(email,"baidu.com");account!="" {name=account}
 	if !duccAccountName.MatchString(name) {
 		writeError(w, 400, "unsupported account name")
 		return "", "", false

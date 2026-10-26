@@ -84,11 +84,7 @@ func infoFlowExplicitAudience(ctx context.Context, tx pgx.Tx, workspace pgtype.U
 }
 
 func infoFlowEmailAccount(email string) string {
-	parts := strings.Split(strings.ToLower(email), "@")
-	if len(parts) != 2 || parts[1] != strings.ToLower(os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")) {
-		return ""
-	}
-	return infoFlowHumanAccount(parts[0])
+	return infoFlowHumanAccount(companyEmailAccount(email,strings.ToLower(os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN"))))
 }
 
 func infoFlowInputAudience(ctx context.Context, tx pgx.Tx, comment, workspace, issue pgtype.UUID) ([]string, bool, error) {

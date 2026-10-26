@@ -53,7 +53,7 @@ test("admin agent picker has no opt-out and never renders another creator's agen
   };
   const hint = {};
   const data = {
-    agents: [{ name: "Own", mine: true, workspaceId: "a", workspaceName: "A" },
+    agents: [{ id: "own-id", name: "Own", mine: true, workspaceId: "a", workspaceName: "A" },
       { name: "Foreign", mine: false, ownerEmail: "bob@example.test" }],
     me: { email: "alice@example.test" }, workspaces: [],
   };
@@ -62,7 +62,7 @@ test("admin agent picker has no opt-out and never renders another creator's agen
     form: { id: { value: "" } },
     document: { createElement: () => ({ dataset: {} }), getElementById: () => hint },
   });
-  assert.deepEqual(options.map((option) => option.value), ["", "Own"]);
+  assert.deepEqual(options.map((option) => option.value), ["", "own-id"]);
   assert.doesNotMatch(hint.textContent, /别人|bob/);
   data.agents = [];
   vm.runInNewContext(renderAgents + "\nrenderAgents();", {
@@ -80,9 +80,9 @@ test("new bindings hide bound agents; editing retains the current one and reset 
     set innerHTML(_value) { options.length = 0; }, append(option) { options.push(option); } };
   const form = { id: { value: "" } };
   const data = { me: { email: "alice@example.test" }, workspaces: [], agents: [
-    { name: "Bound", mine: true, workspaceId: "a", bindingRobotIds: ["robot-a"] },
-    { name: "Bound", mine: true, workspaceId: "b", bindingRobotIds: [] },
-    { name: "Free", mine: true, workspaceId: "a", bindingRobotIds: [] },
+    { id: "bound-a", name: "Bound", mine: true, workspaceId: "a", bindingRobotIds: ["robot-a"] },
+    { id: "bound-b", name: "Bound", mine: true, workspaceId: "b", bindingRobotIds: [] },
+    { id: "free-a", name: "Free", mine: true, workspaceId: "a", bindingRobotIds: [] },
     { name: "Foreign", mine: false, bindingRobotIds: [] },
   ] };
   const context = vm.createContext({ data, agentSelect: select, form,
@@ -90,7 +90,7 @@ test("new bindings hide bound agents; editing retains the current one and reset 
   vm.runInContext(renderAgents, context);
   const render = () => vm.runInContext("renderAgents()", context);
   render();
-  assert.deepEqual(options.slice(1).map(o => [o.value, o.dataset.workspaceId]), [["Bound", "b"], ["Free", "a"]]);
+  assert.deepEqual(options.slice(1).map(o => [o.value, o.dataset.workspaceId]), [["bound-b", "b"], ["free-a", "a"]]);
   form.id.value = "robot-a"; render();
   assert.equal(options.length, 4);
   form.id.value = "different-robot"; render();
@@ -106,4 +106,66 @@ test("new bindings hide bound agents; editing retains the current one and reset 
 test("editing an old binding never silently selects a same-name agent in another workspace", () => {
   assert.match(html, /if \(match\) match\.selected = true;\s+else form\.agent\.value = ""/);
   assert.match(html, /!keepWorkspace \? \[\.\.\.agentSelect\.options\]/);
+});
+
+function submitFixture({ agentId = "11111111-1111-4111-8111-111111111111", editingId = "", reject = false } = {}) {
+  const start = html.indexOf('form.addEventListener("submit", async (event) => {');
+  const end = html.indexOf('\nfunction bindingSaveMessage(', start);
+  assert(start >= 0 && end > start, "actual form submit handler must be present");
+  const calls = [], toasts = [], metrics = { resets: 0, renders: 0, prevented: 0 };
+  let submit;
+  const select = { value: agentId, selectedOptions: agentId ? [{ dataset: { workspaceId: "22222222-2222-4222-8222-222222222222" } }] : [] };
+  const form = { id: { value: editingId }, agent: select, appId: { value: "12345" },
+    appKey: { value: "fixture-key" }, appSecret: { value: "fixture-secret" },
+    allowAllInGroups: { checked: true }, addEventListener: (event, callback) => { assert.equal(event, "submit"); submit = callback; } };
+  const context = vm.createContext({ form, agentSelect: select, activeProfile: "fixture-profile", data: {},
+    chatLinks: new Map(), chatLinkLoads: new Map(),
+    post: async (url, payload) => {
+      calls.push({ url, payload: JSON.parse(JSON.stringify(payload)) });
+      if (reject) throw new Error("fixture backend rejected credentials");
+      return { activeProfile: "fixture-profile", bindingNotice: { status: "sent" } };
+    },
+    render: () => { metrics.renders++; }, warmChatLinks() {},
+    resetForm: () => { metrics.resets++; }, toast: text => toasts.push(text),
+    bindingSaveMessage: () => "fixture save accepted",
+  });
+  vm.runInContext(html.slice(start, end), context);
+  return { calls, toasts, metrics, form, submit: () => submit({ preventDefault: () => { metrics.prevented++; } }) };
+}
+
+test("selected fixed agent ID reaches the save endpoint for new and edited robots", async t => {
+  for (const editingId of ["", "fixture-existing-robot"]) {
+    await t.test(editingId || "new robot", async () => {
+      const fixture = submitFixture({ editingId });
+      await fixture.submit();
+      assert.equal(fixture.calls.length, 1, "a selected ID must not be rejected by the old name-field guard");
+      const { url, payload } = fixture.calls[0];
+      assert.equal(url, "/api/robot");
+      assert.equal(payload.agentId, "11111111-1111-4111-8111-111111111111");
+      assert.equal(payload.workspaceId, "22222222-2222-4222-8222-222222222222");
+      assert.equal(payload.id, editingId);
+      assert.equal(Object.hasOwn(payload, "agent"), false);
+      assert.equal(fixture.metrics.resets, 1);
+      assert(!fixture.toasts.includes("先选一个 Team Mesh 智能体"));
+    });
+  }
+});
+
+test("empty agent selection blocks submission and preserves the entered credentials", async () => {
+  const fixture = submitFixture({ agentId: "" });
+  await fixture.submit();
+  assert.equal(fixture.calls.length, 0);
+  assert.deepEqual(fixture.toasts, ["先选一个 Team Mesh 智能体"]);
+  assert.equal(fixture.metrics.resets, 0);
+  assert.equal(fixture.form.appSecret.value, "fixture-secret");
+});
+
+test("a backend save error retains the form for correction and reports the actual error", async () => {
+  const fixture = submitFixture({ reject: true });
+  await fixture.submit();
+  assert.equal(fixture.calls.length, 1);
+  assert.deepEqual(fixture.toasts, ["fixture backend rejected credentials"]);
+  assert.equal(fixture.metrics.resets, 0);
+  assert.equal(fixture.form.appKey.value, "fixture-key");
+  assert.equal(fixture.form.appSecret.value, "fixture-secret");
 });

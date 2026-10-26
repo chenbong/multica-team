@@ -38,7 +38,7 @@ export class IssueRelay {
     this.enabled = config.issueRelay?.enabled === true;
     this.queues = new Map();
     this.stopped = false;
-    const scope = JSON.stringify([config.robotId, config.multica.workspaceId, config.multica.defaultAgent]);
+    const scope = JSON.stringify([config.robotId, config.multica.workspaceId, config.multica.stateAgentRef || config.multica.defaultAgent]);
     this.path = config.statePath + ".issue-deliveries-" + createHash("sha256").update(scope).digest("hex").slice(0, 16) + ".json";
     this.inboxPath = this.path + ".inbox";
     this.quarantinePath = this.path + ".quarantine";
@@ -75,6 +75,22 @@ export class IssueRelay {
         this.webPrivateJobTimer.unref?.();
       }
     }
+  }
+
+  async recordLiveActivity(sender, messageId) {
+    if (!this.enabled || this.stopped || this.token.length < 32 || !messageId || !this.config.multica.workspaceId) return;
+    const base = this.config.multica.serverUrl?.replace(/\/$/, "");
+    if (!base) return;
+    try {
+      // No content, images or robot-owner substitution. Older/disabled APIs
+      // can reject this best-effort report without affecting the conversation.
+      const response = await this.fetch(`${base}/api/integrations/infoflow/live-activity`, {
+        method: "POST", signal: AbortSignal.timeout(3000),
+        headers: {"Content-Type":"application/json",Authorization:`Bearer ${this.token}`},
+        body: JSON.stringify({sender,message_id:String(messageId),robot_id:String(this.config.robotId),workspace_id:this.config.multica.workspaceId}),
+      });
+      await response.body?.cancel();
+    } catch { /* An optional metric must not log private message identifiers. */ }
   }
 
   stop() {
@@ -144,6 +160,10 @@ export class IssueRelay {
   }
 
   async scope() {
+    if (this.multica.boundAgentResolver) {
+      const agent = await this.multica.boundAgentResolver.resolve();
+      return { robot_id: this.config.robotId, agent_id: agent.id, workspace_id: this.config.multica.workspaceId };
+    }
     const agentRef = String(this.config.multica.defaultAgent || "");
     // UUID references require no owner-account lookup. Name lookup is solely
     // configuration resolution; all incoming actions use server-resolved users.

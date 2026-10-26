@@ -146,7 +146,11 @@ export class Bridge {
           if (handoff) handoff.beforeSubmit();
           else if (messageId) this.#markChatSubmitting(messageId);
         },
-        afterSubmit: complete,
+        afterSubmit: () => {
+          complete();
+          // Metrics must never delay or fail an accepted conversation.
+          if (messageId) void this.issueRelay.recordLiveActivity?.(user, messageId).catch(() => {});
+        },
       };
       await this.chat.send(conversation, user, displayText || body, inboundImages, this.agentFor(user), acknowledge, context, chatHandoff, recipients);
       complete();
@@ -198,25 +202,25 @@ export class Bridge {
       const agents = await this.multica.listAgents();
       const current = this.agentFor(user);
       const lines = agents.map(
-        (agent) => `- ${agent.name === current ? "**" + agent.name + "**（当前）" : agent.name}　${agent.model ?? ""}`,
+        (agent) => `- ${agent.id === current || agent.name === current ? "**" + agent.name + "**（当前）" : agent.name}　${agent.model ?? ""}`,
       );
       await reply(lines.length > 0 ? lines.join("\n") : "这个工作区还没有 agent。");
       return;
     }
     if (command === "/agent") {
       if (argument === "") {
-        await reply(`你当前的 agent：${this.agentFor(user)}。用 \`/agent <名字>\` 切换。`);
+        const agent = this.multica.boundAgentResolver ? await this.multica.resolveAgent(this.agentFor(user)) : null;
+        await reply(`你当前的 agent：${agent?.name || this.agentFor(user)}。用 \`/agent <名字>\` 切换。`);
         return;
       }
       const agents = await this.multica.listAgents();
-      const match =
-        agents.find((agent) => agent.name === argument) ??
-        agents.find((agent) => agent.name.toLowerCase() === argument.toLowerCase());
+      const matches = agents.filter(agent => agent.id === argument || agent.name.toLowerCase() === argument.toLowerCase());
+      const match = matches.length === 1 ? matches[0] : null;
       if (!match) {
         await reply(`没找到叫「${argument}」的 agent。用 \`/agents\` 看看有哪些。`);
         return;
       }
-      this.#rememberUser(user, { agent: match.name });
+      this.#rememberUser(user, { agent: match.id || match.name });
       complete();
       await reply(`好，之后你的任务派给「${match.name}」。`);
       return;
@@ -262,7 +266,8 @@ export class Bridge {
       return;
     }
 
-    const assignee = this.agentFor(user);
+    const boundAgent = this.multica.boundAgentResolver ? await this.multica.resolveAgent(this.agentFor(user)) : null;
+    const assignee = boundAgent?.id || this.agentFor(user);
     const staged = await stageInboundImages(images, this.logger, this.getImageAccessToken);
     const failureNote = staged.failed.map((entry) => "- " + entry).join("\n");
     const description = staged.failed.length === 0 ? body : body + "\n\n图片附件处理失败：\n" + failureNote;
@@ -282,7 +287,7 @@ export class Bridge {
       lastIssue: { id: issue.id, identifier: issue.identifier, url },
       lastRequest: { body, identifier: issue.identifier, url, at: Date.now() },
     });
-    await this.reply(conversation, user, `已建任务 **${issue.identifier}**，派给「${assignee}」，跑完发回这里。`, "issue", false, { binding: issue });
+    await this.reply(conversation, user, `已建任务 **${issue.identifier}**，派给「${boundAgent?.name || assignee}」，跑完发回这里。`, "issue", false, { binding: issue });
 
     const outcome = await this.#waitForRun(issue.id);
     if (outcome.kind === "timeout") {

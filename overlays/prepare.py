@@ -72,11 +72,17 @@ def main() -> None:
     generated = builtin_env["extend"](UPSTREAM, generated)
     web_panels = runpy.run_path(str(HERE / "resource-web-panels-sql.py"))
     generated = web_panels["extend"](UPSTREAM, FILES, generated)
+    public_live = runpy.run_path(str(HERE / "public-live-go.py"))
+    generated = public_live["extend"](UPSTREAM, FILES, generated)
+    ws_origin = runpy.run_path(str(HERE / "websocket-origin-go.py"))
+    generated = ws_origin["extend"](UPSTREAM, FILES, generated)
+    http_origin = runpy.run_path(str(HERE / "http-origin-go.py"))
+    generated = http_origin["extend"](UPSTREAM, FILES, generated)
     for rel, text in generated:
         source = UPSTREAM / rel
         override = HERE / ".generated" / rel
         mapping[str(source)] = str(override)
-        manifest[rel] = {"source_sha256": sha256(source), "overlay_sha256": hashlib.sha256(text.encode()).hexdigest()}
+        manifest[rel] = {"source_sha256": sha256(source) if source.is_file() else None, "overlay_sha256": hashlib.sha256(text.encode()).hexdigest()}
         if not args.check:
             override.parent.mkdir(parents=True, exist_ok=True)
             override.write_text(text)

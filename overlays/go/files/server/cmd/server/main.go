@@ -724,6 +724,12 @@ func main() {
 	// Start background workers.
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	autopilotCtx, autopilotCancel := context.WithCancel(context.Background())
+	if h.PublicLive != nil {
+		defer h.PublicLive.Close()
+		if !standby {
+			go h.PublicLive.Run(sweepCtx)
+		}
+	}
 	// Migration validation must not replay copied schedules or outbound work.
 	// HTTP remains available; promotion requires an explicit environment change.
 	if standby {

@@ -12,7 +12,9 @@ export interface ConnectionCommandOptions {
 }
 
 export function profileNameFromEmail(email: string | undefined): string {
-  return (email ?? "").split("@")[0]!.toLowerCase()
+  const [local = "", domain = ""] = (email ?? "").toLowerCase().split("@");
+  const child = domain.endsWith(".baidu.com") ? domain.slice(0,-".baidu.com".length) : "";
+  return (child && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(child) ? local+"_"+child : local)
     .replace(/[^a-z0-9._-]/g, "-")
     .replace(/^[-._]+|[-._]+$/g, "");
 }
@@ -50,11 +52,11 @@ export function connectionCommand(
     options.shimDefaults && `${cli} config set runtime_shims ${quote(options.shimDefaults)}`,
   ].filter(Boolean).join("\n");
   const network = windows
-    ? `$env:no_proxy = ".bcebos.com,.duckdns.org,10.0.0.0/8" + $(if ($env:no_proxy) { "," + $env:no_proxy } else { "" })
+    ? `$env:no_proxy = ".bcebos.com,.duckdns.org,.ai-chat.host,.baidu-int.com,10.0.0.0/8" + $(if ($env:no_proxy) { "," + $env:no_proxy } else { "" })
 $env:NO_PROXY = $env:no_proxy
 $env:https_proxy = "http://agent.baidu.com:8188"
 $env:http_proxy = $env:https_proxy`
-    : `export no_proxy=".bcebos.com,.duckdns.org,10.0.0.0/8\${no_proxy:+,$no_proxy}"
+    : `export no_proxy=".bcebos.com,.duckdns.org,.ai-chat.host,.baidu-int.com,10.0.0.0/8\${no_proxy:+,$no_proxy}"
 export NO_PROXY="$no_proxy"
 export https_proxy="http://agent.baidu.com:8188"
 export http_proxy="$https_proxy"`;

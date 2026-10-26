@@ -4,7 +4,7 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 // Resolve each configured robot under its own account. A filtered catalog from
 // another account is never evidence that a private participant has no robot.
-export async function groupRobotEntries(config, instances, workspaceId, agentIds = null, logger = console, { agentNames = null, includeRobotId = null } = {}) {
+export async function groupRobotEntries(config, instances, workspaceId, agentIds = null, logger = console, { agentNames = null, includeRobotId = null, resolveBinding = null } = {}) {
   const entries = [];
   // Only a complete, server-provided task roster can prove that a legacy name
   // is unrelated. Account-filtered catalogs are not used for this decision.
@@ -14,7 +14,9 @@ export async function groupRobotEntries(config, instances, workspaceId, agentIds
   for (const robot of config.robots) {
     if (robot.purpose === "verification" || (robot.workspaceId || config.multica.workspaceId) !== workspaceId) continue;
     const instance = instances.get(robot.id);
-    let agentId = String(robot.agent || "");
+    let agentId = String(robot.agentId || robot.agent || "");
+    if (UUID.test(agentId) && agentIds && !agentIds.includes(agentId) && robot.id !== includeRobotId) continue;
+    if (resolveBinding) agentId = (await resolveBinding(robot)).id;
     if (!UUID.test(agentId)) {
       if (completeRoster && robot.id !== includeRobotId && !rosterNames.has(agentId)) continue;
       const resolver = instance?.bridge?.multica || new Multica({

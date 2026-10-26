@@ -1,0 +1,12 @@
+[Unit]
+Description=Team Mesh complete private BOS backup
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+Environment=TEAM_MESH_BACKUP_NOTIFY_USER=OPERATOR_INFOFLOW_USERNAME
+ExecStart=/bin/bash /ABSOLUTE/INSTANCE/code/multica-team/deploy/run-daily-bos-backup.sh /ABSOLUTE/INSTANCE /ABSOLUTE/DOCKER PYTHON_IMAGE_DIGEST
+TimeoutStartSec=6h
+Nice=10

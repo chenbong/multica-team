@@ -903,6 +903,8 @@ runpy.run_path(str(HERE / "math-rendering-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "issue-jump-to-latest-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "onetool-skill-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "personal-machine-name-web-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "platform-expansion-web-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "public-live-web-patch.py"))["extend"](CHANGES)
 
 
 def apply_patches():

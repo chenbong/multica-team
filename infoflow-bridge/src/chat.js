@@ -57,8 +57,8 @@ export class ChatRelay {
     const notificationUsers = notifyUsers(conversation, user, recipients);
     const key = this.key(conversation, user);
     return this.serial(key, async () => {
-      const agents = await this.multica.listAgents();
-      const agent = agents.find((entry) => entry.name === agentName || entry.id === agentName);
+      const agent = this.multica.resolveAgent ? await this.multica.resolveAgent(agentName) :
+        (await this.multica.listAgents()).find(entry => entry.id === agentName || entry.name === agentName);
       if (!agent) throw new Error(`找不到绑定的智能体「${agentName}」`);
       let thread = this.state.threads[key];
       if (thread && thread.agentId === agent.id) {

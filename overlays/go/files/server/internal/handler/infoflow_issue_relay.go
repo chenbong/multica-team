@@ -351,7 +351,17 @@ func (w *infoFlowWakeups) NotifyTaskAvailable(runtimeID, taskID string) {
 func (h *Handler) infoFlowIdentity(ctx context.Context, sender, workspaceID string) (db.User, string, error) {
 	// Platform users are established by the platform's verified-email login.
 	// The relay never provisions accounts or accepts a caller-provided user id.
-	user, err := h.Queries.GetUserByEmail(ctx, strings.ToLower(sender+"@"+os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")))
+	email, valid, identityErr := h.resolveCompanyAccountEmail(ctx, strings.ToLower(sender), strings.ToLower(os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")))
+	if errors.Is(identityErr, errAmbiguousCompanyAccount) {
+		return db.User{}, "", pgx.ErrNoRows
+	}
+	if identityErr != nil {
+		return db.User{}, "", identityErr
+	}
+	if !valid {
+		return db.User{}, "", pgx.ErrNoRows
+	}
+	user, err := h.Queries.GetUserByEmail(ctx, email)
 	if err != nil {
 		return db.User{}, "", err
 	}

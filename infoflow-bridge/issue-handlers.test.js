@@ -127,6 +127,9 @@ test("runtime maps participant configs across Bridge callbacks without workspace
   ], multica: { workspaceId: "ws", cli: join(dir, "missing-test-cli") } };
   const logger = { log() {}, warn() {}, error() {} };
   const runtime = new RobotRuntime(config, logger);
+  // This fixture checks routing wiring only; account/agent health is covered by
+  // agent-binding.test.js with the real resolver and explicit identities.
+  runtime.bindingFor = robot => ({ resolve: async () => ({ id: robot.agentId || robot.agent }) });
   const bridge = new Bridge({ robotId: "a", statePath, issueRelay: { enabled: true }, pollIntervalMs: 3600000,
     multica: { cli: join(dir, "missing-test-cli"), workspaceId: "ws", defaultAgent: a, serverUrl: "https://api.example.invalid", webUrl: "https://web.example.invalid" } },
     async () => { throw new Error("unexpected send"); }, logger, { issueGroups: runtime.issueGroups });

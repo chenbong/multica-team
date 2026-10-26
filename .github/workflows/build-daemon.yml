@@ -77,6 +77,15 @@ jobs:
           export GOFLAGS="-overlay=$workspace/overlays/go-overlay.json -mod=readonly"
           go test ./internal/daemon -run 'Test(Ducc|Ducx|RunDucxSetupCommand|PrepareDucxRuntimeWithoutShellReload)' -count=1
 
+      - name: Test current-machine enrollment with isolated HTTP and profile fixtures
+        working-directory: multica/server
+        env:
+          MULTICA_RUN_REAL_AGENT_SMOKE: "0"
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          go test -race -overlay="$workspace/overlays/go-overlay.json" ./cmd/multica -run '^TestMachine' -count=1
+
       - name: Test OneAPI catalog with isolated HTTP and credential fixtures
         working-directory: multica/server
         run: |

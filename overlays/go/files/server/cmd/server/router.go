@@ -449,6 +449,14 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		ServerVersion:            normalizeServerVersion(version),
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	if envBool("MULTICA_PUBLIC_LIVE_ENABLED", false) {
+		live, err := service.NewPublicLiveService(pool, nil)
+		if err != nil {
+			slog.Warn("public live module unavailable")
+		} else {
+			h.PublicLive = live
+		}
+	}
 	hub.SetAuthorizer(newChatScopeAuthorizer(queries, h.CanReadChatSession))
 	hub.SetDeliveryFilter(h.CanDeliverChatEvent)
 	invitationRateLimits := handler.DefaultInvitationRateLimits()
@@ -1540,6 +1548,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 	// Public API
 	r.Get("/api/config", h.GetConfig)
+	r.Get("/api/public/live/status", h.PublicLiveStatus)
+	r.Get("/api/public/live/{section}", h.PublicLiveStats)
+	r.Post("/api/integrations/infoflow/live-activity", h.InfoFlowLiveActivity)
 	r.With(contactSalesRL).Post("/api/contact-sales", h.CreateContactSales)
 	// Public share-link preview — no auth: shows the workspace name/slug and
 	// inviter so a not-yet-logged-in visitor can see what they're joining.
@@ -1579,6 +1590,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// Auth group made a missing cookie a hard 401, breaking the flow for exactly
 	// the browsers above; the other four composio endpoints stay session-gated.
 	r.Get("/api/integrations/composio/callback", h.ComposioCallback)
+
+	// Operator-only delegated enrollment; independent of user/PAT authentication.
+	r.Post("/api/integrations/machine-provision/command", h.MachineProvisionCommand)
 
 	// Trusted relay only; never accept a browser session, PAT or actor headers.
 	r.Post("/api/integrations/infoflow/issue-relay", h.InfoFlowIssueRelay)
@@ -1697,6 +1711,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// no workspace in the path to gate on.
 		// --- User-scoped routes (no workspace context required) ---
 		r.Get("/api/me", h.GetMe)
+		r.With(handler.RequireHumanActor).Get("/api/me/secrets", h.PersonalSecrets)
+		r.With(handler.RequireHumanActor).Post("/api/me/secrets", h.PersonalSecrets)
+		r.With(handler.RequireHumanActor).Get("/api/me/secrets/{secretId}", h.PersonalSecrets)
+		r.With(handler.RequireHumanActor).Put("/api/me/secrets/{secretId}", h.PersonalSecrets)
+		r.With(handler.RequireHumanActor).Delete("/api/me/secrets/{secretId}", h.PersonalSecrets)
 		r.With(handler.RequireHumanActor).Get("/api/me/ducc", h.GetDuccCredential)
 		r.With(handler.RequireHumanActor).Post("/api/me/ducc", h.UpdateDuccCredential)
 		r.With(handler.RequireHumanActor).Post("/api/daemon/ducc/sync", h.SyncDuccCredential)
@@ -1721,6 +1740,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/api/upload-file", h.UploadFile)
 		r.Post("/api/feedback", h.CreateFeedback)
 		r.With(handler.RequireHumanActor).Post("/api/client-usage", h.UpsertClientUsage)
+		r.With(handler.RequireHumanActor).Post("/api/live/activity", h.RecordLiveActivity)
 
 		// Note (MUL-4309): the generic OpenAI-compatible passthrough endpoints
 		// (POST /api/llm/v1/chat/completions[/stream]) were intentionally
@@ -2042,6 +2062,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Assignee frequency
 			r.Post("/api/agent/issue-web-panels", h.AddCurrentIssueWebPanel)
+			r.Get("/api/agent/issue-web-panels", h.AddCurrentIssueWebPanel)
+			r.Patch("/api/agent/issue-web-panels/{panelId}", h.AddCurrentIssueWebPanel)
+			r.Delete("/api/agent/issue-web-panels/{panelId}", h.AddCurrentIssueWebPanel)
+			r.Get("/api/agent/personal-secrets", h.PersonalSecrets)
+			r.Get("/api/agent/personal-secrets/{secretId}", h.PersonalSecrets)
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 
 			// Local search index sync for Web/Desktop (MUL-7754). Human clients

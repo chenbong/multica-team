@@ -65,8 +65,8 @@ func (h *Handler) infoFlowWebSender(ctx context.Context, ws string, user pgtype.
 		return "", err
 	}
 	email = strings.ToLower(email)
-	sender, domain, found := strings.Cut(email, "@")
-	if !found || domain != strings.ToLower(os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")) || !infoFlowUsername.MatchString(sender) || auth.IsTemporarilyDisabledUser(uuidToString(user), email) {
+	sender := companyEmailAccount(email, strings.ToLower(os.Getenv("INFOFLOW_ISSUE_IDENTITY_DOMAIN")))
+	if sender == "" || !infoFlowUsername.MatchString(sender) || auth.IsTemporarilyDisabledUser(uuidToString(user), email) {
 		return "", nil
 	}
 	return sender, nil

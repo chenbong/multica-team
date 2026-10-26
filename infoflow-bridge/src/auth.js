@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { verificationRecipient } from './company-identity.js';
 
 // Login for the admin page. The page has no password store and no mail server:
 // it proves who you are by sending a one-time code to your 如流 account through
@@ -46,7 +47,7 @@ export class AdminAuth {
     }
 
     const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
-    const user = email.split("@")[0];
+    const user = verificationRecipient(email, this.allowedDomains);
     try {
       await this.send(user, [
         "**机器人绑定页面登录验证码：" + code + "**",
@@ -219,7 +220,7 @@ export class AdminAuth {
   #allowed(email) {
     if (!/^[^@\s]+@[^@\s]+$/.test(email)) return false;
     if (this.allowEmails.length > 0) return this.allowEmails.includes(email);
-    return this.allowedDomains.includes(email.split("@")[1]);
+    return verificationRecipient(email, this.allowedDomains) !== null;
   }
 }
 

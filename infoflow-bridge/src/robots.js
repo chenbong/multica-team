@@ -2,7 +2,9 @@ import { Bridge } from "./bridge.js";
 import { acknowledge, acknowledgeReceipt, receiptOptions } from "./reactions.js";
 import { VerificationCodeRelay } from "./codes.js";
 import { parseConversationBlocks, messageIdString, privateReplyMessageId, conversationContext } from "./conversation-context.js";
-import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete } from "./config.js";
+import { DEFAULT_WS_CONNECT_DOMAIN, DEFAULT_WS_GATEWAY, robotIsComplete, persistAgentIdentity } from "./config.js";
+import { agentReference, RobotAgentBinding } from "./agent-binding.js";
+import { Multica } from "./multica.js";
 import { IssueGroups, botOrigin, sendGroupExact } from "./issue-groups.js";
 import { mentionedReplyUsers } from "./reply-mentions.js";
 import { groupRobotEntries } from "./group-robot-entries.js";
@@ -24,10 +26,13 @@ export function privateSdkLogger(logger) {
 // Owns one InfoFlow connection per configured robot and keeps that set in step
 // with whatever the admin page saved, so a change never needs a process restart.
 export class RobotRuntime {
-  constructor(config, logger = console) {
+  constructor(config, logger = console, { persistBinding = persistAgentIdentity, createMultica = options => new Multica(options, logger) } = {}) {
     this.config = config;
     this.logger = logger;
     this.instances = new Map();
+    this.bindings = new Map();
+    this.persistBinding = persistBinding;
+    this.createMultica = createMultica;
     const imageConfig = replyImageConfig();
     this.replyImages = imageConfig ? new ReplyImages(imageConfig) : null;
     this.issueGroups = config.issueRelay?.enabled ? new IssueGroups({
@@ -52,10 +57,17 @@ export class RobotRuntime {
       const next = wanted.get(id);
       if (!next || instance.fingerprint !== fingerprint(next)) await this.#stop(id);
     }
+    // Login delivery is HTTP-only and must not wait for unrelated WS gateways.
     for (const [id, robot] of wanted) {
-      if (!this.instances.has(id)) await this.#start(robot);
+      if (robot.purpose === "verification" && !this.instances.has(id)) await this.#start(robot);
     }
     await this.#syncRelay();
+    const missing = [...wanted.values()].filter(robot => !this.instances.has(robot.id));
+    // Bound fan-out; one unavailable gateway must not serially stall all bots.
+    for (let offset = 0; offset < missing.length; offset += 4) {
+      await Promise.all(missing.slice(offset, offset + 4).map(robot => this.#start(robot)));
+    }
+    this.ensureBindingChecks?.();
   }
 
   status() {
@@ -77,12 +89,60 @@ export class RobotRuntime {
       }
       if (state === "connecting") return { id: robot.id, state: "connecting" };
       if (instance.error) return { id: robot.id, state: "error", error: instance.error };
+      if (state !== "connected") return { id: robot.id, state: "stopped" };
+      const binding = this.bindings.get(robot.id)?.health || { state: "checking", error: "正在校验智能体绑定" };
+      if (binding.state !== "healthy") return { id: robot.id, state: binding.state, error: binding.error,
+        bindingCode: binding.code, connectionState: "connected" };
       return {
         id: robot.id,
         state: "connected",
+        agentId: binding.agentId,
+        agentName: binding.agentName,
         connectedAt: instance.connectedAt ? new Date(instance.connectedAt).toISOString() : undefined,
       };
+    }).map(status => {
+      const binding = this.bindings.get(status.id)?.health;
+      return binding ? { ...status, bindingState: binding.state, bindingError: binding.error,
+        bindingCode: binding.code, agentId: binding.agentId, agentName: binding.agentName } : status;
     });
+  }
+
+  ensureBindingChecks() {
+    if (!this.bindingTimer && this.config.robots.some(robot => robot.purpose !== "verification" && robotIsComplete(robot))) {
+      this.bindingTimer = setInterval(() => void this.refreshBindings(), 15000);
+      this.bindingTimer.unref?.();
+    }
+  }
+
+  bindingFor(robot) {
+    let binding = this.bindings.get(robot.id);
+    const same = binding && ["profile", "workspaceId", "boundByEmail", "boundUserId"].every(key =>
+      String(binding.robot[key] || "") === String(robot[key] || "")) && agentReference(binding.robot) === agentReference(robot);
+    if (same) { binding.robot = robot; return binding; }
+    const options = robotConfig(this.config, robot).multica;
+    const scoped = { ...robot, workspaceId: options.workspaceId };
+    binding = new RobotAgentBinding(scoped, this.createMultica(options), { onResolved: async result => {
+      const current = this.config.robots.find(entry => entry.id === robot.id);
+      if (!current || agentReference(current) !== agentReference(binding.robot) ||
+          ["profile", "workspaceId", "boundByEmail", "boundUserId"].some(key =>
+            String(current[key] || "") !== String(robot[key] || ""))) throw new Error("binding changed during validation");
+      await this.persistBinding(current, result);
+      Object.assign(scoped, { agentId: result.agent.id, agentName: result.agent.name,
+        agent: result.agent.name, boundUserId: result.ownerId, workspaceId: result.workspaceId });
+      Object.assign(current, { agentId: result.agent.id, agentName: result.agent.name,
+        agent: result.agent.name, boundUserId: result.ownerId, workspaceId: result.workspaceId });
+      const instance = this.instances.get(robot.id);
+      if (instance) { instance.robot = current; instance.fingerprint = fingerprint(current); }
+    } });
+    this.bindings.set(robot.id, binding);
+    return binding;
+  }
+
+  async refreshBindings(robots = this.config.robots) {
+    const taskRobots = robots.filter(robot => robot.purpose !== "verification" && robotIsComplete(robot));
+    for (let offset = 0; offset < taskRobots.length; offset += 4) {
+      await Promise.all(taskRobots.slice(offset, offset + 4).map(robot => this.bindingFor(robot).resolve().catch(() => {})));
+    }
   }
 
   // Used by the admin page test button: proves the credentials and the send
@@ -94,7 +154,8 @@ export class RobotRuntime {
   }
 
   async groupRobotEntries(workspaceId, agentIds = null, options = {}) {
-    return groupRobotEntries(this.config, this.instances, workspaceId, agentIds, this.logger, options);
+    return groupRobotEntries(this.config, this.instances, workspaceId, agentIds, this.logger,
+      { ...options, resolveBinding: robot => this.bindingFor(robot).resolve() });
   }
 
   // One verification robot serves everybody: Multica's login codes and the admin
@@ -138,9 +199,11 @@ export class RobotRuntime {
   }
 
   async stopAll() {
+    clearInterval(this.bindingTimer);
     for (const id of [...this.instances.keys()]) await this.#stop(id);
     this.relay?.stop();
     this.relay = null;
+    this.bindings.clear();
   }
 
   // Keeps the login-code relay pointed at whichever verification robot is enabled,
@@ -187,14 +250,20 @@ export class RobotRuntime {
     const send = (conversation, content, options = {}) =>
       sendRobotReply(client, conversation, content, options, this.config.issueRelay?.enabled === true);
 
-    const bridge = new Bridge(robotConfig(this.config, robot), send, this.logger, {
+    const bridgeConfig = robotConfig(this.config, robot);
+    if (robot.purpose !== "verification") {
+      bridgeConfig.multica.boundAgentResolver = this.bindingFor(robot);
+      void bridgeConfig.multica.boundAgentResolver.resolve().catch(() => {});
+    }
+    const bridge = new Bridge(bridgeConfig, send, this.logger, {
       replyImages: this.replyImages,
       getImageAccessToken: () => client.getAccessToken(),
       issueGroups: this.issueGroups,
       getPrivateRobotInfo: () => client.robot.getInfo(),
       getRobotAvailable: () => {
         const current = this.instances.get(robot.id);
-        return Boolean(current && !current.stopping && current.wsClient && connectionState(current.wsClient) === "connected");
+        return Boolean(current && !current.stopping && current.wsClient && connectionState(current.wsClient) === "connected" &&
+          this.bindings.get(robot.id)?.health.state === "healthy");
       },
       acknowledgeReceipt: options => acknowledgeReceipt(client, options, this.logger),
     });
@@ -385,7 +454,7 @@ function initialReconnectDelay(attempt) {
 // Restart a connection only when something it depends on changed; renaming the
 // robot or editing an unrelated field should not drop the WebSocket.
 function fingerprint(robot) {
-  return [robot.purpose, robot.appKey, robot.appSecret, robot.appId, robot.baseUrl, robot.agent, robot.profile, robot.workspaceId, robot.allowAllInGroups, robot.allowUsers.join(",")].join("|");
+  return [robot.purpose, robot.appKey, robot.appSecret, robot.appId, robot.baseUrl, agentReference(robot), robot.profile, robot.workspaceId, robot.allowAllInGroups, robot.allowUsers.join(",")].join("|");
 }
 
 function robotConfig(base, robot) {
@@ -400,7 +469,9 @@ function robotConfig(base, robot) {
       profile: robot.profile ?? "",
       workspaceId: robot.workspaceId || base.multica.workspaceId || "",
       workspaceSlug: robot.workspaceSlug || base.multica.workspaceSlug,
-      defaultAgent: robot.agent,
+      defaultAgent: agentReference(robot),
+      // Preserve delivery receipts/inboxes created before name-to-ID migration.
+      stateAgentRef: robot.stateAgentRef || robot.agent || robot.agentId,
     },
     allowUsers: robot.allowUsers,
     allowAllInGroups: robot.allowAllInGroups,

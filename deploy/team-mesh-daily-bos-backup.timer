@@ -1,0 +1,10 @@
+[Unit]
+Description=Team Mesh daily backup at 03:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 Asia/Shanghai
+Persistent=true
+Unit=team-mesh-daily-bos-backup.service
+
+[Install]
+WantedBy=timers.target

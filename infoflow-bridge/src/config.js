@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { agentReference } from "./agent-binding.js";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -42,11 +43,11 @@ export function loadConfig() {
   return {
     admin: {
       port: Number(file.admin?.port ?? 4180),
-      // Loopback by default. A deployment that has to be reachable from other
-      // machines sets host plus the hostnames it will be reached by; the Host
-      // header check stays on either way, so a page on another origin cannot
-      // resolve a name to this address and drive the API through the browser.
+      // Loopback by default. Set the bind address for remote access. Any hostname
+      // reaching that listener can serve the login page; authentication remains
+      // mandatory for protected admin operations.
       host: String(file.admin?.host ?? "127.0.0.1").trim() || "127.0.0.1",
+      // Legacy configuration retained for compatibility, no longer an access gate.
       publicHosts: (file.admin?.publicHosts ?? []).map((entry) => String(entry).trim().toLowerCase()).filter(Boolean),
       // Who may log into the admin page. The domain list is the default gate; a
       // non-empty allowEmails narrows it to named addresses.
@@ -102,10 +103,42 @@ export function redactRobot(robot) {
   return { ...rest, hasSecret: Boolean(appSecret) };
 }
 
+// Compare the persisted identity after the remote lookup. Never restore a
+// deleted robot or overwrite credentials/configuration saved in the meantime.
+export function persistAgentIdentity(robot, { agent, ownerId, workspaceId }) {
+  const file = readFile();
+  const current = file.robots?.find(entry => entry.id === robot.id);
+  const keys = ["profile", "workspaceId", "boundByEmail", "boundUserId", "appId"];
+  if (!current || agentReference(current) !== agentReference(robot) ||
+      keys.some(key => String(current[key] || "") !== String(robot[key] || ""))) {
+    throw new Error("binding changed during validation");
+  }
+  const patch = { agentId: agent.id, agentName: agent.name, agent: agent.name,
+    boundUserId: ownerId, workspaceId,
+    stateAgentRef: robot.stateAgentRef || robot.agent || agent.id };
+  if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+    const next = { ...file, robots: file.robots.map(entry => entry === current ? { ...entry, ...patch } : entry) };
+    const temporary = CONFIG_PATH + ".identity.tmp";
+    const content = JSON.stringify(next, null, 2) + "\n";
+    writeFileSync(temporary, content, { mode: 0o600 });
+    try { renameSync(temporary, CONFIG_PATH); }
+    catch (error) {
+      // Docker can bind-mount the config file itself. Keep that inode, as
+      // saveRobots already does, rather than treating EBUSY as lost identity.
+      try {
+        if (error.code !== "EBUSY") throw error;
+        writeFileSync(CONFIG_PATH, content, { mode: 0o600 });
+      } finally { try { unlinkSync(temporary); } catch {} }
+    }
+  }
+  Object.assign(robot, patch);
+}
+
 export function robotIsComplete(robot) {
   const required = robot.purpose === "verification"
     ? ["name", "appId", "appKey", "appSecret"]
-    : ["name", "appId", "appKey", "appSecret", "agent"];
+    : ["name", "appId", "appKey", "appSecret"];
+  if (robot.purpose !== "verification" && !agentReference(robot)) return false;
   return required.every((key) => String(robot[key] ?? "").trim() !== "");
 }
 
@@ -143,6 +176,7 @@ function migrateRobots(file) {
 
 function normalizeRobot(robot) {
   return {
+    ...robot,
     id: String(robot.id ?? "").trim() || randomId(),
     name: String(robot.name ?? "").trim(),
     // "task" robots dispatch work to an agent; "verification" robots only relay
@@ -167,6 +201,9 @@ function normalizeRobot(robot) {
     appSecret: String(robot.appSecret ?? "").trim(),
     baseUrl: String(robot.baseUrl ?? "").trim() || DEFAULT_BASE_URL,
     agent: String(robot.agent ?? "").trim(),
+    agentId: String(robot.agentId ?? "").trim(),
+    agentName: String(robot.agentName ?? robot.agent ?? "").trim(),
+    boundUserId: String(robot.boundUserId ?? "").trim(),
     allowUsers: (robot.allowUsers ?? []).map((name) => String(name).trim()).filter(Boolean),
     allowAllInGroups: robot.allowAllInGroups === true,
     enabled: robot.enabled !== false,

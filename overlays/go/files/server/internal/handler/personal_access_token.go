@@ -76,6 +76,20 @@ func (h *Handler) getOrCreateDaemonBootstrapToken(ctx context.Context, owner pgt
 		return "", db.PersonalAccessToken{}, fmt.Errorf("begin token transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	raw, pat, err := h.daemonBootstrapTokenInTx(ctx, tx, owner, box)
+	if err != nil {
+		return "", db.PersonalAccessToken{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", db.PersonalAccessToken{}, fmt.Errorf("commit daemon token: %w", err)
+	}
+	return raw, pat, nil
+}
+
+// Sharing the caller's transaction keeps delegated account/workspace creation
+// and token issuance atomic without changing ordinary login behavior.
+func (h *Handler) daemonBootstrapTokenInTx(ctx context.Context, tx pgx.Tx, owner pgtype.UUID, box *secretbox.Box) (string, db.PersonalAccessToken, error) {
+	var err error
 	var encrypted []byte
 	if err := tx.QueryRow(ctx, `SELECT daemon_bootstrap_token_encrypted FROM "user" WHERE id=$1 FOR UPDATE`, owner).Scan(&encrypted); err != nil {
 		return "", db.PersonalAccessToken{}, fmt.Errorf("load daemon token: %w", err)
@@ -120,9 +134,6 @@ func (h *Handler) getOrCreateDaemonBootstrapToken(ctx context.Context, owner pgt
 		if _, err = tx.Exec(ctx, `UPDATE "user" SET daemon_bootstrap_token_encrypted=$1 WHERE id=$2`, sealed, owner); err != nil {
 			return "", db.PersonalAccessToken{}, fmt.Errorf("store daemon token: %w", err)
 		}
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", db.PersonalAccessToken{}, fmt.Errorf("commit daemon token: %w", err)
 	}
 	return raw, pat, nil
 }
@@ -281,6 +292,9 @@ func daemonHomeDir() string {
 // Bridge's own slugging, otherwise one account would end up with two rows.
 func daemonProfileSlug(email string) string {
 	local := email
+	if account := companyEmailAccount(email, "baidu.com"); account != "" {
+		local = account
+	}
 	if at := strings.Index(local, "@"); at >= 0 {
 		local = local[:at]
 	}
