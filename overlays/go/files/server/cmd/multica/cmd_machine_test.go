@@ -302,6 +302,27 @@ func TestMachineNamespaceDoesNotShadowUpstreamCommands(t *testing.T) {
 	}
 }
 
+func TestMachineMissingConfigurationStillEmitsFailureJSON(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, key := range []string{"MULTICA_SERVER_URL", "MULTICA_AGENT_ID", "MULTICA_TASK_ID", "MULTICA_DAEMON_PORT", cli.TaskConfigRootEnv} {
+		t.Setenv(key, "")
+	}
+	for _, args := range [][]string{{"rename", "--machine-name", "Fixture"}, {"rename", "--unknown"}, {"rename", "unexpected"}} {
+		var output bytes.Buffer
+		cmd := newMachineCommand()
+		cmd.PersistentFlags().String("profile", "fixture", "")
+		cmd.PersistentFlags().String("server-url", "", "")
+		cmd.PersistentFlags().String("workspace-id", machineWS, "")
+		cmd.SetOut(&output)
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		var result map[string]any
+		if err == nil || json.Unmarshal(output.Bytes(), &result) != nil || result["success"] != false {
+			t.Fatalf("missing configuration/invalid arguments bypassed JSON error: %v %s", err, output.String())
+		}
+	}
+}
+
 func TestMachineAgentConfigurationCompatibilityAndExplicitOverrides(t *testing.T) {
 	runtime := map[string]any{"id": machineRT, "provider": "claude"}
 	existing := map[string]any{"model": "gpt-6-sol", "thinking_level": "invalid effort", "service_tier": "priority"}

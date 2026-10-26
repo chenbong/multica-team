@@ -41,7 +41,7 @@ func newMachineCommand() *cobra.Command {
 	parent.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		return machinePrintResult(cmd, map[string]any{"completed_steps": []string{}}, err, "")
 	})
-	prepare := &cobra.Command{Use: "prepare", Short: "Set a workspace only when this profile has no default", Args: cobra.NoArgs,
+	prepare := &cobra.Command{Use: "prepare", Short: "Set a workspace only when this profile has no default", Args: machineNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) (err error) {
 			result := map[string]any{"completed_steps": []string{}}
 			defer func() { err = machinePrintResult(cmd, result, err, "") }()
@@ -61,7 +61,7 @@ func newMachineCommand() *cobra.Command {
 		}}
 	parent.AddCommand(prepare)
 	for _, name := range []string{"enroll", "rename", "agent"} {
-		command := &cobra.Command{Use: name, Short: "Rename this computer and/or create or rebind an owned agent", Args: cobra.NoArgs, RunE: runMachineEnroll}
+		command := &cobra.Command{Use: name, Short: "Rename this computer and/or create or rebind an owned agent", Args: machineNoArgs, RunE: runMachineEnroll}
 		command.Flags().String("machine-name", "", "Computer display name (OS hostname is unchanged)")
 		command.Flags().String("agent-name", "", "Agent name in the explicitly selected workspace")
 		command.Flags().String("runtime", "ducc", "Registered runtime command on this computer")
@@ -71,6 +71,13 @@ func newMachineCommand() *cobra.Command {
 		parent.AddCommand(command)
 	}
 	return parent
+}
+
+func machineNoArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.NoArgs(cmd, args); err != nil {
+		return machinePrintResult(cmd, map[string]any{"completed_steps": []string{}}, err, "")
+	}
+	return nil
 }
 
 func machinePrepareProfile(profile, workspaceID string) error {
@@ -148,6 +155,11 @@ func runMachineEnroll(cmd *cobra.Command, _ []string) (err error) {
 	}
 	if cmd.Name() == "agent" && strings.TrimSpace(options.AgentName) == "" {
 		return errors.New("--agent-name is required")
+	}
+	// The upstream resolver exits the process on missing server configuration,
+	// which would bypass this command's structured failure result.
+	if tryResolveServerURL(cmd) == "" {
+		return errors.New("no server configured; run multica setup or configure this profile's server_url")
 	}
 	client, err := newAPIClient(cmd)
 	if err != nil {
