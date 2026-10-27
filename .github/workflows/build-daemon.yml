@@ -86,6 +86,14 @@ jobs:
           workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
           go test -race -overlay="$workspace/overlays/go-overlay.json" ./cmd/multica -run '^TestMachine' -count=1
 
+      - name: Test cross-workspace issue link resolution
+        working-directory: multica/server
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          go test -race -overlay="$workspace/overlays/go-overlay.json" ./cmd/multica \
+            -run '^Test(ParseTeamMeshIssueLink|ResolveIssueLinkUsesConfiguredServerAndWorkspace)$' -count=1
+
       - name: Test OneAPI catalog with isolated HTTP and credential fixtures
         working-directory: multica/server
         run: |

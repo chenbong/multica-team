@@ -15,7 +15,7 @@ func withResourceWebPanelSkill(skills []AgentSkillData) []AgentSkillData {
 		skills[index].Files = append(skills[index].Files, AgentSkillFileData{Path: "references/task-panels.md", Content: resourceWebPanelSkillReference}, AgentSkillFileData{Path: "references/personal-secrets.md", Content: personalSecretsSkillReference}, AgentSkillFileData{Path: "scripts/team-mesh-tools.py", Content: platformExpansionTools})
 		skills[index].Content += "\nFor personal credentials needed for a user-requested operation, read references/personal-secrets.md. Never disclose secret values.\n"
 		skills[index].Files = append(skills[index].Files, AgentSkillFileData{Path: "references/managed-issues.md", Content: ownerManagedIssuesSkillReference})
-		skills[index].Content += "\nFor task context across workspaces, read references/managed-issues.md and use the read-only owner-managed-issues tools. Task deletion and administrator changes require a human.\n"
+		skills[index].Content += "\nTo read a task in another workspace, use the ordinary multica issue commands; see references/managed-issues.md. Access follows the agent owner and is read-only. Task deletion and administrator changes require a human.\n"
 	}
 	return skills
 }

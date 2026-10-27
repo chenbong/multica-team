@@ -50,10 +50,10 @@ func TestOwnerManagedIssueReadsStayReadOnlyAndOwnerScoped(t *testing.T) {
 			t.Fatal("task detail omitted owner-managed context")
 		}
 	}
-	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(other, "", testUserID, agent, task)).Want(404)
+	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(other, "", testUserID, agent, task)).Want(200)
 	listing := testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest("", "", testUserID, agent, task)).Want(200)
-	if !strings.Contains(listing.Body.String(), own) || (strings.Contains(listing.Body.String(), other) || strings.Contains(listing.Body.String(), machineTask)) {
-		t.Fatal("list scope widened from task administrators to workspace ownership")
+	if !strings.Contains(listing.Body.String(), own) || !strings.Contains(listing.Body.String(), other) || !strings.Contains(listing.Body.String(), machineTask) {
+		t.Fatal("list omitted tasks in workspaces visible to the agent owner")
 	}
 	wrongRun := dbfx.Task(t, agent, testutil.Cols{"issue_id": other, "status": "completed", "runtime_id": runtime})
 	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(own, "runs/"+wrongRun+"/messages", testUserID, agent, task)).Want(404)
@@ -76,6 +76,8 @@ func TestOwnerManagedIssueReadsStayReadOnlyAndOwnerScoped(t *testing.T) {
 	req.Header.Set("X-User-ID", alice)
 	req.Header.Set("X-Workspace-ID", target)
 	testutil.Call(t, testHandler.IssueManagers, req).Want(200)
+	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(own, "", testUserID, agent, task)).Want(200)
+	dbfx.Exec(t, `DELETE FROM member WHERE workspace_id=$1 AND user_id=$2`, target, alice)
 	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(own, "", testUserID, agent, task)).Want(404)
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed' WHERE id=$1`, task)
 	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(own, "", testUserID, agent, task)).Want(403)

@@ -12,12 +12,93 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // Only this read-only route can select a target workspace after the server
 // verifies the live executing agent and its owner's current issue authority.
 // General task-token workspace resolution remains unchanged.
+// OwnerAccessibleIssueRead reuses native issue read routes while restricting
+// delegated cross-workspace access to the live agent owner's current access.
+// Runs created before this capability existed retain their native behavior.
+func (h *Handler) OwnerAccessibleIssueRead(native http.HandlerFunc, section string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("X-Actor-Source") != "task_token" {
+			native(w, r)
+			return
+		}
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		var hasScope bool
+		if err := h.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM agent_token_read_scope WHERE token_hash=$1)`, auth.HashToken(token)).Scan(&hasScope); err != nil {
+			writeError(w, 503, "Read authorization unavailable")
+			return
+		}
+		if !hasScope {
+			native(w, r)
+			return
+		}
+		// Canonical UUIDs in the source workspace retain native behavior,
+		// including existing run-family and pagination semantics.
+		issueID, issueErr := util.ParseUUID(chi.URLParam(r, "id"))
+		workspaceID, workspaceErr := util.ParseUUID(r.Header.Get("X-Workspace-ID"))
+		if issueErr == nil && workspaceErr == nil && r.URL.Query().Get("team_mesh_workspace") == "" {
+			_, err := h.Queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: issueID, WorkspaceID: workspaceID})
+			if err == nil {
+				native(w, r)
+				return
+			}
+			if err != pgx.ErrNoRows {
+				writeError(w, 503, "Issue authorization unavailable")
+				return
+			}
+		}
+		route := chi.NewRouteContext()
+		route.URLParams.Add("managedIssueId", chi.URLParam(r, "id"))
+		route.URLParams.Add("*", section)
+		h.OwnerManagedIssues(w, r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, route)))
+	}
+}
+
+// OwnerAccessibleTaskMessages preserves native access in the source workspace;
+// delegated reads outside it are restricted to runs belonging to an issue.
+func (h *Handler) OwnerAccessibleTaskMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || r.Header.Get("X-Actor-Source") != "task_token" {
+		h.ListTaskMessagesByUser(w, r)
+		return
+	}
+	runID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "taskId"), "task_id")
+	if !ok {
+		return
+	}
+	run, err := h.Queries.GetAgentTask(r.Context(), runID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			writeError(w, 404, "task not found")
+		} else {
+			writeError(w, 503, "Task lookup unavailable")
+		}
+		return
+	}
+	workspace, err := h.TaskService.ResolveTaskWorkspaceIDChecked(r.Context(), run)
+	if err != nil {
+		writeError(w, 503, "Task lookup unavailable")
+		return
+	}
+	if workspace == r.Header.Get("X-Workspace-ID") {
+		h.ListTaskMessagesByUser(w, r)
+		return
+	}
+	if !run.IssueID.Valid {
+		writeError(w, 404, "task not found")
+		return
+	}
+	route := chi.NewRouteContext()
+	route.URLParams.Add("managedIssueId", uuidToString(run.IssueID))
+	route.URLParams.Add("*", "runs/"+uuidToString(run.ID)+"/messages")
+	h.OwnerManagedIssues(w, r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, route)))
+}
+
 func (h *Handler) OwnerManagedIssues(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store, private")
 	if r.Method != http.MethodGet || r.Header.Get("X-Actor-Source") != "task_token" {
@@ -69,7 +150,12 @@ func (h *Handler) OwnerManagedIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// At most two candidates: human identifiers can collide across workspaces.
-	rows, err := tx.Query(ctx, `SELECT i.id FROM issue i JOIN workspace w ON w.id=i.workspace_id JOIN issue_manager im ON im.issue_id=i.id AND im.user_id=$1 JOIN member m ON m.workspace_id=i.workspace_id AND m.user_id=$1 WHERE i.id::text=$2 OR lower(w.issue_prefix||'-'||i.number::text)=lower($2) ORDER BY i.id LIMIT 2 FOR SHARE OF i,im,m`, owner, rawID)
+	workspaceSlug := r.URL.Query().Get("team_mesh_workspace")
+	if len(workspaceSlug) > 256 {
+		writeError(w, 400, "Workspace slug is too long")
+		return
+	}
+	rows, err := tx.Query(ctx, `SELECT i.id FROM issue i JOIN workspace w ON w.id=i.workspace_id JOIN member m ON m.workspace_id=i.workspace_id AND m.user_id=$1 WHERE (i.id::text=$2 OR lower(w.issue_prefix||'-'||i.number::text)=lower($2)) AND ($3='' OR w.slug=$3) ORDER BY i.id LIMIT 2 FOR SHARE OF i,m`, owner, rawID, workspaceSlug)
 	if err != nil {
 		writeError(w, 503, "Issue authorization unavailable")
 		return
@@ -263,11 +349,13 @@ func (h *Handler) listOwnerManagedIssues(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	search := r.URL.Query().Get("q")
-	if len(search) > 256 {
+	workspaceSlug := r.URL.Query().Get("workspace_slug")
+	identifier := r.URL.Query().Get("identifier")
+	if len(search) > 256 || len(workspaceSlug) > 256 || len(identifier) > 256 {
 		writeError(w, 400, "Search is too long")
 		return
 	}
-	rows, err := tx.Query(r.Context(), `SELECT i.id,w.id,w.name,w.issue_prefix||'-'||i.number::text,i.title,i.status FROM issue_manager im JOIN issue i ON i.id=im.issue_id JOIN member m ON m.workspace_id=i.workspace_id AND m.user_id=im.user_id JOIN workspace w ON w.id=i.workspace_id WHERE im.user_id=$1 AND ($2::uuid IS NULL OR i.id>$2) AND ($3='' OR i.title ILIKE '%'||$3||'%' OR (w.issue_prefix||'-'||i.number::text) ILIKE '%'||$3||'%') ORDER BY i.id LIMIT 101`, owner, cursor, search)
+	rows, err := tx.Query(r.Context(), `SELECT i.id,w.id,w.name,w.slug,w.issue_prefix||'-'||i.number::text,i.title,i.status FROM issue i JOIN member m ON m.workspace_id=i.workspace_id AND m.user_id=$1 JOIN workspace w ON w.id=i.workspace_id WHERE ($2::uuid IS NULL OR i.id>$2) AND ($3='' OR i.title ILIKE '%'||$3||'%' OR (w.issue_prefix||'-'||i.number::text) ILIKE '%'||$3||'%' OR lower(i.id::text)=lower($3)) AND ($4='' OR w.slug=$4) AND ($5='' OR lower(w.issue_prefix||'-'||i.number::text)=lower($5) OR lower(i.id::text)=lower($5)) ORDER BY i.id LIMIT 101`, owner, cursor, search, workspaceSlug, identifier)
 	if err != nil {
 		writeError(w, 503, "Managed issue list unavailable")
 		return
@@ -277,6 +365,7 @@ func (h *Handler) listOwnerManagedIssues(w http.ResponseWriter, r *http.Request,
 		ID            string `json:"id"`
 		WorkspaceID   string `json:"workspace_id"`
 		WorkspaceName string `json:"workspace_name"`
+		WorkspaceSlug string `json:"workspace_slug"`
 		Identifier    string `json:"identifier"`
 		Title         string `json:"title"`
 		Status        string `json:"status"`
@@ -284,7 +373,7 @@ func (h *Handler) listOwnerManagedIssues(w http.ResponseWriter, r *http.Request,
 	items := []item{}
 	for rows.Next() {
 		var v item
-		if err = rows.Scan(&v.ID, &v.WorkspaceID, &v.WorkspaceName, &v.Identifier, &v.Title, &v.Status); err != nil {
+		if err = rows.Scan(&v.ID, &v.WorkspaceID, &v.WorkspaceName, &v.WorkspaceSlug, &v.Identifier, &v.Title, &v.Status); err != nil {
 			writeError(w, 503, "Managed issue list unavailable")
 			return
 		}

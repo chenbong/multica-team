@@ -2096,7 +2096,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Post("/batch-update", h.BatchUpdateIssues)
 				r.Post("/batch-delete", h.BatchDeleteIssues)
 				r.Route("/{id}", func(r chi.Router) {
-					r.Get("/", h.GetIssue)
+					r.Get("/", h.OwnerAccessibleIssueRead(h.GetIssue, ""))
 					r.With(handler.RequireHumanActor).Get("/web-panels", h.ListIssueWebPanels)
 					r.With(handler.RequireHumanActor).Post("/web-panels", h.CreateIssueWebPanel)
 					r.With(handler.RequireHumanActor).Patch("/web-panels/{panelId}", h.UpdateIssueWebPanel)
@@ -2118,8 +2118,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Delete("/", h.DeleteIssue)
 					r.Post("/comments/trigger-preview", h.PreviewCommentTriggers)
 					r.Post("/comments", h.CreateComment)
-					r.Get("/comments", h.ListComments)
-					r.Get("/timeline", h.ListTimeline)
+					r.Get("/comments", h.OwnerAccessibleIssueRead(h.ListComments, "comments"))
+					r.Get("/timeline", h.OwnerAccessibleIssueRead(h.ListTimeline, "timeline"))
 					r.Get("/subscribers", h.ListIssueSubscribers)
 					r.Post("/subscribe", h.SubscribeToIssue)
 					r.Post("/unsubscribe", h.UnsubscribeFromIssue)
@@ -2143,11 +2143,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/rerun", h.RerunIssue)
 					r.Post("/quick-actions/{quickActionId}/run", h.RunQuickAction)
 					r.Post("/quick-actions/{quickActionId}/render", h.RenderQuickAction)
-					r.Get("/task-runs", h.ListTasksByIssue)
+					r.Get("/task-runs", h.OwnerAccessibleIssueRead(h.ListTasksByIssue, "runs"))
 					r.Get("/usage", h.GetIssueUsage)
 					r.Post("/reactions", h.AddIssueReaction)
 					r.Delete("/reactions", h.RemoveIssueReaction)
-					r.Get("/attachments", h.ListAttachments)
+					r.Get("/attachments", h.OwnerAccessibleIssueRead(h.ListAttachments, "attachments"))
 					r.Get("/children", h.ListChildIssues)
 					r.Get("/duplicates", h.ListIssueDuplicates)
 					r.Get("/labels", h.ListLabelsForIssue)
@@ -2166,7 +2166,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			})
 
 			// Task messages (user-facing, not daemon auth)
-			r.Get("/api/tasks/{taskId}/messages", h.ListTaskMessagesByUser)
+			r.Get("/api/tasks/{taskId}/messages", h.OwnerAccessibleTaskMessages)
 			r.With(handler.RequireHumanActor).Post("/api/tasks/{taskId}/retry-source-context", h.RetrySourceContextQuickCreate)
 
 			// Issue quick actions (definitions; running one lives under
