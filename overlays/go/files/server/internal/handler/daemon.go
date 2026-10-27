@@ -1205,6 +1205,9 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if len(ack.PendingLocalSkillImports) > 0 {
 		resp["pending_local_skill_imports"] = ack.PendingLocalSkillImports
 	}
+	if len(ack.PendingLocalMemory) > 0 {
+		resp["pending_local_memory"] = ack.PendingLocalMemory
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1516,6 +1519,8 @@ func (h *Handler) processHeartbeat(ctx context.Context, runtimeID string, suppor
 			slog.Warn("local skill import HasPending failed", "error", probeErr, "runtime_id", runtimeID)
 		}
 	}
+
+	ack.PendingLocalMemory = h.popPendingLocalMemory(ctx, runtimeID)
 
 	return ack, m, nil
 }
@@ -2572,6 +2577,32 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		builtinSkillCount = len(builtinSkills)
 		skills = append(skills, builtinSkills...)
 		resp.Agent.Skills = skills
+	}
+	// Agent memory (multica-team overlay). Fail closed like skills: running
+	// without the memory the user configured is a silent behavior change.
+	memory, err := h.loadAgentMemoryForClaim(r.Context(), task.AgentID)
+	if err != nil {
+		slog.Error("task claim: agent memory load failed; preserving task for redelivery",
+			"task_id", uuidToString(task.ID), "agent_id", uuidToString(task.AgentID), "error", err)
+		return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount, &claimBuildFailure{
+			outcome: "error_memory_load",
+			status:  http.StatusInternalServerError,
+			message: "failed to load agent memory",
+		}
+	}
+	if requestHasClientCapability(r, protocol.DaemonCapabilityAgentMemoryV1) {
+		resp.Agent.Memory = memory
+		resp.Agent.MemoryWriteback = h.agentMemoryWritebackForClaim(r.Context(), task.AgentID)
+	} else if section := renderAgentMemoryInstructions(memory); section != "" {
+		// A daemon without agent-memory support drops the Memory field, but it
+		// always renders Instructions into the runtime brief.
+		if strings.TrimSpace(resp.Agent.Instructions) == "" {
+			resp.Agent.Instructions = section
+		} else {
+			resp.Agent.Instructions = resp.Agent.Instructions + "\n\n" + section
+		}
+		slog.Info("task claim: daemon lacks agent-memory support; memory folded into instructions",
+			"task_id", uuidToString(task.ID), "agent_id", uuidToString(task.AgentID), "files", len(memory))
 	}
 	if !claimResponseAgentIdentityMatches(resp) {
 		responseAgentID := ""
