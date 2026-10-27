@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS attachment_storage_alias_identity_idx;

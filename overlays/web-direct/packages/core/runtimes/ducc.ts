@@ -1,7 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { api } from "../api";
 export function useDuccCredential(userId: string | undefined) {
-  return useQuery({queryKey:["ducc-credential",userId],queryFn:()=>api.getDuccCredential(),enabled:!!userId,refetchInterval:10000});
+  const qc=useQueryClient();
+  const query=useQuery({queryKey:["ducc-credential",userId],queryFn:()=>api.getDuccCredential(),enabled:!!userId,refetchInterval:10000});
+  const version=query.data?.version;
+  useEffect(()=>{if(userId&&version!==undefined)void qc.invalidateQueries({queryKey:["oneapi-quota",userId]});},[qc,userId,version]);
+  return query;
 }
 export function useUpdateDuccCredential(userId: string | undefined) {
   const qc=useQueryClient();

@@ -1,3 +1,4 @@
+import { installChatInputFixture } from "./test/chat-input-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -42,6 +43,7 @@ function fixture(t, kind, mode) {
     if (path === "issue-deliveries") return { deliveries: [delivery] };
     return { handled: true, silent: true };
   };
+  installChatInputFixture(bridge);
   t.after(() => { bridge.stop(); rmSync(dir, { recursive: true, force: true }); });
   return { bridge, sent, apiInputs, conversation, delivery };
 }

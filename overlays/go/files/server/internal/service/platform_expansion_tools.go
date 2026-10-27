@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 
-def request(method, path, body=None):
+def request(method, path, body=None, max_bytes=256 * 1024):
     token = os.environ.get("MULTICA_TOKEN", "")
     base = os.environ.get("MULTICA_SERVER_URL", "").rstrip("/")
     parsed = urllib.parse.urlsplit(base)
@@ -30,15 +30,16 @@ def request(method, path, body=None):
         def redirect_request(self, *args, **kwargs):
             return None
     with urllib.request.build_opener(NoRedirect).open(req, timeout=30) as response:
-        raw = response.read(256 * 1024 + 1)
-        if len(raw) > 256 * 1024:
+        raw = response.read(max_bytes + 1)
+        if len(raw) > max_bytes:
             raise ValueError("Response exceeds tool limit")
-        return json.loads(raw) if raw else None
+        return json.loads(raw.decode("utf-8")) if raw else None
 
 
 def main():
+    sys.argv = [value.encode("utf-8", "surrogateescape").decode("utf-8") for value in sys.argv]
     p = argparse.ArgumentParser()
-    sub = p.add_subparsers(dest="area", required=True)
+    sub = p.add_subparsers(dest="area")
     panels = sub.add_parser("panels")
     panels.add_argument("action", choices=["list", "add", "update", "delete"])
     panels.add_argument("--id")
@@ -47,7 +48,19 @@ def main():
     secrets = sub.add_parser("secrets")
     secrets.add_argument("action", choices=["list", "read", "with-file"])
     secrets.add_argument("--id")
+    issues = sub.add_parser("issues")
+    issues.add_argument("action", choices=["list", "get", "messages", "attachment"])
+    issues.add_argument("--id")
+    issues.add_argument("--query", default="")
+    issues.add_argument("--section", choices=["detail", "comments", "timeline", "runs", "panels", "attachments", "properties", "administrators"], default="detail")
+    issues.add_argument("--run-id")
+    issues.add_argument("--attachment-id")
+    issues.add_argument("--after")
+    issues.add_argument("--before")
+    issues.add_argument("--since", type=int, default=0)
     args, command = p.parse_known_args()
+    if not args.area:
+        p.error("A tool area is required")
     if command and not (args.area == "secrets" and args.action == "with-file"):
         p.error("Unexpected command arguments")
     if args.area == "panels":
@@ -59,6 +72,39 @@ def main():
         body = {key: value for key, value in {"name": args.name, "url": args.url}.items() if value is not None}
         method = {"list": "GET", "add": "POST", "update": "PATCH", "delete": "DELETE"}[args.action]
         result = request(method, path, body if method in ("POST", "PATCH") else None)
+    elif args.area == "issues":
+        path = "/api/agent/managed-issues"
+        params = {}
+        quote = lambda value: urllib.parse.quote(value, safe="")
+        if args.action == "list":
+            if args.query:
+                params["q"] = args.query
+            if args.after:
+                params["after"] = args.after
+        else:
+            if not args.id:
+                p.error("--id is required")
+            path += "/" + quote(args.id)
+            if args.action == "get" and args.section != "detail":
+                path += "/" + args.section
+                if args.section in ("comments", "timeline"):
+                    params["limit"] = 50
+                    if args.before:
+                        params["before"] = args.before
+                    if args.after:
+                        params["after"] = args.after
+            if args.action == "messages":
+                if not args.run_id:
+                    p.error("--run-id is required")
+                path += "/runs/" + quote(args.run_id) + "/messages"
+                params["since"] = args.since
+            if args.action == "attachment":
+                if not args.attachment_id:
+                    p.error("--attachment-id is required")
+                path += "/attachments/" + quote(args.attachment_id)
+        if params:
+            path += "?" + urllib.parse.urlencode(params)
+        result = request("GET", path, max_bytes=8 * 1024 * 1024)
     else:
         path = "/api/agent/personal-secrets"
         if args.action != "list":
@@ -76,12 +122,12 @@ def main():
             with tempfile.TemporaryDirectory(prefix="team-mesh-secret-", dir=os.environ.get("TMPDIR")) as directory:
                 os.chmod(directory, 0o700)
                 path = Path(directory) / "value"
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w") as file:
                     file.write(result["value"])
-                code = subprocess.run([item.replace("{secret_file}", str(path)) for item in command], check=False).returncode
+                code = subprocess.call([item.replace("{secret_file}", str(path)) for item in command])
                 return code
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=True))
     return 0
 
 

@@ -15,10 +15,10 @@ KEYS = (
     "MULTICA_CLI_INSTALL_URL", "MULTICA_CLI_INSTALL_WINDOWS_URL",
     "MULTICA_INFOFLOW_BRIDGE_URL", "MULTICA_INFOFLOW_BRIDGE_LABEL",
     "MULTICA_DAEMON_RUNTIME_DEFAULTS", "MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS",
-    "MULTICA_ONEAPI_TRACE_URL", "MULTICA_QUICKSTART_URL", "MULTICA_INFOFLOW_USER_GROUP_URL",
+    "MULTICA_ONEAPI_TRACE_URL", "MULTICA_ONEAPI_ACCOUNT_URL", "MULTICA_QUICKSTART_URL", "MULTICA_INFOFLOW_USER_GROUP_URL",
 )
 REQUIRED = tuple(key for key in KEYS if key not in (
-    "MULTICA_BRAND_BRIDGE_URL", "MULTICA_CLI_INSTALL_WINDOWS_URL",
+    "MULTICA_BRAND_BRIDGE_URL", "MULTICA_CLI_INSTALL_WINDOWS_URL", "MULTICA_ONEAPI_ACCOUNT_URL",
 ))
 
 
@@ -52,6 +52,8 @@ def verify_output(target, config):
         if config[key] not in page:
             raise ValueError(f"Generated login page lost {key}")
     sidebar = (target / "packages/views/layout/app-sidebar.tsx").read_text()
+    if config.get("MULTICA_ONEAPI_ACCOUNT_URL") and config["MULTICA_ONEAPI_ACCOUNT_URL"] not in sidebar:
+        raise ValueError("Generated sidebar lost the OneAPI account link")
     for key in ("MULTICA_ONEAPI_TRACE_URL", "MULTICA_QUICKSTART_URL", "MULTICA_INFOFLOW_USER_GROUP_URL"):
         if config[key] not in sidebar:
             raise ValueError(f"Generated sidebar lost {key}")

@@ -12,13 +12,14 @@ export function issueRequest(text) {
 }
 
 export class ChatRelay {
-  constructor(config, multica, reply, stageImages, logger = console, { replyImages = null } = {}) {
+  constructor(config, multica, reply, stageImages, logger = console, { replyImages = null, submitMessage = null } = {}) {
     this.config = config;
     this.multica = multica;
     this.reply = reply;
     this.stageImages = stageImages;
     this.logger = logger;
     this.replyImages = replyImages;
+    this.submitMessage = submitMessage;
     const scope = JSON.stringify([config.robotId, config.multica.profile, config.multica.workspaceId]);
     this.path = config.statePath + ".chat-" + createHash("sha256").update(scope).digest("hex").slice(0, 16) + ".json";
     try { this.state = JSON.parse(readFileSync(this.path, "utf8")); }
@@ -90,7 +91,9 @@ export class ChatRelay {
           await this.reply(conversation, user, "部分图片未能读取：\n" + staged.failed.join("\n"), { sessionId: thread.id });
         }
         handoff?.beforeSubmit();
-        const sent = await this.multica.sendChatMessage(thread.id, content, attachmentIds);
+        const sent = this.submitMessage
+          ? await this.submitMessage({ sessionId: thread.id, agentId: agent.id, content, attachmentIds, conversation, user })
+          : await this.multica.sendChatMessage(thread.id, content, attachmentIds);
         if (!sent.task_id) throw new Error("聊天已提交但缺少执行 ID，请到网页版确认，不要重复发送");
         const previous = this.state.pending[sent.task_id];
         if (previous && (previous.sessionId !== thread.id || this.key(previous.conversation, previous.user) !== key)) {

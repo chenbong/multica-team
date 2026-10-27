@@ -88,7 +88,7 @@ func TestIssueTransferAuthenticatedHTTP(t *testing.T) {
 	if err = json.Unmarshal(call(source, "POST", "/api/issues/"+issue+"/transfer-preview", map[string]string{"target_workspace_id": target}, 200), &preview); err != nil || len(preview.Blockers) > 0 || preview.Fingerprint == "" {
 		t.Fatalf("bad preview %+v %v", preview, err)
 	}
-	call(source, "POST", "/api/issues/"+issue+"/transfer", map[string]string{"target_workspace_id": target, "fingerprint": preview.Fingerprint}, 200)
+	call(source, "POST", "/api/issues/"+issue+"/transfer", map[string]any{"target_workspace_id": target, "fingerprint": preview.Fingerprint, "confirm_cleanup": true}, 200)
 	call(target, "GET", "/api/issues/"+issue, nil, 200)
 	call(source, "GET", "/api/issues/"+issue, nil, 404)
 	call(target, "GET", "/api/issues/"+issue+"/comments", nil, 200)

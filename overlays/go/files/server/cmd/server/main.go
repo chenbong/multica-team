@@ -325,6 +325,9 @@ func newMainHTTPServer(addr string, handler http.Handler) *http.Server {
 }
 
 func main() {
+	if mode := os.Getenv("MULTICA_ATTACHMENT_MAINTENANCE"); mode != "" {
+		os.Exit(runAttachmentMaintenanceCommand(mode))
+	}
 	logger.Init()
 	// Read the opt-out before constructing any telemetry dependency. In the
 	// disabled case no collector or HTTP client is ever created.
@@ -782,6 +785,7 @@ func main() {
 	// Source-context cleanup is object-store work, so it gets its own goroutine
 	// instead of a slot in the runtime sweep tick.
 	go runSourceContextSweeper(sweepCtx, taskSvc)
+	go service.RunAttachmentStorageCleaner(sweepCtx, pool, h.Storage)
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
 	if autopilotSvc.QuotaEnabled() {

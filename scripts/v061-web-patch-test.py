@@ -40,6 +40,7 @@ class FrontendPatches(unittest.TestCase):
             "MULTICA_DAEMON_RUNTIME_DEFAULTS": "ducc,codex",
             "MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS": "ducc",
             "MULTICA_ONEAPI_TRACE_URL": "https://probe.example.test/",
+            "MULTICA_ONEAPI_ACCOUNT_URL": "https://quota.example.test/mine",
             "MULTICA_QUICKSTART_URL": "https://docs.example.test/quickstart",
             "MULTICA_INFOFLOW_USER_GROUP_URL": "https://community.example.test/join",
         })
@@ -199,12 +200,14 @@ class FrontendPatches(unittest.TestCase):
         sidebar = (self.target / "packages/views/layout/app-sidebar.tsx").read_text()
         footer = sidebar[sidebar.index("<SidebarFooter"):]
         self.assertEqual(footer.count("<SidebarShortcutLinks "), 1)
-        self.assertLess(footer.index("<SidebarShortcutLinks "), footer.index("utilityNav.map"))
+        self.assertLess(footer.index("<SidebarShortcutLinks "), footer.index("utilityNav.filter"))
         self.assertLess(footer.index("<SidebarShortcutLinks "), footer.index("<SidebarCommunityLink "))
-        self.assertLess(footer.index("<SidebarCommunityLink "), footer.index("utilityNav.map"))
+        self.assertLess(footer.index("<SidebarCommunityLink "), footer.index("utilityNav.filter"))
         self.assertIn('url={"https://community.example.test/join"}', footer)
         self.assertIn('modelTraceUrl={"https://probe.example.test/"}', footer)
         self.assertIn('quickstartUrl={"https://docs.example.test/quickstart"}', footer)
+        self.assertIn('href={"https://quota.example.test/mine"}', footer)
+        self.assertLess(footer.index("utilityNav.filter"), footer.index("<OneAPIQuota href="))
         for locale in ("en", "zh-Hans", "ja", "ko", "fr"):
             labels = json.loads((self.target / f"packages/views/locales/{locale}/layout.json").read_text())
             self.assertEqual(set(labels["sidebar"]["quick_links"]), {"title", "mobile_control", "loading", "unavailable", "copied", "copy_failed", "model_trace", "quickstart_wishlist", "official_docs"})

@@ -412,16 +412,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	}
 
 	// Initialize storage with S3 as primary, fallback to local
-	var store storage.Storage
-	s3 := storage.NewS3StorageFromEnv()
-	if s3 != nil {
-		store = s3
-	} else {
-		local := storage.NewLocalStorageFromEnv()
-		if local != nil {
-			store = local
-		}
-	}
+	store := storage.NewAttachmentStorageFromEnv()
 
 	cfSigner := auth.NewCloudFrontSignerFromEnv()
 	origins := allowedOrigins()
@@ -1499,7 +1490,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// clients can then iframe-preview PDFs/HTML fetched straight from the
 	// static route instead of hitting the global frame-ancestors 'none' CSP.
 	// See MUL-3821 / #4477.
-	if _, ok := store.(*storage.LocalStorage); ok {
+	if storage.LegacyLocalStorage(store) != nil {
 		r.Get("/uploads/*", h.ServeLocalUpload)
 	}
 
@@ -1596,6 +1587,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 	// Trusted relay only; never accept a browser session, PAT or actor headers.
 	r.Post("/api/integrations/infoflow/issue-relay", h.InfoFlowIssueRelay)
+	r.Post("/api/integrations/infoflow/chat-input", h.InfoFlowChatInput)
 	r.Post("/api/integrations/infoflow/issue-groups", h.InfoFlowIssueGroups)
 	r.Post("/api/integrations/infoflow/infoflow-group-observation", h.InfoFlowGroupObservation)
 	r.Post("/api/integrations/infoflow/web-group-jobs", h.InfoFlowWebGroupJobs)
@@ -1710,6 +1702,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// against it. Sits in the user-scoped group for that reason: there is
 		// no workspace in the path to gate on.
 		// --- User-scoped routes (no workspace context required) ---
+		r.Get("/api/agent/managed-issues", h.OwnerManagedIssues)
+		r.Get("/api/agent/managed-issues/{managedIssueId}", h.OwnerManagedIssues)
+		r.Get("/api/agent/managed-issues/{managedIssueId}/*", h.OwnerManagedIssues)
+		r.Get("/api/attachments/legacy", h.LegacyAttachmentDownload)
 		r.Get("/api/me", h.GetMe)
 		r.With(handler.RequireHumanActor).Get("/api/me/secrets", h.PersonalSecrets)
 		r.With(handler.RequireHumanActor).Post("/api/me/secrets", h.PersonalSecrets)
@@ -1717,6 +1713,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.With(handler.RequireHumanActor).Put("/api/me/secrets/{secretId}", h.PersonalSecrets)
 		r.With(handler.RequireHumanActor).Delete("/api/me/secrets/{secretId}", h.PersonalSecrets)
 		r.With(handler.RequireHumanActor).Get("/api/me/ducc", h.GetDuccCredential)
+		r.With(handler.RequireHumanActor).Get("/api/me/oneapi-quota", h.GetOneAPIQuota)
 		r.With(handler.RequireHumanActor).Post("/api/me/ducc", h.UpdateDuccCredential)
 		r.With(handler.RequireHumanActor).Post("/api/daemon/ducc/sync", h.SyncDuccCredential)
 		r.Patch("/api/me", h.UpdateMe)
@@ -2104,6 +2101,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.With(handler.RequireHumanActor).Post("/web-panels", h.CreateIssueWebPanel)
 					r.With(handler.RequireHumanActor).Patch("/web-panels/{panelId}", h.UpdateIssueWebPanel)
 					r.With(handler.RequireHumanActor).Delete("/web-panels/{panelId}", h.DeleteIssueWebPanel)
+					r.Get("/administrators", h.IssueManagers)
+					r.With(handler.RequireHumanActor).Put("/administrators", h.IssueManagers)
 					r.Get("/infoflow-groups", h.GetIssueInfoFlowGroups)
 					r.With(handler.RequireHumanActor).Get("/infoflow-group-binding", h.GetIssueInfoFlowGroupBinding)
 					r.With(handler.RequireHumanActor).Post("/infoflow-group-binding", h.BindIssueInfoFlowGroup)

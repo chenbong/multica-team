@@ -33,9 +33,13 @@ func newTransferFixture(t *testing.T) transferFixture {
 	// the application workspace-creation flow.
 	dbfx.Exec(t, `INSERT INTO issue_status(workspace_id,key,name,category,color,position) VALUES($1,'cancelled','Cancelled','closed','#808080',0),($2,'cancelled','Cancelled','closed','#808080',0) ON CONFLICT DO NOTHING`, testWorkspaceID, target)
 	id := dbfx.Issue(t, "Transfer fixture", testutil.Cols{"status": "cancelled", "description": "Keep this description"})
+	initializeManagers(t, id)
 	return transferFixture{parseUUID(id), parseUUID(testWorkspaceID), parseUUID(target), parseUUID(testUserID)}
 }
 func (f transferFixture) run(req issueTransferRequest, apply bool) (*issueTransferPlan, error) {
+	if apply {
+		req.ConfirmCleanup = true
+	}
 	return testHandler.runIssueTransfer(context.Background(), f.issue, f.source, f.target, f.actor, req, apply)
 }
 func expectTransferCode(t *testing.T, err error, code string) {
@@ -68,7 +72,7 @@ func TestIssueTransferPreservesHistory(t *testing.T) {
 	var taskBefore, messagesBefore string
 	testPool.QueryRow(context.Background(), `SELECT md5(to_jsonb(t)::text) FROM agent_task_queue t WHERE id=$1`, task).Scan(&taskBefore)
 	testPool.QueryRow(context.Background(), `SELECT md5(jsonb_agg(to_jsonb(t))::text) FROM task_message t WHERE task_id=$1`, task).Scan(&messagesBefore)
-	result, err := f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+	result, err := f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +105,7 @@ func TestIssueTransferPreservesHistory(t *testing.T) {
 	if count != 0 {
 		t.Fatal("old host credential retained")
 	}
-	_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+	_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true)
 	expectTransferCode(t, err, "transfer_changed")
 }
 
@@ -114,9 +118,7 @@ func TestIssueTransferAuthorization(t *testing.T) {
 				testPool.Exec(context.Background(), `UPDATE member SET role='owner' WHERE workspace_id=$1 AND user_id=$2`, f.source, f.actor)
 			})
 			_, err := f.run(issueTransferRequest{}, false)
-			if role == "member" {
-				expectTransferCode(t, err, "transfer_forbidden")
-			} else if err != nil {
+			if err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -128,7 +130,7 @@ func TestIssueTransferAuthorization(t *testing.T) {
 			t.Fatal(err)
 		}
 		dbfx.Exec(t, `DELETE FROM member WHERE workspace_id=$1 AND user_id=$2`, f.target, f.actor)
-		_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+		_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true)
 		expectTransferCode(t, err, "transfer_forbidden")
 	})
 	for _, source := range []string{"task_token", "cloud_pat"} {
@@ -145,50 +147,30 @@ func TestIssueTransferAuthorization(t *testing.T) {
 	}
 }
 
-func TestIssueTransferBlocksUnsupportedData(t *testing.T) {
+func TestIssueTransferCancelsActiveRunsAndClearsIncompatibleData(t *testing.T) {
 	for _, status := range []string{"queued", "running", "deferred", "waiting_local_directory"} {
 		t.Run(status, func(t *testing.T) {
 			f := newTransferFixture(t)
-			a := dbfx.Agent(t, "Busy transfer agent", testRuntimeID)
-			dbfx.Task(t, a, testutil.Cols{"issue_id": uuidToString(f.issue), "runtime_id": testRuntimeID, "status": status})
-			p, err := f.run(issueTransferRequest{}, false)
-			if err != nil {
+			agent := dbfx.Agent(t, "Busy transfer agent", testRuntimeID)
+			task := dbfx.Task(t, agent, testutil.Cols{"issue_id": uuidToString(f.issue), "runtime_id": testRuntimeID, "status": status})
+			dbfx.Exec(t, `UPDATE issue SET metadata='{"old":"config"}',properties='{}',context_refs='["legacy"]' WHERE id=$1`, f.issue)
+			plan, err := f.run(issueTransferRequest{}, false)
+			if err != nil || len(plan.Blockers) > 0 {
+				t.Fatalf("valid active task blocked: %v", err)
+			}
+			if _, err = f.run(issueTransferRequest{Fingerprint: plan.Fingerprint}, true); err != nil {
 				t.Fatal(err)
 			}
-			if !containsTransferBlocker(p, "active_or_linked_runs") {
-				t.Fatal("active run not blocked")
+			if n := dbfx.Count(t, `SELECT count(*) FROM agent_task_queue WHERE id=$1 AND status='cancelled'`, task); n != 1 {
+				t.Fatal("active run was not cancelled")
 			}
-			_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
-			expectTransferCode(t, err, "transfer_blocked")
-		})
-	}
-	for _, test := range []struct {
-		name, code string
-		setup      func(*testing.T, transferFixture)
-	}{
-		{"child", "children_or_dependencies", func(t *testing.T, f transferFixture) {
-			dbfx.Issue(t, "Child", testutil.Cols{"parent_issue_id": uuidToString(f.issue)})
-		}},
-		{"metadata", "custom_context", func(t *testing.T, f transferFixture) {
-			dbfx.Exec(t, `UPDATE issue SET metadata='{"custom":"data"}' WHERE id=$1`, f.issue)
-		}},
-		{"pin", "labels_pins_or_prs", func(t *testing.T, f transferFixture) {
-			dbfx.Insert(t, "pinned_item", testutil.Cols{"workspace_id": testWorkspaceID, "user_id": testUserID, "item_type": "issue", "item_id": uuidToString(f.issue), "position": 0})
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			f := newTransferFixture(t)
-			test.setup(t, f)
-			p, err := f.run(issueTransferRequest{}, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !containsTransferBlocker(p, test.code) {
-				t.Fatalf("missing %s: %v", test.code, p.Blockers)
+			if n := dbfx.Count(t, `SELECT count(*) FROM issue WHERE id=$1 AND metadata='{}'::jsonb AND context_refs='[]'::jsonb`, f.issue); n != 1 {
+				t.Fatal("old configuration survived transfer")
 			}
 		})
 	}
 }
+
 func containsTransferBlocker(p *issueTransferPlan, code string) bool {
 	for _, b := range p.Blockers {
 		if b == code {
@@ -209,9 +191,9 @@ func TestIssueTransferRequiresFreshPreviewAndUnassign(t *testing.T) {
 	if !p.Unassign {
 		t.Fatal("missing unassign warning")
 	}
-	_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+	_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true)
 	expectTransferCode(t, err, "transfer_unassign_required")
-	dbfx.Comment(t, uuidToString(f.issue), "New comment after preview")
+	dbfx.Exec(t, `UPDATE issue SET metadata='{"configuration":"changed"}'::jsonb WHERE id=$1`, f.issue)
 	_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmUnassign: true}, true)
 	expectTransferCode(t, err, "transfer_changed")
 	p, err = f.run(issueTransferRequest{}, false)
@@ -232,24 +214,17 @@ func TestIssueTransferStatusMappingAndNumberAllocation(t *testing.T) {
 	f := newTransferFixture(t)
 	dbfx.Exec(t, `UPDATE issue_status SET archived_at=now() WHERE workspace_id=$1 AND key='cancelled'`, f.target)
 	dbfx.Insert(t, "issue_status", testutil.Cols{"workspace_id": uuidToString(f.target), "key": "abandoned", "name": "Abandoned", "category": "closed", "color": "#808080", "position": 99})
-	p, err := f.run(issueTransferRequest{}, false)
+	plan, err := f.run(issueTransferRequest{}, false)
+	if err != nil || plan.TargetStatus != "abandoned" || len(plan.Blockers) > 0 {
+		t.Fatalf("automatic category mapping failed: %+v %v", plan, err)
+	}
+	dbfx.Exec(t, `UPDATE workspace SET issue_counter=10 WHERE id=$1`, f.target)
+	result, err := f.run(issueTransferRequest{TargetStatus: "abandoned", Fingerprint: plan.Fingerprint}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsTransferBlocker(p, "status_mapping_required") {
-		t.Fatal("missing state warning")
-	}
-	p, err = f.run(issueTransferRequest{TargetStatus: "abandoned"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dbfx.Issue(t, "Existing destination issue", testutil.Cols{"workspace_id": uuidToString(f.target), "number": 8})
-	result, err := f.run(issueTransferRequest{TargetStatus: "abandoned", Fingerprint: p.Fingerprint}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Identifier != "DST-9" {
-		t.Fatalf("number collision %s", result.Identifier)
+	if result.Identifier != "DST-11" {
+		t.Fatalf("number allocation %s", result.Identifier)
 	}
 }
 
@@ -292,7 +267,7 @@ func TestIssueTransferRollbackAndNoDispatchEvents(t *testing.T) {
 	}
 	h := *testHandler
 	h.TxStarter = transferFailStarter{testPool}
-	_, err = h.runIssueTransfer(context.Background(), f.issue, f.source, f.target, f.actor, issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+	_, err = h.runIssueTransfer(context.Background(), f.issue, f.source, f.target, f.actor, issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true)
 	if err == nil {
 		t.Fatal("expected injected failure")
 	}
@@ -322,7 +297,7 @@ func TestIssueTransferRollbackAndNoDispatchEvents(t *testing.T) {
 		h.Bus.Subscribe(event, func(events.Event) { dispatch++ })
 	}
 	w := httptest.NewRecorder()
-	r := withURLParam(newRequest("POST", "/", map[string]any{"target_workspace_id": uuidToString(f.target), "fingerprint": p.Fingerprint}), "id", uuidToString(f.issue))
+	r := withURLParam(newRequest("POST", "/", map[string]any{"target_workspace_id": uuidToString(f.target), "fingerprint": p.Fingerprint, "confirm_cleanup": true}), "id", uuidToString(f.issue))
 	h.TransferIssue(w, r)
 	if w.Code != 200 || notices != 2 || dispatch != 0 {
 		t.Fatalf("status=%d notices=%d dispatch=%d response=%s", w.Code, notices, dispatch, w.Body.String())
@@ -343,7 +318,7 @@ func TestIssueTransferConcurrentWriterFailsClosed(t *testing.T) {
 	if _, err = writer.Exec(context.Background(), `LOCK TABLE attachment IN ROW EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
-	_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+	_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true)
 	if err == nil {
 		t.Fatal("concurrent relationship writer was not fenced")
 	}
@@ -360,7 +335,7 @@ func TestIssueTransferLateEnqueueDenied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err != nil {
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true); err != nil {
 		t.Fatal(err)
 	}
 	params := db.CreateAgentTaskParams{ID: parseUUID(uuid.NewString()), IssueID: f.issue, AgentID: parseUUID(agent), RuntimeID: parseUUID(testRuntimeID)}
@@ -411,27 +386,30 @@ func infoFlowTransferBinding(t *testing.T, f transferFixture, kind string) (stri
 	return binding, generation, agent
 }
 
-func TestIssueTransferBlocksActiveInfoFlowBinding(t *testing.T) {
+func TestIssueTransferRetiresActiveInfoFlowBinding(t *testing.T) {
 	requireInfoFlowTransferSchema(t)
 	for _, kind := range []string{"private", "group"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newTransferFixture(t)
 			before, err := f.run(issueTransferRequest{}, false)
-			if err != nil || len(before.Blockers) != 0 {
-				t.Fatalf("initial preview: %+v %v", before, err)
+			if err != nil {
+				t.Fatal(err)
 			}
 			binding, _, _ := infoFlowTransferBinding(t, f, kind)
-			preview, err := f.run(issueTransferRequest{}, false)
-			if err != nil || !containsTransferBlocker(preview, "infoflow_binding") {
-				t.Fatalf("active %s binding absent from blockers: %+v %v", kind, preview, err)
+			plan, err := f.run(issueTransferRequest{}, false)
+			if err != nil || len(plan.Blockers) > 0 {
+				t.Fatalf("binding prevented move: %v", err)
 			}
-			// Apply must recheck even when the binding appeared after confirmation.
+			if before.Fingerprint == plan.Fingerprint {
+				t.Fatal("new binding did not invalidate confirmation")
+			}
 			_, err = f.run(issueTransferRequest{Fingerprint: before.Fingerprint}, true)
-			expectTransferCode(t, err, "transfer_blocked")
-			var issueWorkspace, bindingWorkspace, boundIssue string
-			dbfx.QueryRow(t, `SELECT i.workspace_id::text,b.workspace_id::text,b.issue_id::text FROM issue i JOIN infoflow_issue_binding b ON b.id=$2 WHERE i.id=$1`, f.issue, binding).Scan(&issueWorkspace, &bindingWorkspace, &boundIssue)
-			if issueWorkspace != uuidToString(f.source) || bindingWorkspace != issueWorkspace || boundIssue != uuidToString(f.issue) {
-				t.Fatal("blocked transfer changed the issue or its binding")
+			expectTransferCode(t, err, "transfer_changed")
+			if _, err = f.run(issueTransferRequest{Fingerprint: plan.Fingerprint}, true); err != nil {
+				t.Fatal(err)
+			}
+			if n := dbfx.Count(t, `SELECT count(*) FROM infoflow_issue_binding WHERE id=$1 AND issue_id IS NULL AND sync_enabled=false`, binding); n != 1 {
+				t.Fatal("old conversation routing survived transfer")
 			}
 		})
 	}
@@ -462,7 +440,7 @@ func TestIssueTransferPreservesInactiveInfoFlowHistory(t *testing.T) {
 	if err != nil || len(p.Blockers) != 0 {
 		t.Fatalf("inactive history should not block transfer: %+v %v", p, err)
 	}
-	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err != nil {
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true); err != nil {
 		t.Fatal(err)
 	}
 	dbfx.QueryRow(t, historySQL, binding).Scan(&after)
@@ -486,7 +464,7 @@ func TestIssueTransferFencesConcurrentInfoFlowBindingWriter(t *testing.T) {
 	if _, err = writer.Exec(context.Background(), `LOCK TABLE infoflow_issue_binding IN ROW EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err == nil {
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true); err == nil {
 		t.Fatal("transfer ignored the in-flight InfoFlow binding writer")
 	}
 	i, err := testHandler.Queries.GetIssue(context.Background(), f.issue)
@@ -502,7 +480,7 @@ func TestIssueTransferInfoFlowRejectsStaleSourceWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err != nil {
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate a stale mapping left by an older deployment. Admission must
@@ -631,7 +609,7 @@ func TestIssueTransferInfoFlowRebindRace(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("bind did not reach the issue-read barrier")
 	}
-	_, moveErr := f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
+	_, moveErr := f.run(issueTransferRequest{Fingerprint: p.Fingerprint, ConfirmCleanup: true}, true)
 	close(release)
 	<-done
 	if moveErr != nil {

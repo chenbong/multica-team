@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { notifyUsers, mentionedReplyUsers, deliverReply, notificationText } from "./src/reply-mentions.js";
 import { sendGroupExact } from "./src/issue-groups.js";
 import { Bridge } from "./src/bridge.js";
+import { installChatInputFixture } from "./test/chat-input-fixture.js";
 import { ChatRelay } from "./src/chat.js";
 
 const group = { kind: "group", id: "13579" };
@@ -94,7 +95,7 @@ test("Chat restart retries the original combined reply without mixing requesters
     },
     chatMessages: async id => messages.filter(m => m.sessionId === id).map(m => ({ role: "assistant", task_id: m.task_id, content: `**answer ${m.task_id}**` })),
   });
-  const first = new Bridge(config, sender, { warn() {}, error() {} }); install(first);
+  const first = new Bridge(config, sender, { warn() {}, error() {} }); install(first); installChatInputFixture(first, { bypassRelay: true });
   t.after(() => { first.stop(); rmSync(dir, { recursive: true, force: true }); });
   await first.handleMessage({ conversation: group, user: "alice", text: "work one", messageId: "one", notifyUsers: ["carol", "ALICE", "carol"], acknowledge: async () => true });
   await first.handleMessage({ conversation: group, user: "bob", text: "work two", messageId: "two", notifyUsers: ["dave"], acknowledge: async () => true });
@@ -103,7 +104,7 @@ test("Chat restart retries the original combined reply without mixing requesters
   assert.equal(first.chat.state.pending["task-1"], undefined);
   assert.equal(calls.filter(c => c.content.includes("answer task-0")).length, 1);
   first.stop(); fail = false;
-  const restored = new Bridge(config, sender, { warn() {}, error() {} }); install(restored); t.after(() => restored.stop());
+  const restored = new Bridge(config, sender, { warn() {}, error() {} }); install(restored); installChatInputFixture(restored, { bypassRelay: true }); t.after(() => restored.stop());
   await restored.chat.poll();
   assert.deepEqual(restored.chat.state.pending, {});
   assert.equal(calls.filter(c => c.content.includes("answer task-0")).length, 2);

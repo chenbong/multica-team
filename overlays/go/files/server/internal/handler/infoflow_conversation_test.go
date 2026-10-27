@@ -333,7 +333,7 @@ func TestInfoFlowPrivateWebStaleResultsCannotReactivate(t *testing.T) {
 	}
 }
 
-func TestInfoFlowPendingPrivateRequestBlocksTransfer(t *testing.T) {
+func TestInfoFlowPendingPrivateRequestRetiredByTransfer(t *testing.T) {
 	f := infoFlowConversationFixture(t)
 	infoFlowConversationCall(t, f, "POST", f.owner, "", map[string]string{"kind": "private"}, 202)
 	target := dbfx.Workspace(t, "Private binding transfer destination", "private-transfer-"+uuid.NewString())
@@ -341,7 +341,13 @@ func TestInfoFlowPendingPrivateRequestBlocksTransfer(t *testing.T) {
 	dbfx.Exec(t, `INSERT INTO issue_status(workspace_id,key,name,category,color,position) VALUES($1,'cancelled','Cancelled','closed','#808080',0),($2,'cancelled','Cancelled','closed','#808080',0) ON CONFLICT DO NOTHING`, target, f.req.WorkspaceID)
 	dbfx.Exec(t, `UPDATE issue SET status='cancelled' WHERE id=$1`, f.issue)
 	preview, err := f.h.runIssueTransfer(context.Background(), parseUUID(f.issue), parseUUID(f.req.WorkspaceID), parseUUID(target), parseUUID(f.owner), issueTransferRequest{}, false)
-	if err != nil || !containsTransferBlocker(preview, "infoflow_pending_private_binding") {
-		t.Fatalf("pending private request ignored: %+v %v", preview, err)
+	if err != nil || len(preview.Blockers) != 0 {
+		t.Fatalf("pending request blocked migration: %+v %v", preview, err)
+	}
+	if _, err = f.h.runIssueTransfer(context.Background(), parseUUID(f.issue), parseUUID(f.req.WorkspaceID), parseUUID(target), parseUUID(f.owner), issueTransferRequest{Fingerprint: preview.Fingerprint, ConfirmCleanup: true, ConfirmUnassign: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	if infoFlowCount(t, `SELECT count(*) FROM infoflow_web_private_request WHERE issue_id=$1 AND state IN ('queued','pending')`, f.issue) != 0 {
+		t.Fatal("pending private request survived migration")
 	}
 }

@@ -35,7 +35,12 @@ export class Bridge {
           notificationText(url), metadata.replyProgress, metadata.saveProgress,
           `[回复提醒]\n回复已更新，请查看上一条消息。${url ? `\n完整对话链接：${url}` : ""}`);
       },
-      (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger, { replyImages });
+      (images) => stageInboundImages(images, this.logger, this.getImageAccessToken), logger, { replyImages,
+        submitMessage: async ({sessionId, agentId, content, attachmentIds, conversation, user}) => {
+          if (!this.issueRelay?.enabled) throw new Error("请管理员配置平台消息鉴权后再使用如流对话");
+          return this.issueRelay.request("chat-input", {...await this.issueRelay.scope(),agent_id:agentId,sender:user,conversation,session_id:sessionId,content,attachment_ids:attachmentIds});
+        },
+      });
     this.issueRelay = new IssueRelay(config, this.multica, sender, logger, {
       stageImages: (images) => stageInboundImages(images, this.logger, this.getImageAccessToken),
       groups: issueGroups,
@@ -84,12 +89,6 @@ export class Bridge {
       this.logger.warn("Chat submission outcome uncertain; inspect retained Chat state before retrying");
       return;
     }
-    if (!this.issueRelay.enabled && acknowledge) {
-      let confirmed = false;
-      try { confirmed = await acknowledge() === true; }
-      catch { this.logger.warn("receipt confirmation failed"); }
-      acknowledge = async () => confirmed;
-    }
     // The relay has persistent, server-side deduplication and authenticates the
     // real sender before an owner-profile command or Chat fallback. A receipt
     // only confirms the SDK message was received, never grants invocation.
@@ -106,6 +105,12 @@ export class Bridge {
       if (conversation.kind === "private") {
         await this.reply(conversation, user, "你还没有被授权使用这个机器人，请联系它的部署者把你加入允许名单。");
       }
+      return;
+    }
+
+    if (!this.issueRelay.enabled && body !== "/help" && body !== "/new") {
+      await this.reply(conversation, user, "平台消息鉴权暂不可用，请联系管理员配置后再使用。");
+      if (messageId) this.#alreadyHandled(messageId);
       return;
     }
 
@@ -273,12 +278,15 @@ export class Bridge {
     const description = staged.failed.length === 0 ? body : body + "\n\n图片附件处理失败：\n" + failureNote;
     let issue;
     try {
-      issue = await this.multica.createIssue({
-        title: titleFrom(body),
-        description,
-        assignee,
-        attachments: staged.paths,
-      });
+      if (!this.issueRelay?.enabled) throw new Error("请管理员配置平台消息鉴权后再使用如流对话");
+      const agent = boundAgent || await this.multica.resolveAgent(assignee);
+      const attachmentIds = [];
+      for (const path of staged.paths) {
+        const attachment = await this.multica.uploadChatImage("", path);
+        if (!attachment.id) throw new Error("图片上传未返回附件 ID");
+        attachmentIds.push(attachment.id);
+      }
+      issue = await this.issueRelay.request("chat-input", {...await this.issueRelay.scope(),agent_id:agent.id,sender:user,conversation,create_issue:true,title:titleFrom(body),content:description,attachment_ids:attachmentIds});
     } finally {
       await staged.cleanup();
     }

@@ -68,6 +68,8 @@ overlay 文件；仓库可直接公开，部署相关的主机、端口、密钥
     「添加电脑」下发的命令同样可以预置这一行（`deploy/host.env` 里的
     `MULTICA_DAEMON_RUNTIME_SHIM_DEFAULTS=ducc`），用户复制即可，无需在每台机器上手工维护脚本。
 
+任务管理员、跨工作区只读上下文、扩展迁移、项目工作目录、个人额度及私有附件存储见 [协作与存储说明](docs/collaboration-and-storage.md)。
+
 ## 可选：OneAPI 模型目录
 
 API 服务可为 `ducc`（Claude 协议）和 `ducx`（Codex 协议）的模型下拉框直接查询 OneAPI，
@@ -104,10 +106,13 @@ Extra high、Max 五个思考选项，沿用 Claude/Codex 的值和标签；未�
 
 ## 可选：侧栏快捷入口
 
-侧栏底部“常用链接”位于统计上方，默认收起，向上浮出展开且不移动底部按钮；包含手机控制链接（点击复制）、OneAPI 降智探测、
-快速上手和官方文档。“如流交流群”保留为统计上方的独立固定按钮，不随常用链接收起；原问号按钮已移除。
-构建时通过 `MULTICA_ONEAPI_TRACE_URL`、`MULTICA_QUICKSTART_URL`、`MULTICA_INFOFLOW_USER_GROUP_URL` 配置部署相关地址，
-真实内网地址不入库。外部链接仅接受无用户名、密码的 HTTPS 地址，并在新标签页打开。
+侧栏底部“常用链接”默认收起，包含统计、OneAPI 降智探测、快速上手和官方文档；
+“如流交流群”保留为独立入口。手机控制链接已移除。
+个人 OneAPI 额度在“设置”下方占满整行，显示用量和完整进度条，每 10 分钟刷新；
+点击后在新标签页打开配置的账号页面。
+构建时通过 `MULTICA_ONEAPI_TRACE_URL`、`MULTICA_ONEAPI_ACCOUNT_URL`、`MULTICA_QUICKSTART_URL`、
+`MULTICA_INFOFLOW_USER_GROUP_URL` 配置部署相关地址，真实内网地址不入库。
+外部链接仅接受无用户名、密码的 HTTPS 地址，并在新标签页打开。
 登录页在标题正下方、登录说明上方，居中同排展示“快速上手”和“如流交流群”，复用上述构建配置。
 
 8002 的新增机器人表单仅列出登录账号自己创建的智能体（`owner_id`），保存接口也进行
@@ -575,3 +580,14 @@ CLI/daemon 走 tag 发版（`v*.*.*` → CI 构建 + Release），服务端与 W
 
 保持升级到最新的办法就是让客户端装最新 Release（`scripts/install.sh` 默认取 Latest，或按
 `MULTICA_VERSION` 指定）；daemon 侧的自动跟随见上一节。
+
+## v0.6.1-overlay.7：项目工作目录客户端支持
+
+项目可以仅配置一个绝对路径，无需选择机器。支持此版本的 daemon 会在实际执行机器上
+检查目录：存在且可读写时直接使用，缺失时沿用原来的默认工作目录；不会自动创建指定目录。
+路径实际为文件、不可访问或属于不允许的系统根目录时明确报错。原有按机器配置仍保留，
+项目级路径配置存在时优先采用它；移除后恢复原有配置。
+
+此能力需要 API/Web 与 daemon 配套，旧 daemon 会收到明确的升级提示，不会忽略目录配置执行。
+本版 Release 以非 Latest 的正式版本发布，供指定版本安装；不改变现有客户端自动更新的目标。
+只有明确授权自动推广后才将它设为 Latest。升级客户端时保留原有 profile、配置和任务目录。

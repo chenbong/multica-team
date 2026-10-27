@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS attachment_storage_alias_identity_idx ON attachment_storage_alias(legacy_key,attachment_id);

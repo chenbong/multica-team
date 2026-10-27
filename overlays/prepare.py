@@ -78,6 +78,10 @@ def main() -> None:
     generated = ws_origin["extend"](UPSTREAM, FILES, generated)
     http_origin = runpy.run_path(str(HERE / "http-origin-go.py"))
     generated = http_origin["extend"](UPSTREAM, FILES, generated)
+    six_features = runpy.run_path(str(HERE / "team-features-go.py"))
+    generated = six_features["extend"](UPSTREAM, FILES, generated)
+    project_directory = runpy.run_path(str(HERE / "project-working-directory.py"))
+    generated = project_directory["extend"](UPSTREAM, FILES, generated)
     for rel, text in generated:
         source = UPSTREAM / rel
         override = HERE / ".generated" / rel

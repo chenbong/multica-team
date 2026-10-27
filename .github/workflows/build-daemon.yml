@@ -94,6 +94,16 @@ jobs:
           go test -overlay="$workspace/overlays/go-overlay.json" ./pkg/agent -run '^TestOneAPI' -count=1
           go test -overlay="$workspace/overlays/go-overlay.json" ./internal/daemon -run '^TestOneAPIThinking' -count=1
 
+      - name: Test project-wide directory selection and missing-path fallback
+        working-directory: multica/server
+        env:
+          MULTICA_RUN_REAL_AGENT_SMOKE: "0"
+        run: |
+          set -euo pipefail
+          workspace="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+          go test -race -overlay="$workspace/overlays/go-overlay.json" ./internal/daemon \
+            -run '^Test(ProjectDirectory|FindLocalDirectoryAssignment|AcquireLocalDirectoryLock)' -count=1
+
       - name: Fail if the build touched the upstream checkout
         run: |
           set -euo pipefail
@@ -261,3 +271,7 @@ jobs:
             dist/multica-cli-*
             dist/checksums.txt
           generate_release_notes: true
+          # Publication is opt-in for existing clients: their updater and the
+          # default installer read /releases/latest. Promote separately only
+          # when automatic rollout is explicitly authorized.
+          make_latest: "false"

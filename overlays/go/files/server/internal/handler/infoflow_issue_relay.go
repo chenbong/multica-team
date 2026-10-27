@@ -634,7 +634,20 @@ func (h *Handler) InfoFlowIssueRelay(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !acceptedBeforeUnbind && req.ExpectedBindingID == "" && req.ExpectedGeneration == "" {
-			out := infoFlowRelayResponse{ConversationMode: "chat"}
+			actual, _, identityErr := sh.infoFlowIdentity(r.Context(), req.Sender, req.WorkspaceID)
+			if identityErr != nil {
+				if !errors.Is(identityErr, pgx.ErrNoRows) {
+					infoFlowError(w, 503, "chat identity validation failed")
+					return
+				}
+				writeJSON(w, 200, infoFlowRelayResponse{Handled: true, Notice: "没有工作区权限，无法与此智能体对话，请联系工作区管理员"})
+				return
+			}
+			if !sh.canInvokeAgent(r.Context(), agent, "member", uuidToString(actual.ID), "", req.WorkspaceID) {
+				writeJSON(w, 200, infoFlowRelayResponse{Handled: true, Notice: "没有调用此智能体的权限，请联系智能体所有者"})
+				return
+			}
+			out := infoFlowRelayResponse{ConversationMode: "chat", CanComment: true}
 			if req.Operation == "binding" && req.Command != "" {
 				out.Handled = true
 				out.Notice = "当前会话没有绑定任务"

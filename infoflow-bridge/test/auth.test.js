@@ -25,15 +25,15 @@ test("admin sessions survive a bridge restart while codes stay one-time", async 
 
   try {
     const auth = makeAuth();
-    await auth.requestCode("chenbohong@baidu.com");
+    await auth.requestCode("fixture-user@baidu.com");
     const code = sent[0].match(/[0-9]{6}/)?.[0];
     assert.ok(code);
 
-    const login = auth.verify("chenbohong@baidu.com", code);
+    const login = auth.verify("fixture-user@baidu.com", code);
     assert.equal(login.maxAgeSeconds, 30 * 24 * 60 * 60);
-    assert.equal(auth.session(login.token)?.email, "chenbohong@baidu.com");
+    assert.equal(auth.session(login.token)?.email, "fixture-user@baidu.com");
     assert.throws(
-      () => auth.verify("chenbohong@baidu.com", code),
+      () => auth.verify("fixture-user@baidu.com", code),
       /先获取验证码/,
     );
 
@@ -43,7 +43,7 @@ test("admin sessions survive a bridge restart while codes stay one-time", async 
     assert.equal(persisted.sessions[0].tokenHash.includes(login.token), false);
 
     const restarted = makeAuth();
-    assert.equal(restarted.session(login.token)?.email, "chenbohong@baidu.com");
+    assert.equal(restarted.session(login.token)?.email, "fixture-user@baidu.com");
 
     restarted.logout(login.token);
     const afterLogout = makeAuth();

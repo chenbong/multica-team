@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Bridge } from "./src/bridge.js";
+import { installChatInputFixture } from "./test/chat-input-fixture.js";
 import { acknowledgeReceipt } from "./src/reactions.js";
 
 function fixture(t, kind) {
@@ -22,6 +23,7 @@ function fixture(t, kind) {
       sendChatMessage: async (_id, content) => { submissions.push(content); return { task_id: "task" }; },
       chatSession: async () => ({ status: "active" }), chatMessages: async () => [],
     });
+    installChatInputFixture(b);
     t.after(() => b.stop());
     return b;
   };

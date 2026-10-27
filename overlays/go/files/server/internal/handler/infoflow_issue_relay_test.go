@@ -134,7 +134,7 @@ func TestInfoFlowConversationModeIsMetadataOnly(t *testing.T) {
 			lookup := req
 			lookup.Operation, lookup.MessageID = "binding", ""
 			lookup.IssueRef = ""
-			if got := infoFlowCall(t, f.h, lookup, 200); got.ConversationMode != "chat" || got.Binding != nil {
+			if got := infoFlowCall(t, f.h, lookup, 200); !got.Handled || got.CanComment || !strings.Contains(got.Notice, "调用此智能体") || got.Binding != nil {
 				t.Fatalf("unbound mode: %+v", got)
 			}
 			gotBind := infoFlowCall(t, f.h, req, 200)
@@ -270,7 +270,7 @@ func TestInfoFlowDisabledAndMalformedIdentity(t *testing.T) {
 	infoFlowCall(t, f.h, f.req, 503)
 }
 
-func TestInfoFlowUnboundChatBypassKeepsAcceptedReplaysOwned(t *testing.T) {
+func TestInfoFlowUnboundChatRequiresMembershipAndKeepsAcceptedReplaysOwned(t *testing.T) {
 	f := newInfoFlowFixture(t)
 	outsider := "outsider-" + uuid.NewString()
 	dbfx.User(t, "Nonmember fixture", outsider+"@example.test")
@@ -280,16 +280,16 @@ func TestInfoFlowUnboundChatBypassKeepsAcceptedReplaysOwned(t *testing.T) {
 	for _, sender := range []string{outsider, "unmapped-" + uuid.NewString()} {
 		req.Sender = sender
 		req.MessageID = uuid.NewString()
-		if out := infoFlowCall(t, f.h, req, 200); out.Handled || out.Binding != nil || out.Notice != "" {
-			t.Fatalf("new unbound nonmember was denied: %+v", out)
+		if out := infoFlowCall(t, f.h, req, 200); !out.Handled || out.CanComment || out.Binding != nil || !strings.Contains(out.Notice, "没有工作区权限") {
+			t.Fatalf("new unbound nonmember bypassed membership: %+v", out)
 		}
 		preflight := req
 		preflight.Operation = "binding"
-		if out := infoFlowCall(t, f.h, preflight, 200); out.Handled || out.Binding != nil {
-			t.Fatalf("unbound preflight denied: %+v", out)
+		if out := infoFlowCall(t, f.h, preflight, 200); !out.Handled || out.CanComment || out.Binding != nil {
+			t.Fatalf("unbound preflight bypassed membership: %+v", out)
 		}
 		preflight.Command = "/binding"
-		if out := infoFlowCall(t, f.h, preflight, 200); !out.Handled || out.Notice != "当前会话没有绑定任务" {
+		if out := infoFlowCall(t, f.h, preflight, 200); !out.Handled || !strings.Contains(out.Notice, "没有工作区权限") {
 			t.Fatalf("explicit unbound lookup: %+v", out)
 		}
 	}
@@ -329,8 +329,8 @@ func TestInfoFlowUnboundChatBypassKeepsAcceptedReplaysOwned(t *testing.T) {
 	}
 	accepted.MessageID = uuid.NewString()
 	accepted.ExpectedBindingID, accepted.ExpectedGeneration = "", ""
-	if out := infoFlowCall(t, f.h, accepted, 200); out.Handled {
-		t.Fatalf("new unbound traffic still gated: %+v", out)
+	if out := infoFlowCall(t, f.h, accepted, 200); !out.Handled || out.CanComment {
+		t.Fatalf("new unbound traffic bypassed revoked membership: %+v", out)
 	}
 	for _, operation := range []string{"bind", "create", "unbind"} {
 		command := accepted
@@ -369,11 +369,11 @@ func TestInfoFlowCreateMediaPreflightIsAuthorizedAndReadOnly(t *testing.T) {
 	if infoFlowCount(t, `SELECT count(*) FROM infoflow_issue_binding WHERE robot_id=$1`, f.req.RobotID) != 0 || infoFlowCount(t, `SELECT count(*) FROM agent_task_queue WHERE agent_id=$1`, f.req.AgentID) != 0 || infoFlowCount(t, `SELECT count(*) FROM attachment WHERE uploader_id=$1`, f.owner) != 0 {
 		t.Fatal("create preflight performed a mutation")
 	}
-	// A normal unbound message/preflight remains on the legacy Chat path.
+	// Unbound Chat must preserve the real sender invocation gate.
 	denied.Command = ""
 	denied.IssueRef = ""
-	if out := infoFlowCall(t, f.h, denied, 200); out.Handled {
-		t.Fatalf("ordinary preflight changed: %+v", out)
+	if out := infoFlowCall(t, f.h, denied, 200); !out.Handled || out.CanComment || !strings.Contains(out.Notice, "调用此智能体") {
+		t.Fatalf("ordinary preflight bypassed invocation gate: %+v", out)
 	}
 }
 

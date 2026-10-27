@@ -31,6 +31,9 @@ ZH = {
  "defaults":"运行时默认值","close":"关闭","choose_runtime":"选择运行时",
 }
 
+COPY["copy_description"] = "Start with an existing agent's configuration."
+ZH["copy_description"] = "基于已有智能体的配置创建。"
+
 def extend(changes):
  def add(path,old,new):changes.setdefault(path,[]).append((old,new))
  picker="packages/views/agents/components/runtime-picker.tsx"
@@ -94,8 +97,6 @@ def extend(changes):
  add("packages/core/api/client.ts","  // Agents\n",methods+"\n  // Agents\n")
  add("packages/views/settings/components/account-tab.tsx",'import { useAutoSave } from "./use-auto-save";','import { useAutoSave } from "./use-auto-save";\nimport { PersonalSecretsSection } from "./personal-secrets-section";')
  add("packages/views/settings/components/account-tab.tsx","    </SettingsTab>","      <PersonalSecretsSection key={user?.id} />\n    </SettingsTab>")
- add("packages/views/agents/create/choose-create-method-page.tsx",'import { withSquadParam } from "./squad-param";','import { withSquadParam } from "./squad-param";\nimport {CopyAgentChooser} from "./copy-agent-chooser";')
- add("packages/views/agents/create/choose-create-method-page.tsx","      </div>\n    </div>\n  );","      </div>\n      <CopyAgentChooser blankHref={blankHref}/>\n    </div>\n  );")
  add("packages/views/agents/create/use-duplicate-draft-seed.ts",'import { useEffect, useRef } from "react";','import { useEffect, useRef } from "react";\nimport {safeCopyDraft} from "@multica/core/agents/safe-copy";')
  add("packages/views/agents/create/use-duplicate-draft-seed.ts",'import { buildDuplicateDraft, type AgentDraft }','import { type AgentDraft }')
  add("packages/views/agents/create/use-duplicate-draft-seed.ts","    onSeedRef.current(draft, draft.runtimeId !== source.runtime_id);","    onSeedRef.current(draft, false);")

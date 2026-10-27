@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS project_working_directory_identity_idx;

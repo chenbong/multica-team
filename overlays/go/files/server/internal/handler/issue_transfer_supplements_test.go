@@ -86,35 +86,42 @@ func TestIssueTransferSupplementTerminalCapabilityHistory(t *testing.T) {
 	}
 }
 
-func TestIssueTransferSupplementActiveAndReceiptGuards(t *testing.T) {
+func TestIssueTransferSupplementActiveAndReceiptCleanup(t *testing.T) {
 	for _, status := range []string{"queued", "dispatched", "waiting_local_directory", "deferred", "running"} {
 		t.Run(status, func(t *testing.T) {
 			f := newTransferFixture(t)
-			transferSupplementRun(t, f, status, true)
-			p, err := f.run(issueTransferRequest{}, false)
-			if err != nil || !containsTransferBlocker(p, "active_or_linked_runs") {
-				t.Fatalf("active run not blocked: %+v %v", p, err)
+			task := transferSupplementRun(t, f, status, true)
+			plan, err := f.run(issueTransferRequest{}, false)
+			if err != nil || len(plan.Blockers) > 0 {
+				t.Fatalf("active capability blocked: %v", err)
 			}
-			_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
-			expectTransferCode(t, err, "transfer_blocked")
+			if _, err = f.run(issueTransferRequest{Fingerprint: plan.Fingerprint}, true); err != nil {
+				t.Fatal(err)
+			}
+			if n := dbfx.Count(t, `SELECT count(*) FROM agent_task_queue WHERE id=$1 AND status='cancelled'`, task); n != 1 {
+				t.Fatal("active capability run survived")
+			}
 		})
 	}
-	// Actual supplement receipts keep their existing protection, including
-	// late delivery reconciliation. This fix only relaxes pure capability data.
 	for _, status := range []string{"pending", "delivering", "delivered", "failed"} {
 		t.Run("receipt_"+status, func(t *testing.T) {
 			f := newTransferFixture(t)
 			task := transferSupplementRun(t, f, "cancelled", true)
-			comment := dbfx.Comment(t, uuidToString(f.issue), "Existing additional input")
+			comment := dbfx.Comment(t, uuidToString(f.issue), "Preserve supplement input")
 			dbfx.InsertNoID(t, "task_supplement", testutil.Cols{"task_id": task, "workspace_id": uuidToString(f.source), "issue_id": uuidToString(f.issue), "comment_id": comment, "author_id": testUserID, "client_request_id": uuid.NewString(), "status": status}, "task_id=$1 AND comment_id=$2", task, comment)
-			p, err := f.run(issueTransferRequest{}, false)
-			if err != nil || !containsTransferBlocker(p, "automation_or_sources") {
-				t.Fatalf("receipt protection lost: %+v %v", p, err)
+			plan, err := f.run(issueTransferRequest{}, false)
+			if err != nil || len(plan.Blockers) > 0 {
+				t.Fatalf("valid receipt blocked: %v", err)
 			}
-			_, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true)
-			expectTransferCode(t, err, "transfer_blocked")
-			if n := dbfx.Count(t, `SELECT count(*) FROM task_supplement WHERE task_id=$1 AND workspace_id=$2 AND status=$3`, task, f.source, status); n != 1 {
-				t.Fatal("blocked transfer altered the receipt")
+			if _, err = f.run(issueTransferRequest{Fingerprint: plan.Fingerprint}, true); err != nil {
+				t.Fatal(err)
+			}
+			want := status
+			if status == "pending" || status == "delivering" {
+				want = "failed"
+			}
+			if n := dbfx.Count(t, `SELECT count(*) FROM task_supplement WHERE task_id=$1 AND workspace_id=$2 AND status=$3`, task, f.target, want); n != 1 {
+				t.Fatal("receipt cleanup or preserved history incorrect")
 			}
 		})
 	}

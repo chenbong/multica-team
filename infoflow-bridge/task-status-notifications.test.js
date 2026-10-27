@@ -1,3 +1,4 @@
+import { installChatInputFixture } from "./test/chat-input-fixture.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
@@ -33,12 +34,14 @@ for (const kind of ["private", "group"]) test(`${kind} task completion replies r
   const bridge = new Bridge(config, async (destination, content) => { sent.push({ destination, content }); }, quiet);
   t.after(() => { bridge.stop(); rmSync(dir, { recursive: true, force: true }); });
   Object.assign(bridge.multica, {
+    listAgents: async () => [{ id: "fixture-agent-id", name: "fixture-agent" }],
     createIssue: async () => ({ id: "issue", identifier: "TEST-1", status: "in_review" }),
     runs: async () => [{ id: "run", status: "completed" }],
     comments: async () => [{ id: "comment", author_type: "agent", source_task_id: "run", content: "Completion answer" }],
     getIssue: async () => { throw new Error("Retired notification handoff must not suppress replies"); },
     request: async () => { throw new Error("No proactive status scan is allowed"); },
   });
+  installChatInputFixture(bridge, { bypassRelay: true });
   await bridge.handleMessage({ conversation, user: "alice", text: "/issue Do a fixture task", messageId: "123" });
   assert.equal(sent.length, 2); // A group answer also has a native AT reminder.
   assert(sent.every(message => message.destination === conversation));

@@ -1,6 +1,12 @@
 import { z } from "zod";
 
 export const IssueTransferPlanSchema = z.object({
+  affected_issues: z.number().int().positive().default(1),
+  issue_ids: z.array(z.string().uuid()).default([]),
+  include_subissues: z.boolean().default(false),
+  requires_cleanup: z.boolean().default(false),
+  status_mappings: z.array(z.object({source:z.string(),name:z.string(),target:z.string()})).default([]),
+  warnings: z.array(z.string()).default([]),
   issue_id: z.string().uuid(),
   source_workspace_id: z.string().uuid(),
   target_workspace_id: z.string().uuid(),
@@ -27,4 +33,7 @@ export interface IssueTransferRequest {
   target_status?: string;
   fingerprint?: string;
   confirm_unassign?: boolean;
+  confirm_cleanup?: boolean;
+  include_subissues?: boolean;
+  status_mappings?: Record<string,string>;
 }

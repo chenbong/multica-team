@@ -121,7 +121,7 @@ export class Multica {
     const type = { ".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" }[extname(path)] || "application/octet-stream";
     const form = new FormData();
     form.append("file", new Blob([await readFile(path)], { type }), basename(path));
-    form.append("chat_session_id", sessionId);
+    if (sessionId) form.append("chat_session_id", sessionId);
     return this.request("/api/upload-file", { method: "POST", body: form });
   }
 

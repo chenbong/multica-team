@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Bridge } from "./src/bridge.js";
+import { installChatInputFixture } from "./test/chat-input-fixture.js";
 import { issueRequest, ChatRelay } from "./src/chat.js";
 
 test("explicit creation only; negation, quotes and progress remain chat", () => {
@@ -32,6 +33,7 @@ function fixture(t) {
     comments: async () => [],
     getIssue: async () => ({ id: "i", identifier: "TEST-1", title: "test" }),
   });
+  installChatInputFixture(bridge, { bypassRelay: true });
   t.after(() => { bridge.stop(); rmSync(dir, { recursive: true, force: true }); });
   const send = (text, user = "alice", id = "private") => bridge.handleMessage({ text, user, conversation: { kind: "private", id: id + user }, messageId: "m" + Math.random() });
   return { bridge, config, replies, sessions, messages, issues, send };

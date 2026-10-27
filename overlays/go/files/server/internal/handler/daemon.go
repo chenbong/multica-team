@@ -2054,6 +2054,11 @@ func (h *Handler) finalizeClaimDelivery(
 		// its current owner as the task-token identity rather than the stale
 		// claim-time snapshot captured by the caller.
 		tokenParams.UserID = locked.OwnerID
+		if agent.OwnerID.Valid {
+			if err := qtx.BindAgentOwnerReadScope(ctx, tokenParams.TokenHash, task.ID, agent.ID, agent.OwnerID, tokenParams.WorkspaceID); err != nil {
+				return fmt.Errorf("bind agent owner read scope: %w", err)
+			}
+		}
 		return nil
 	}
 
@@ -3592,12 +3597,13 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// user asked to isolate. That is the exact outcome worktree mode exists to
 	// prevent, so it fails closed here, against the version of the runtime that
 	// is actually claiming.
-	if reason := worktreeClaimBlockReason(
-		resp.ProjectResources,
+	if reason := projectDirectoryClaimBlockReason(
+		projectDirectoryResourcesForRun(resp.ProjectResources, task.IsLeaderTask),
 		runtime,
 		requestHasClientCapability(r, protocol.DaemonCapabilityLocalWorktreeV1),
+		requestHasClientCapability(r, protocol.DaemonCapabilityProjectWorkingDirectoryV1),
 	); reason != "" {
-		slog.Error("task claim: runtime too old for worktree mode; cancelling rather than running in place",
+		slog.Error("task claim: project directory requirements not met; cancelling before execution",
 			"task_id", uuidToString(task.ID),
 			"runtime_id", runtimeID,
 			"daemon_id", runtime.DaemonID.String,

@@ -905,6 +905,7 @@ runpy.run_path(str(HERE / "onetool-skill-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "personal-machine-name-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "platform-expansion-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "public-live-web-patch.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "team-features-web.py"))["extend"](CHANGES)
 
 
 def apply_patches():

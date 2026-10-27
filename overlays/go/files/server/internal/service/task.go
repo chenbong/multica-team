@@ -2617,7 +2617,7 @@ func (s *TaskService) OpenMikaOnboardingChat(ctx context.Context, session db.Cha
 // agent stuck at status="working" indefinitely, requiring a manual
 // `multica agent update <id> --status idle` to unwedge. It now reconciles agent
 // status and broadcasts task:cancelled, matching CancelTask and RerunIssue.
-func (s *TaskService) CancelTasksForIssue(ctx context.Context, issueID pgtype.UUID) error {
+func (s *TaskService) cancelTasksForIssue(ctx context.Context, issueID pgtype.UUID, scope *issueDeleteCancellationScope) error {
 	var cancelled []db.AgentTaskQueue
 	// The cancel and its settlement commit together: a settlement that failed
 	// after the cancel committed could never be repaired, because the outbox
@@ -2626,6 +2626,14 @@ func (s *TaskService) CancelTasksForIssue(ctx context.Context, issueID pgtype.UU
 	// partial index forever.
 	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
 		var err error
+		if scope != nil {
+			if err = qtx.LockManagedIssueForHumanDeletion(ctx, issueID, scope.workspace, scope.user); err != nil {
+				return err
+			}
+			if _, err = qtx.FailAutopilotRunsByIssue(ctx, issueID); err != nil {
+				return err
+			}
+		}
 		cancelled, err = qtx.CancelAgentTasksByIssue(ctx, issueID)
 		if err != nil {
 			return err

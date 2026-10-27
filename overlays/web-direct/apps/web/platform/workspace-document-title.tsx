@@ -4,7 +4,11 @@ import { useEffect, useMemo } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { parseTabSubject } from "@multica/core/paths";
 import { useTabPresentation } from "@multica/views/layout";
-import { SITE_TITLE, formatDocumentTitle } from "./document-title";
+import {
+  SITE_TITLE,
+  formatDocumentTitle,
+  normalizeDocumentTitleWhitespace,
+} from "./document-title";
 
 /**
  * Names the browser tab after whatever the workspace route has open, e.g.
@@ -36,8 +40,9 @@ export function WorkspaceDocumentTitle() {
 
   // An unrecognized URL gets the site title, never the "Unknown page" label a
   // tab strip needs: a browser tab has no other place to show the product name.
-  const documentTitle =
-    subject.kind === "unknown" ? SITE_TITLE : formatDocumentTitle(title);
+  const documentTitle = normalizeDocumentTitleWhitespace(
+    subject.kind === "unknown" ? SITE_TITLE : formatDocumentTitle(title),
+  );
 
   // `url` is a dependency even though `documentTitle` is what we write: an app
   // router navigation re-renders the target route's metadata and resets
@@ -45,14 +50,29 @@ export function WorkspaceDocumentTitle() {
   // happen to share a title (`/inbox` → `/inbox?view=archived`) has to
   // re-assert it.
   useEffect(() => {
-    const applyTitle = () => {
-      if (document.title !== documentTitle) document.title = documentTitle;
+    const observer = new MutationObserver(() => applyTitle());
+    const observe = () => {
+      observer.observe(document.head, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
     };
+    const applyTitle = () => {
+      if (document.title === documentTitle) return;
+      // Observe external metadata changes, not our own correction. Normalizing
+      // the target also keeps the getter and setter on the same HTML contract.
+      observer.disconnect();
+      try {
+        document.title = documentTitle;
+      } finally {
+        observe();
+      }
+    };
+    observe();
     applyTitle();
     // App Router metadata can arrive after this effect during client navigation.
     // Observe the head only, and stop on navigation/unmount to avoid stale titles.
-    const observer = new MutationObserver(applyTitle);
-    observer.observe(document.head, { childList: true, subtree: true, characterData: true });
     return () => observer.disconnect();
   }, [documentTitle, url]);
 
@@ -60,7 +80,7 @@ export function WorkspaceDocumentTitle() {
   // back to the site title so the stale issue name never outlives its page.
   useEffect(() => {
     return () => {
-      document.title = SITE_TITLE;
+      document.title = normalizeDocumentTitleWhitespace(SITE_TITLE);
     };
   }, []);
 

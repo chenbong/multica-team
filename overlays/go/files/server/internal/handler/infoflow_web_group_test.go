@@ -469,17 +469,19 @@ func TestInfoFlowWebGroupRenameKeepsPendingGeneration(t *testing.T) {
 	infoFlowWebResultCall(t, f, infoFlowWebSuccess(f, next[0]), 200)
 }
 
-func TestInfoFlowWebGroupPendingBlocksIssueTransfer(t *testing.T) {
+func TestInfoFlowWebGroupPendingRetiredByIssueTransfer(t *testing.T) {
 	f := newTransferFixture(t)
 	id := dbfx.Insert(t, "infoflow_web_group_request", testutil.Cols{"id": uuid.NewString(), "issue_id": f.issue, "workspace_id": f.source, "group_id": "543210", "requester_id": f.actor, "generation": uuid.NewString(), "topology": "{}", "state": "queued", "expires_at": testutil.Raw("clock_timestamp()+interval '10 minutes'")})
 	p, err := f.run(issueTransferRequest{}, false)
-	if err != nil || !containsTransferBlocker(p, "infoflow_pending_binding") {
-		t.Fatalf("pending web binding moved: %+v %v", p, err)
+	if err != nil || len(p.Blockers) != 0 {
+		t.Fatalf("pending request blocked migration: %+v %v", p, err)
 	}
-	dbfx.Exec(t, `UPDATE infoflow_web_group_request SET state='failed' WHERE id=$1`, id)
-	p, err = f.run(issueTransferRequest{}, false)
-	if err != nil || containsTransferBlocker(p, "infoflow_pending_binding") {
-		t.Fatal("failed request incorrectly blocked transfer", err)
+	dbfx.Exec(t, `UPDATE infoflow_web_group_request SET lease_token=$2,lease_until=now()+interval '1 minute',updated_at=now() WHERE id=$1`, id, uuid.NewString())
+	if _, err = f.run(issueTransferRequest{Fingerprint: p.Fingerprint}, true); err != nil {
+		t.Fatal("lease renewal invalidated migration", err)
+	}
+	if n := infoFlowCount(t, `SELECT count(*) FROM infoflow_web_group_request WHERE id=$1 AND state='failed'`, id); n != 1 {
+		t.Fatal("pending group request survived migration")
 	}
 }
 

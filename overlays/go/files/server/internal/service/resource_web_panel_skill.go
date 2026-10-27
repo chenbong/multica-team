@@ -14,6 +14,8 @@ func withResourceWebPanelSkill(skills []AgentSkillData) []AgentSkillData {
 		skills[index].Content = strings.Replace(skills[index].Content, "| `references/issues.md` | Issues:", "| `references/task-panels.md` | Add a web page to the current issue panel when the user requests it; workspace panels stay manual |\n| `references/issues.md` | Issues:", 1)
 		skills[index].Files = append(skills[index].Files, AgentSkillFileData{Path: "references/task-panels.md", Content: resourceWebPanelSkillReference}, AgentSkillFileData{Path: "references/personal-secrets.md", Content: personalSecretsSkillReference}, AgentSkillFileData{Path: "scripts/team-mesh-tools.py", Content: platformExpansionTools})
 		skills[index].Content += "\nFor personal credentials needed for a user-requested operation, read references/personal-secrets.md. Never disclose secret values.\n"
+		skills[index].Files = append(skills[index].Files, AgentSkillFileData{Path: "references/managed-issues.md", Content: ownerManagedIssuesSkillReference})
+		skills[index].Content += "\nFor task context across workspaces, read references/managed-issues.md and use the read-only owner-managed-issues tools. Task deletion and administrator changes require a human.\n"
 	}
 	return skills
 }

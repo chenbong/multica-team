@@ -206,7 +206,7 @@ test("failed /help notification retries, while accepted /agent change does not r
   assert.equal(Object.keys(restored.issueRelay.inbox).length, 0);
 });
 
-test("Chat without relay still quarantines uncertain POSTs across restart and later issue binding", async t => {
+test("Chat without sender authorization never submits and stays rejected after restart and binding", async t => {
   const f = fixture(t); f.config.issueRelay.enabled = false;
   const first = f.make(); let submissions = 0;
   first.chat.send = async (...args) => { args[7].beforeSubmit(); submissions++; throw new Error("POST outcome unknown"); };
@@ -214,10 +214,10 @@ test("Chat without relay still quarantines uncertain POSTs across restart and la
   f.config.issueRelay.enabled = true; f.state.binding = binding(1);
   const restored = f.make();
   await restored.handleMessage(f.message("uncertain input"));
-  assert.equal(submissions, 1); assert.deepEqual(f.state.requests, []); assert.deepEqual(f.state.comments, []);
+  assert.equal(submissions, 0); assert.deepEqual(f.state.requests, []); assert.deepEqual(f.state.comments, []);
 });
 
-test("Chat without relay retries pre-submit failure and only records completion after acceptance", async t => {
+test("Chat without sender authorization never calls an owner-profile fallback", async t => {
   const f = fixture(t); f.config.issueRelay.enabled = false;
   const bridge = f.make();
   bridge.chat.send = async () => { throw new Error("lookup failure before POST"); };
@@ -226,7 +226,7 @@ test("Chat without relay retries pre-submit failure and only records completion 
   bridge.chat.send = async (...args) => { args[7].beforeSubmit(); submissions++; args[7].afterSubmit(); };
   await bridge.handleMessage(f.message("safe retry"));
   await bridge.handleMessage(f.message("safe retry"));
-  assert.equal(submissions, 1); assert.deepEqual(bridge.state.uncertainChatMessageIds, []);
+  assert.equal(submissions, 0); assert.deepEqual(bridge.state.uncertainChatMessageIds, []);
 });
 
 test("committed receipt can be replayed after unbind without a fresh preflight or Chat fallback", async t => {
