@@ -53,6 +53,7 @@ jobs:
         run: |
           python3 -m unittest discover -s deploy -p test_daily_bos_backup.py -v
           python3 -m unittest discover -s deploy -p test_backup_host_runner.py -v
+          node --test deploy/test_backup_success_notice.mjs
       - name: Verify standalone restart credentials and private state exclusions
         run: |
           python3 -m unittest discover -s infoflow-bridge/test -p 'test_bridgectl.py' -v
@@ -108,6 +109,7 @@ jobs:
           MULTICA_WEB_TARGET="$PWD/build/group-web" python3 overlays/web-patch.py apply
           cd build/group-web
           pnpm install --filter '@multica/web...' --frozen-lockfile
+          npm ci --prefix apps/web/compat --ignore-scripts
       - name: Verify group entry and API boundary
         run: |
           set -euo pipefail
