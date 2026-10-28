@@ -4,16 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/multica-ai/multica/server/internal/auth"
 )
 
 func TestTmeshMachineEndpointsThroughRouter(t *testing.T) {
+	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("[{\"tag_name\":\"v0.6.1-overlay.10\",\"published_at\":\"2026-10-28T01:00:00Z\"}]"))
+	}))
+	defer releases.Close()
+	t.Setenv("MULTICA_MACHINE_RELEASE_API_URL", releases.URL)
+	version := authRequest(t, "GET", "/api/tmesh/releases/latest", nil)
+	versionBody, _ := io.ReadAll(version.Body)
+	version.Body.Close()
+	if version.StatusCode != http.StatusOK || string(versionBody) != "v0.6.1-overlay.10\n" {
+		t.Fatalf("release lookup status %d: %s", version.StatusCode, versionBody)
+	}
 	response := authRequest(t, "POST", "/api/tmesh/workspaces/ensure", map[string]string{"name": "Integration Tests"})
 	if response.StatusCode != http.StatusOK {
 		response.Body.Close()
@@ -38,6 +52,44 @@ func TestTmeshMachineEndpointsThroughRouter(t *testing.T) {
 	}
 	second.Body.Close()
 	first.Body.Close()
+}
+
+func TestTmeshReleaseLookupAcceptsNewUserWithoutWorkspace(t *testing.T) {
+	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("[{\"tag_name\":\"v0.6.1-overlay.10\",\"published_at\":\"2026-10-28T01:00:00Z\"}]"))
+	}))
+	defer releases.Close()
+	t.Setenv("MULTICA_MACHINE_RELEASE_API_URL", releases.URL)
+	var userID string
+	email := "fixture-" + uuid.NewString() + "@example.test"
+	if err := testPool.QueryRow(t.Context(), "INSERT INTO \"user\"(name,email) VALUES('fixture',$1) RETURNING id::text", email).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), "DELETE FROM personal_access_token WHERE user_id=$1", userID)
+		_, _ = testPool.Exec(context.Background(), "DELETE FROM \"user\" WHERE id=$1", userID)
+	})
+	token, err := auth.GeneratePATToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = testPool.Exec(t.Context(), "INSERT INTO personal_access_token(user_id,name,token_hash,token_prefix) VALUES($1,'fixture',$2,$3)", userID, auth.HashToken(token), token[:12]); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest("GET", testServer.URL+"/api/tmesh/releases/latest", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || string(body) != "v0.6.1-overlay.10\n" {
+		t.Fatalf("workspace-free PAT release lookup: %d %s", response.StatusCode, body)
+	}
 }
 
 // This uses a fixture runtime and a temporary HOME; it never starts a daemon

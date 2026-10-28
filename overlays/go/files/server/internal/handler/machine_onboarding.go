@@ -216,6 +216,7 @@ tmesh_complete agent
 	}
 	usernameJSON, _ := json.Marshal(username)
 	template := `#!/usr/bin/env bash
+set +x
 set -e
 set -o pipefail
 umask 077
@@ -266,9 +267,16 @@ export NO_PROXY="$no_proxy"
 export https_proxy="http://agent.baidu.com:8188"
 export http_proxy="$https_proxy"
 tmesh_complete network
+tmesh_step=release
+tmesh_release=$(curl -fsSL --connect-timeout 5 --max-time 15 -H __AUTH__ __RELEASE_URL__)
+if ! printf '%s\n' "$tmesh_release" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-overlay\.[0-9]+$' >/dev/null; then
+  printf '%s\n' 'The platform returned an invalid Team Mesh CLI release.'
+  exit 1
+fi
+tmesh_complete release
 tmesh_step=install
 export MULTICA_BIN_DIR="${MULTICA_BIN_DIR:-$HOME/.local/bin}"
-curl -fsSL __INSTALL__ | bash
+curl -fsSL __INSTALL__ | MULTICA_VERSION="$tmesh_release" bash
 export PATH="${MULTICA_BIN_DIR:+$MULTICA_BIN_DIR:}$HOME/.local/bin:/usr/local/bin:$PATH"
 if ! multica tmesh-workspace ensure --help | grep -F -- '--set-default-if-unset' >/dev/null; then
   printf '%s\n' 'Installed CLI does not support Team Mesh workspace preparation.'
@@ -305,7 +313,9 @@ __MACHINESTEPS__`
 	return strings.NewReplacer(
 		"__CLI__", cli, "__INSTALL__", machineShellQuote(cfg.InstallURL),
 		"__SERVER__", machineShellQuote(cfg.ServerURL), "__APP__", machineShellQuote(cfg.AppURL),
-		"__TOKEN__", machineShellQuote(token), "__USERNAME__", machineShellQuote(username),
+		"__TOKEN__", machineShellQuote(token), "__AUTH__", machineShellQuote("Authorization: Bearer "+token),
+		"__RELEASE_URL__", machineShellQuote(strings.TrimRight(cfg.ServerURL, "/")+"/api/tmesh/releases/latest"),
+		"__USERNAME__", machineShellQuote(username),
 		"__MACHINE__", machineShellQuote(input.MachineName), "__USERJSON__", string(usernameJSON),
 		"__DEFAULTS__", defaults, "__MACHINESTEPS__", strings.NewReplacer(
 			"__CLI__", cli, "__USERNAME__", machineShellQuote(username), "__MACHINE__", machineShellQuote(input.MachineName),

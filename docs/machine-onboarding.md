@@ -10,7 +10,7 @@
 
 只有 `username` 必填。接口准备账号和用户登录凭据，返回 Bash 脚本；它不创建工作区，也不运行脚本。原来的 `agent_name`、`runtime`、`model` 和 `thinking_level` 请求字段不再接受。
 
-脚本在对应用户的 Linux/macOS 机器上安装最新 CLI，检查所需命令，创建或复用用户名同名工作区，登录并重启该 profile 的 daemon。它每次执行 `ducc config model 'Opus 4.8'`。传入机器名称时，还会重命名机器并创建或复用同名智能体，绑定本机 `ducc`；不传时跳过这两步。
+脚本在对应用户的 Linux/macOS 机器上安装最新已发布的稳定 CLI Release，检查所需命令，创建或复用用户名同名工作区，登录并重启该 profile 的 daemon。版本查询由平台缓存五分钟，不改变 GitHub 的 Latest 标记或主动升级已有客户端。它每次执行 `ducc config model 'Opus 4.8'`。传入机器名称时，还会重命名机器并创建或复用同名智能体，绑定本机 `ducc`；不传时跳过这两步。
 
 脚本包含用户的长期登录凭据，只能通过受保护的通道传给目标机器。不要输出脚本或凭据到日志、Git 或公共制品。
 

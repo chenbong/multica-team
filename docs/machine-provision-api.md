@@ -35,8 +35,15 @@ rename a machine or create an agent.
 
 ## Script contract
 
-The script installs the latest release and checks for the required CLI
-features before proceeding. It prepares the username workspace using the user
+The script asks the authenticated platform endpoint for the newest published
+stable Team Mesh release, independently of GitHub's Latest marker. The server
+caches successful lookups for five minutes, avoiding a GitHub request for
+every machine. A lookup failure stops the script before workspace preparation.
+The installer receives the selected release explicitly; existing daemon
+updaters continue to use GitHub Latest and are not actively upgraded.
+
+The script installs that release and checks for the required CLI features
+before proceeding. It prepares the username workspace using the user
 credential, performs non-interactive login while retaining any existing
 profile default, configures the runtime, sets the ducc default model to
 `Opus 4.8`, and restarts the profile's daemon on every execution. It then
@@ -84,6 +91,7 @@ agent operations and is released on disconnect.
 - `MULTICA_WEB_BUILD_CONFIG`: protected manifest providing the installer URL and runtime defaults.
 - `MULTICA_PLUGIN_SECRET_KEY`: existing key for encrypted daemon credentials.
 - `MULTICA_DAEMON_SERVER_URL` and `MULTICA_APP_URL`: platform addresses used in the generated script.
+- `MULTICA_MACHINE_RELEASE_API_URL` (optional): trusted release metadata endpoint; defaults to the Team Mesh GitHub releases API.
 
 An absent or invalid setting fails closed with HTTP 503. Invalid input returns
 400; bad service credentials return 401; account policy failures return 403;

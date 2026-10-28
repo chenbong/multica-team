@@ -38,7 +38,17 @@ func runMachineScriptFixture(t *testing.T, machine, fail string) (map[string]any
 	files := map[string]string{
 		"multica": fakeCLI,
 		"ducc":    fakeCLI,
-		"curl":    "#!/bin/sh\nif [ \"$FIXTURE_FAILURE\" = install ]; then exit 7; fi\nprintf 'echo installer-log\\n'\n",
+		"curl": strings.Join([]string{
+			"#!/bin/sh",
+			"case \"$*\" in",
+			" *\"/api/tmesh/releases/latest\"*) if [ \"$FIXTURE_FAILURE\" = release ]; then exit 7; fi; echo v0.6.1-overlay.10; exit 0;;",
+			"esac",
+			"if [ \"$FIXTURE_FAILURE\" = install ]; then exit 7; fi",
+			"cat <<'INSTALL'",
+			"#!/bin/sh",
+			"printf '[\"installer-version\",\"%s\"]\\n' \"$MULTICA_VERSION\" >> \"$FIXTURE_CALLS\"",
+			"INSTALL",
+		}, "\n") + "\n",
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0700); err != nil {
@@ -50,6 +60,9 @@ func runMachineScriptFixture(t *testing.T, machine, fail string) (map[string]any
 		AppURL: "https://app.example.test", Runtimes: "ducc,ducx", Shims: "ducc,ducx",
 	}, "owner@example.test", "mul_fixture-token", "owner", machineProvisionInput{MachineName: machine})
 	cmd := exec.Command("bash")
+	if fail == "trace" {
+		cmd = exec.Command("bash", "-x")
+	}
 	cmd.Stdin = strings.NewReader(command)
 	cmd.Env = append(os.Environ(), "HOME="+dir, "MULTICA_BIN_DIR="+dir, "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_CALLS="+logPath, "FIXTURE_FAILURE="+fail)
 	var stdout, stderr bytes.Buffer
@@ -70,6 +83,13 @@ func runMachineScriptFixture(t *testing.T, machine, fail string) (map[string]any
 	return result, stderr.String(), calls, err
 }
 
+func TestMachineScriptSuppressesShellTraceOfCredentials(t *testing.T) {
+	result, _, _, err := runMachineScriptFixture(t, "Fixture machine", "trace")
+	if err != nil || result["success"] != true {
+		t.Fatalf("traced invocation failed: %v %v", result, err)
+	}
+}
+
 func TestMachineScriptRejectsAnOldCLIWithClearError(t *testing.T) {
 	result, stderr, calls, err := runMachineScriptFixture(t, "Fixture machine", "missing_feature")
 	if err == nil || result["failed_step"] != "install" || !strings.Contains(stderr, "does not support Team Mesh workspace preparation") {
@@ -85,7 +105,7 @@ func TestMachineScriptRejectsAnOldCLIWithClearError(t *testing.T) {
 }
 
 func TestMachineScriptStagesAndPartialFailures(t *testing.T) {
-	for _, fail := range []string{"", "install", "workspace", "login", "runtime_setup", "daemon_restart", "machine_rename", "agent"} {
+	for _, fail := range []string{"", "release", "install", "workspace", "login", "runtime_setup", "daemon_restart", "machine_rename", "agent"} {
 		t.Run(fail, func(t *testing.T) {
 			result, stderr, _, err := runMachineScriptFixture(t, "Fixture machine", fail)
 			if (fail == "") != (err == nil) || result["success"] != (fail == "") {
@@ -115,8 +135,11 @@ func TestMachineScriptUsesLiteralNamesAndOptionalMachine(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("name was executed as shell code")
 	}
-	var rename, agent, model bool
+	var rename, agent, model, release bool
 	for _, args := range calls {
+		if len(args) == 2 && args[0] == "installer-version" && args[1] == "v0.6.1-overlay.10" {
+			release = true
+		}
 		if len(args) == 3 && args[0] == "config" && args[1] == "model" && args[2] == "Opus 4.8" {
 			model = true
 		}
@@ -129,7 +152,7 @@ func TestMachineScriptUsesLiteralNamesAndOptionalMachine(t *testing.T) {
 			}
 		}
 	}
-	if !rename || !agent || !model {
+	if !rename || !agent || !model || !release {
 		t.Fatal("machine name or agreed ducc model was not passed correctly")
 	}
 	_, _, calls, err = runMachineScriptFixture(t, "", "")
