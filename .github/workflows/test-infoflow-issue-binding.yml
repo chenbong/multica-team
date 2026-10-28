@@ -72,8 +72,10 @@ jobs:
         run: |
           set -euo pipefail
           export GOFLAGS="-overlay=$GITHUB_WORKSPACE/overlays/go-overlay.json -mod=readonly"
-          go test -race ./internal/handler -run '^Test(MachineProvision|InfoFlow|SharedChat|BuiltinSandbox|OneAPI|OneToolImport|ImportSkill|ParseSkillArchive|FetchImportedSkill|SkillRefresh|ResourceWebPanel|IssueTransfer)' -count=1 -v
+          go test -race ./internal/handler -run '^Test(MachineProvision|MachineWorkspace|MachineAgentLock|MachineScript|InfoFlow|SharedChat|BuiltinSandbox|OneAPI|OneToolImport|ImportSkill|ParseSkillArchive|FetchImportedSkill|SkillRefresh|ResourceWebPanel|IssueTransfer)' -count=1 -v
           go test -race ./cmd/server -run '^TestInfoFlow' -count=1 -v
+          go build -o "$RUNNER_TEMP/tmesh-cli-fixture" ./cmd/multica
+          TMESH_CLI_TEST_BINARY="$RUNNER_TEMP/tmesh-cli-fixture" go test -race ./cmd/server -run '^TestTmeshMachine' -count=1 -v
           go test -race ./cmd/server -run '^TestPersonalMachineName' -count=1 -v
           go test -race ./internal/handler -run '^Test(MachineName|UpdateAgentRuntime_CustomName|DaemonRegister_.*(CustomName|MachineName))' -count=1 -v
           go test -race ./internal/service -run '^Test(ResourceWebPanelSkill|BuiltinSkillsConformToTemplate|BuiltinSkillsFrontmatterIsStrictYAML|BuiltinSkillPayload)' -count=1 -v

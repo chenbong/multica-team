@@ -1,77 +1,36 @@
 # 自动接入机器和智能体
 
-## 调用安装命令 API
+## 查询安装脚本
 
-沿用 `POST /api/integrations/machine-provision/command` 和现有专用 Bearer。
-服务端只返回脚本，由开发机分配平台在对应用户的机器执行。
+调用 `POST /api/integrations/machine-provision/command`，使用接入服务专用 Bearer：
 
 ```json
-{
-  "username": "zhangsan",
-  "machine_name": "zhangsan-dev",
-  "agent_name": "开发助手",
-  "runtime": "ducc",
-  "model": "custom-model",
-  "thinking_level": "high"
-}
+{"username":"zhangsan","machine_name":"zhangsan-dev"}
 ```
 
-只有 `username` 必填。不传机器名称就不重命名；不传智能体名称就不创建或改绑。
-`model`、`thinking_level` 未传时，新智能体沿用运行时默认值，已有智能体保留兼容值；
-传入空字符串表示恢复默认值。运行时要求明确模型时，需要同时传入模型。
+只有 `username` 必填。接口准备账号和用户登录凭据，返回 Bash 脚本；它不创建工作区，也不运行脚本。原来的 `agent_name`、`runtime`、`model` 和 `thinking_level` 请求字段不再接受。
 
-返回脚本依次安装 CLI、设置新客户端的默认工作区、登录、准备运行时、重启该用户的
-daemon，再重命名机器、创建或复用智能体。重复执行也会重启 daemon。
-Linux/macOS 和 CPU 架构由安装器自动识别，API 不需要系统参数。
+脚本在对应用户的 Linux/macOS 机器上安装最新 CLI，检查所需命令，创建或复用用户名同名工作区，登录并重启该 profile 的 daemon。它每次执行 `ducc config model 'Opus 4.8'`。传入机器名称时，还会重命名机器并创建或复用同名智能体，绑定本机 `ducc`；不传时跳过这两步。
 
-响应包含用户登录凭据，使用受保护的文件传给对应开发机，不写入 Git、公共制品或任务日志。
-专用服务 Bearer 只保存在调用后端，不下发给开发机；客户端后续操作使用该用户的登录凭据。
+脚本包含用户的长期登录凭据，只能通过受保护的通道传给目标机器。不要输出脚本或凭据到日志、Git 或公共制品。
 
-## 独立客户端命令
-
-以下命令均使用当前登录账号与当前机器的稳定 daemon ID，不通过机器显示名称寻找机器。
-请把示例 UUID 替换为 API 准备的用户同名工作区 ID。
+## 独立 CLI 命令
 
 ```bash
-multica --profile zhangsan tmesh-machine prepare \
-  --workspace-id 11111111-1111-4111-8111-111111111111
-
-multica --profile zhangsan \
-  --workspace-id 11111111-1111-4111-8111-111111111111 \
-  tmesh-machine rename --machine-name zhangsan-dev
-
-multica --profile zhangsan \
-  --workspace-id 11111111-1111-4111-8111-111111111111 \
-  tmesh-machine agent --agent-name 开发助手 --runtime ducc \
-  --model custom-model --thinking-level high
-
-multica --profile zhangsan \
-  --workspace-id 11111111-1111-4111-8111-111111111111 \
-  tmesh-machine enroll --machine-name zhangsan-dev --agent-name 开发助手 --runtime ducc
+multica --profile zhangsan tmesh-workspace ensure --name 'zhangsan'
+multica --profile zhangsan tmesh-machine rename \
+  --workspace-name 'zhangsan' --machine-name 'zhangsan-dev'
+multica --profile zhangsan tmesh-machine agent \
+  --workspace-name 'zhangsan' --agent-name 'zhangsan-dev' --runtime ducc
 ```
 
-- `prepare` 只在配置缺少默认工作区时补上，保留凭据及其他配置。
-- `rename` 沿用平台机器重命名接口，跨工作区保持一致，不修改操作系统 hostname。
-- `agent` 和 `enroll` 只选择本人在本机、本工作区的在线运行时；默认 `ducc`，也可明确指定
-  `ducx` 或其他已注册命令。最多等待 90 秒，可用 `--wait` 调整；找不到时不会选择其他运行时。
-- 工作区内同名智能体须属于当前用户。复用原 ID、历史、指令、Skill、环境变量等配置；
-  已归档的解除归档。不同所有者、多个同名记录或准备期间发生并发修改时明确报错。
-- 模型、思考强度兼容时保留；不兼容时恢复目标运行时默认值。明确传入的值优先。
-  切换运行时或覆盖模型时先查询目标目录；查询失败或明确参数不兼容时不取消原任务。
-- 需要改绑或更新执行配置时，先取消原有排队及运行中的执行，再更新智能体。
-  已经完全一致的重复执行不会再取消任务或重写智能体。
-- 不迁移旧机器的代码、未提交文件和本地会话；平台历史继续保留。
-- 后续步骤失败时保留已完成步骤并返回失败，修正参数后可以重试。
+- 工作区按当前用户可访问的精确名称查找。普通成员也可复用；多个匹配报错并列出候选项；没有匹配时创建，并让当前用户成为 owner。
+- `--workspace-name` 可用于机器和智能体命令。省略时沿用环境变量或 profile 的默认工作区；没有默认值时需要指定。脚本只为没有默认值的 profile 设置默认工作区。
+- 机器显示名称按本人和本机 daemon 身份保存，同一用户在不同工作区看到的名称一致；不会修改操作系统 hostname。
+- 智能体只绑定本人在目标工作区、本机上在线的指定运行时。默认等待最多 90 秒，可用 `--wait` 调整；不会自动切换到其他运行时。
+- 新智能体对工作区可见。同名智能体属于本人时复用 ID、历史和配置，已归档的会恢复；属于其他人或多个同名项时停止。
+- 同名智能体需要改绑时，先取消其运行中和排队的任务，再更新绑定。已完全一致时不会重复取消或更新。
+- 并发创建或改绑同一工作区的同名智能体时，一个操作持有协调锁，另一个返回冲突；锁连接断开时释放，后续可重试。工作区准备使用服务端事务锁，避免同一用户并发创建重复工作区。
+- 中途失败保留已完成的操作。CLI 默认输出 JSON；完整脚本的标准输出汇总为单个 JSON，普通日志写入标准错误，不包含登录凭据。
 
-## 发布顺序
-
-先发布包含上述命令的 CLI，再更新 API，确保返回的脚本可以安装到所需版本。
-安装器先验证 `tmesh-machine` 命令可用，再配置账号和启动 daemon。服务端升级不会替现有机器执行接入脚本。
-
-## 权限与输出
-
-独立命令默认使用当前 profile 的工作区，可用 `--workspace-id` 明确覆盖；普通工作区成员可操作自己拥有的本机和智能体。API 返回的脚本始终明确指定用户同名工作区。
-
-安装脚本将安装、登录及 daemon 日志写到标准错误输出，标准输出仅返回一个 JSON 对象。成功时 `success=true`、退出码为 0；失败时 `success=false`、退出码非零，并返回 `failed_step`、`completed_steps` 和已有的机器、运行时、工作区及智能体 ID。CLI 的细分结果位于脚本结果的 `result` 字段。未完成的操作可以重试，已完成操作不回滚。JSON 和错误信息不包含登录凭据。
-
-脚本默认将 CLI 安装到 `$HOME/.local/bin`，也可用 `MULTICA_BIN_DIR` 指定目录，避免安装后的命令被其他目录中的旧版 CLI 遮蔽。仅传用户名时也会等待并核对本机上线，不改机器名或创建智能体。
+原 `tmesh-machine enroll` 已移除。保存了旧安装脚本的调用方需要重新获取脚本；新脚本分别调用工作区、机器和智能体命令。

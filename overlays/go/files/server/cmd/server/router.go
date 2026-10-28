@@ -1707,6 +1707,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/api/agent/managed-issues/{managedIssueId}/*", h.OwnerManagedIssues)
 		r.Get("/api/attachments/legacy", h.LegacyAttachmentDownload)
 		r.Get("/api/me", h.GetMe)
+		r.With(handler.RequireHumanActor).Post("/api/tmesh/workspaces/ensure", h.EnsureMachineWorkspace)
+		r.With(handler.RequireHumanActor).Post("/api/tmesh/agents/lock", h.MachineAgentLock)
 		r.With(handler.RequireHumanActor).Get("/api/me/secrets", h.PersonalSecrets)
 		r.With(handler.RequireHumanActor).Post("/api/me/secrets", h.PersonalSecrets)
 		r.With(handler.RequireHumanActor).Get("/api/me/secrets/{secretId}", h.PersonalSecrets)

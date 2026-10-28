@@ -186,17 +186,6 @@ func (h *Handler) MachineProvisionCommand(w http.ResponseWriter, r *http.Request
 		writeError(w, 500, "provisioning failed")
 		return
 	}
-	workspace, workspaceCreated, err := h.machinePersonalWorkspace(r.Context(), tx, user.ID, username)
-	if err != nil {
-		if errors.Is(err, errMachineWorkspaceAmbiguous) {
-			writeError(w, 409, "multiple owned username workspaces; resolve the duplicate before retrying")
-		} else if errors.Is(err, errMachineWorkspaceDisabled) {
-			writeError(w, 403, "workspace creation disabled")
-		} else {
-			writeError(w, 500, "workspace preparation failed")
-		}
-		return
-	}
 	if created {
 		if _, err = tx.Exec(r.Context(), `UPDATE "user" SET onboarded_at=clock_timestamp() WHERE id=$1`, user.ID); err != nil {
 			writeError(w, 500, "account initialization failed")
@@ -208,12 +197,12 @@ func (h *Handler) MachineProvisionCommand(w http.ResponseWriter, r *http.Request
 		writeError(w, 500, "token issuance failed")
 		return
 	}
-	command := machineOnboardingCommand(cfg, email, raw, uuidToString(workspace.ID), input)
+	command := machineOnboardingCommand(cfg, email, raw, username, input)
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "provisioning commit failed")
 		return
 	}
-	slog.Info("machine provisioning command issued", "user_id", uuidToString(user.ID), "user_created", created, "workspace_created", workspaceCreated)
+	slog.Info("machine provisioning command issued", "user_id", uuidToString(user.ID), "user_created", created)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, command)

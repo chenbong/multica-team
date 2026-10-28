@@ -87,7 +87,7 @@ func machineBody(username string) string {
 func machineIssuedToken(t *testing.T, body string) string {
 	t.Helper()
 	for _, line := range strings.Split(body, "\n") {
-		if _, value, ok := strings.Cut(line, " login --token '"); ok {
+		if _, value, ok := strings.Cut(line, " login --tmesh-noninteractive --token '"); ok {
 			return strings.TrimSuffix(value, "'")
 		}
 	}
@@ -117,19 +117,13 @@ func TestMachineProvisionNewUserIdempotentAndAtomic(t *testing.T) {
 		t.Fatal("new user not initialized")
 	}
 	ws, err := h.Queries.ListWorkspaces(context.Background(), user.ID)
-	if err != nil || len(ws) != 1 {
-		t.Fatal("expected one personal workspace")
+	if err != nil || len(ws) != 0 {
+		t.Fatal("requesting a command must not create a workspace")
 	}
-	var role string
-	var statuses, pats int
-	err = testPool.QueryRow(context.Background(), `SELECT role FROM member WHERE workspace_id=$1 AND user_id=$2`, ws[0].ID, user.ID).Scan(&role)
-	if err != nil || role != "owner" {
-		t.Fatal("missing personal owner")
-	}
-	_ = testPool.QueryRow(context.Background(), `SELECT count(*) FROM issue_status WHERE workspace_id=$1`, ws[0].ID).Scan(&statuses)
+	var pats int
 	_ = testPool.QueryRow(context.Background(), `SELECT count(*) FROM personal_access_token WHERE user_id=$1`, user.ID).Scan(&pats)
-	if statuses != 7 || pats != 1 {
-		t.Fatalf("statuses=%d tokens=%d", statuses, pats)
+	if pats != 1 {
+		t.Fatalf("tokens=%d", pats)
 	}
 	pat, err := h.Queries.GetPersonalAccessTokenByHash(context.Background(), auth.HashToken(machineIssuedToken(t, one.Body.String())))
 	if err != nil || pat.UserID != user.ID {
@@ -159,8 +153,8 @@ func TestMachineProvisionExistingUserKeepsWorkspacesAndRoles(t *testing.T) {
 		t.Fatalf("status %d", one.Code)
 	}
 	rows, err := h.Queries.ListWorkspaces(context.Background(), parseUUID(user))
-	if err != nil || len(rows) != 2 {
-		t.Fatal("expected existing shared and new username workspaces")
+	if err != nil || len(rows) != 1 {
+		t.Fatal("expected only the existing shared workspace")
 	}
 	kept := false
 	for _, row := range rows {
@@ -204,8 +198,8 @@ func TestMachineProvisionConcurrentRetryReusesResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws, err := h.Queries.ListWorkspaces(context.Background(), user.ID)
-	if err != nil || len(ws) != 1 {
-		t.Fatal("duplicate workspace")
+	if err != nil || len(ws) != 0 {
+		t.Fatal("API must not create a workspace")
 	}
 }
 
@@ -232,15 +226,15 @@ func TestMachineProvisionAuthenticationAndValidation(t *testing.T) {
 	}
 }
 
-func TestMachineProvisionRollsBackWhenWorkspaceCreationDisabled(t *testing.T) {
+func TestMachineProvisionDoesNotRequireWorkspaceCreation(t *testing.T) {
 	username := machineTestName()
 	h := machineTestConfig(t, username)
 	h.cfg.DisableWorkspaceCreation = true
-	if r := machineCall(t, h, machineBody(username), provisionServiceToken); r.Code != 403 {
+	if r := machineCall(t, h, machineBody(username), provisionServiceToken); r.Code != 200 {
 		t.Fatalf("status %d", r.Code)
 	}
-	if _, err := h.Queries.GetUserByEmail(context.Background(), username+"@example.test"); err == nil {
-		t.Fatal("partial user survived rollback")
+	if _, err := h.Queries.GetUserByEmail(context.Background(), username+"@example.test"); err != nil {
+		t.Fatal("account should still be prepared")
 	}
 }
 

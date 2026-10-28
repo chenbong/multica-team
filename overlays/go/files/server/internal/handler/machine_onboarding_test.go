@@ -1,231 +1,165 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
-func TestMachineProvisionReusesOnlyOwnedUsernameWorkspace(t *testing.T) {
-	username := machineTestName()
-	user := dbfx.User(t, "Fixture", username+"@example.test")
-	owned := dbfx.Workspace(t, username, username)
-	dbfx.Member(t, owned, user, "owner")
-	h := machineTestConfig(t, username)
-	for i := 0; i < 2; i++ {
-		response := machineCall(t, h, machineBody(username), provisionServiceToken)
-		if response.Code != 200 || !strings.Contains(response.Body.String(), "tmesh-machine prepare --workspace-id '"+owned+"'") {
-			t.Fatalf("owned workspace not selected: %d", response.Code)
-		}
-	}
-	rows, err := h.Queries.ListWorkspaces(context.Background(), parseUUID(user))
-	if err != nil || len(rows) != 1 {
-		t.Fatal("owned workspace duplicated")
-	}
+func machineWorkspaceCall(h *Handler, userID, name string) *httptest.ResponseRecorder {
+	r := testutil.WithHeaders(testutil.JSONRequest("POST", "/api/tmesh/workspaces/ensure", map[string]string{"name": name}), "X-User-ID", userID)
+	w := httptest.NewRecorder()
+	h.EnsureMachineWorkspace(w, r)
+	return w
 }
 
-func TestMachineProvisionDoesNotReuseSomeoneElsesSameNameWorkspace(t *testing.T) {
-	username := machineTestName()
-	user := dbfx.User(t, "Fixture", username+"@example.test")
-	foreign := dbfx.Workspace(t, username, username)
-	dbfx.Member(t, foreign, user, "admin")
-	h := machineTestConfig(t, username)
-	response := machineCall(t, h, machineBody(username), provisionServiceToken)
-	if response.Code != 200 {
-		t.Fatalf("status %d", response.Code)
+func TestMachineWorkspaceEnsureCreatesAndReuses(t *testing.T) {
+	name := machineTestName()
+	h := machineTestConfig(t, name)
+	user := dbfx.User(t, "Fixture", name+"@example.test")
+	first := machineWorkspaceCall(h, user, name)
+	second := machineWorkspaceCall(h, user, name)
+	var a, b map[string]any
+	if first.Code != 200 || second.Code != 200 || json.Unmarshal(first.Body.Bytes(), &a) != nil || json.Unmarshal(second.Body.Bytes(), &b) != nil {
+		t.Fatalf("ensure failed: %d %d", first.Code, second.Code)
 	}
-	rows, err := h.Queries.ListWorkspaces(context.Background(), parseUUID(user))
-	if err != nil || len(rows) != 2 {
-		t.Fatal("personal workspace not created")
-	}
-	for _, row := range rows {
-		if uuidToString(row.ID) == foreign {
-			continue
-		}
-		if row.Name != username || !strings.HasPrefix(row.Slug, username+"-") {
-			t.Fatal("slug conflict was not resolved safely")
-		}
+	if a["workspace_created"] != true || b["workspace_created"] != false || a["workspace_id"] != b["workspace_id"] {
+		t.Fatalf("ensure did not reuse workspace: %v %v", a, b)
 	}
 	var role string
-	_ = testPool.QueryRow(context.Background(), `SELECT role FROM member WHERE user_id=$1 AND workspace_id=$2`, user, foreign).Scan(&role)
-	if role != "admin" {
-		t.Fatal("foreign workspace permissions changed")
+	if err := testPool.QueryRow(context.Background(), "SELECT role FROM member WHERE user_id=$1 AND workspace_id=$2", user, a["workspace_id"]).Scan(&role); err != nil || role != "owner" {
+		t.Fatal("new workspace did not have the user as owner")
 	}
 }
 
-func TestMachineProvisionAmbiguousOwnedWorkspacesFailWithoutGuessing(t *testing.T) {
-	username := machineTestName()
-	user := dbfx.User(t, "Fixture", username+"@example.test")
-	for i := 0; i < 2; i++ {
-		ws := dbfx.Workspace(t, username, "fixture-"+uuid.NewString())
-		dbfx.Member(t, ws, user, "owner")
+func TestMachineWorkspaceEnsureReusesMemberAndRejectsAmbiguity(t *testing.T) {
+	name := machineTestName()
+	h := machineTestConfig(t, name)
+	user := dbfx.User(t, "Fixture", name+"@example.test")
+	first := dbfx.Workspace(t, name, "first-"+uuid.NewString())
+	dbfx.Member(t, first, user, "member")
+	response := machineWorkspaceCall(h, user, name)
+	var got map[string]any
+	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &got) != nil || got["workspace_id"] != first || got["workspace_created"] != false {
+		t.Fatalf("member workspace not reused: %d %s", response.Code, response.Body.String())
 	}
-	h := machineTestConfig(t, username)
-	if response := machineCall(t, h, machineBody(username), provisionServiceToken); response.Code != 409 {
-		t.Fatalf("ambiguous workspace status %d", response.Code)
+	second := dbfx.Workspace(t, name, "second-"+uuid.NewString())
+	dbfx.Member(t, second, user, "admin")
+	response = machineWorkspaceCall(h, user, name)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), first) || !strings.Contains(response.Body.String(), second) {
+		t.Fatalf("ambiguous workspaces were not reported: %d %s", response.Code, response.Body.String())
 	}
 }
 
-func TestMachineProvisionOptionalFieldsAreValidatedBeforeCreatingAccounts(t *testing.T) {
-	username := machineTestName()
-	h := machineTestConfig(t, username)
-	for _, extra := range []string{`,"model":"x"`, `,"thinking_level":"high"`, `,"runtime":"../ducc"`, `,"agent_name":"x\ny"`, `,"machine_name":"x\u0000y"`, `,"agent_name":"x","model":false`} {
-		body := `{"username":"` + username + `"` + extra + `}`
-		if response := machineCall(t, h, body, provisionServiceToken); response.Code != 400 {
-			t.Fatalf("invalid options status %d", response.Code)
+func TestMachineWorkspaceEnsureConcurrentCallsCreateOnlyOne(t *testing.T) {
+	name := machineTestName()
+	h := machineTestConfig(t, name)
+	user := dbfx.User(t, "Fixture", name+"@example.test")
+	results := make(chan *httptest.ResponseRecorder, 6)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); results <- machineWorkspaceCall(h, user, name) }()
+	}
+	wg.Wait()
+	close(results)
+	var workspaceID string
+	created := 0
+	for response := range results {
+		var got map[string]any
+		if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &got) != nil {
+			t.Fatalf("concurrent ensure failed: %d %s", response.Code, response.Body.String())
+		}
+		id, _ := got["workspace_id"].(string)
+		if workspaceID != "" && workspaceID != id {
+			t.Fatal("concurrent calls created different workspaces")
+		}
+		workspaceID = id
+		if got["workspace_created"] == true {
+			created++
 		}
 	}
-	if _, err := h.Queries.GetUserByEmail(context.Background(), username+"@example.test"); err == nil {
-		t.Fatal("invalid options created an account")
+	if created != 1 {
+		t.Fatalf("expected one creation, got %d", created)
 	}
 }
 
-func TestMachineProvisionUsernameSlugNormalizesDotsAndUnderscores(t *testing.T) {
-	username := "test." + strings.ReplaceAll(uuid.NewString(), "-", "")[:8] + "_owner"
-	h := machineTestConfig(t, username)
-	response := machineCall(t, h, machineBody(username), provisionServiceToken)
-	if response.Code != 200 {
-		t.Fatalf("status %d", response.Code)
-	}
-	user, err := h.Queries.GetUserByEmail(context.Background(), username+"@example.test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows, err := h.Queries.ListWorkspaces(context.Background(), user.ID)
-	if err != nil || len(rows) != 1 {
-		t.Fatal("workspace missing")
-	}
-	if rows[0].Name != username || rows[0].Slug != strings.NewReplacer(".", "-", "_", "-").Replace(username) {
-		t.Fatal("username/display name/slug mismatch")
+func TestMachineWorkspaceEnsureRespectsDisabledCreation(t *testing.T) {
+	name := machineTestName()
+	h := machineTestConfig(t, name)
+	user := dbfx.User(t, "Fixture", name+"@example.test")
+	h.cfg.DisableWorkspaceCreation = true
+	if response := machineWorkspaceCall(h, user, name); response.Code != http.StatusForbidden {
+		t.Fatalf("disabled creation status %d", response.Code)
 	}
 }
 
-func TestMachineProvisionGeneratedScriptQuotesArgumentsAndPreservesOrder(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash unavailable")
+func TestMachineWorkspaceSlugSupportsDisplayNames(t *testing.T) {
+	for name, want := range map[string]string{"zhang_san": "zhang-san", "研发团队": "workspace", "Hello Team": "hello-team"} {
+		if got := machineWorkspaceSlug(name); got != want {
+			t.Fatalf("slug(%q)=%q, want %q", name, got, want)
+		}
 	}
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 unavailable")
-	}
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "calls.jsonl")
-	marker := filepath.Join(dir, "must-not-exist")
-	cli := `#!/usr/bin/env python3
-import os,json,sys
-with open(os.environ['FIXTURE_CALLS'],'a') as f:f.write(json.dumps(sys.argv[1:])+'\n')
-`
-	for name, content := range map[string]string{"multica": cli, "ducc": "#!/bin/sh\nexit 0\n", "curl": "#!/bin/sh\nexit 0\n"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0700); err != nil {
+}
+
+func TestMachineAgentLockRejectsConcurrentAndReleasesOnDisconnect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(testHandler.MachineAgentLock))
+	defer server.Close()
+	request := func() *http.Response {
+		body, _ := json.Marshal(map[string]string{"workspace_id": testWorkspaceID, "agent_name": "Fixture agent"})
+		r, err := http.NewRequest("POST", server.URL, bytes.NewReader(body))
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	malicious := "Host ' $(touch " + marker + ")"
-	model, thinking := "custom-model", "high"
-	input := machineProvisionInput{MachineName: malicious, AgentName: "My agent", Runtime: "ducc", Model: &model, ThinkingLevel: &thinking}
-	command := machineOnboardingCommand(machineCommandConfig{InstallURL: "https://example.test/install.sh", ServerURL: "https://api.example.test", AppURL: "https://app.example.test"}, "owner@example.test", "fixture-token", "11111111-1111-4111-8111-111111111111", input)
-	cmd := exec.Command("bash")
-	cmd.Stdin = strings.NewReader(command)
-	cmd.Env = append(os.Environ(), "HOME="+dir, "MULTICA_BIN_DIR="+dir, "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_CALLS="+logPath)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("fixture script failed: %v %s", err, output)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatal("name interpreted as a shell command")
-	}
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var calls [][]string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		var args []string
-		if err = json.Unmarshal([]byte(line), &args); err != nil {
+		r.Header.Set("X-User-ID", testUserID)
+		response, err := http.DefaultClient.Do(r)
+		if err != nil {
 			t.Fatal(err)
 		}
-		calls = append(calls, args)
+		return response
 	}
-	indices := map[string]int{}
-	for i, args := range calls {
-		for _, value := range args {
-			if value == "prepare" || value == "login" || value == "restart" || value == "enroll" {
-				indices[value] = i
-			}
+	first := request()
+	if first.StatusCode != 200 {
+		t.Fatalf("first lock: %d", first.StatusCode)
+	}
+	second := request()
+	if second.StatusCode != http.StatusConflict {
+		t.Fatalf("concurrent lock: %d", second.StatusCode)
+	}
+	second.Body.Close()
+	first.Body.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		response := request()
+		if response.StatusCode == 200 {
+			response.Body.Close()
+			return
 		}
+		response.Body.Close()
+		time.Sleep(25 * time.Millisecond)
 	}
-	if !(indices["prepare"] < indices["login"] && indices["login"] < indices["restart"] && indices["restart"] < indices["enroll"]) {
-		t.Fatalf("wrong execution order: %v", indices)
-	}
-	last := calls[len(calls)-1]
-	found := false
-	for _, value := range last {
-		if value == malicious {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("machine name did not round-trip as one literal argument")
-	}
+	t.Fatal(fmt.Errorf("lock was not released after disconnect"))
 }
 
-func TestMachineProvisionScriptEmitsOneJSONOnSuccessAndFailure(t *testing.T) {
-	for _, failure := range []string{"", "install", "login", "runtime_setup", "daemon_restart", "enrollment"} {
-		t.Run(failure, func(t *testing.T) {
-			dir := t.TempDir()
-			fake := `#!/usr/bin/env python3
-import os,json,sys
-args=sys.argv[1:]
-stage=''
-if 'login' in args: stage='login'
-elif 'setup' in args: stage='runtime_setup'
-elif 'restart' in args: stage='daemon_restart'
-elif 'enroll' in args: stage='enrollment'
-failed=stage and stage==os.environ.get('FIXTURE_FAILURE')
-if 'enroll' in args:
- print(json.dumps({'success':not bool(failed),'daemon_id':'fixture-machine','runtime_id':'fixture-runtime','completed_steps':['machine_renamed']}))
-else: print('ordinary CLI log')
-sys.exit(7 if failed else 0)
-`
-			for name, content := range map[string]string{
-				"multica": fake,
-				"ducc":    "#!/bin/sh\necho 'runtime log'\n",
-				"curl":    "#!/bin/sh\nif [ \"$FIXTURE_FAILURE\" = install ]; then exit 7; fi\nprintf 'echo installer-log\\n'\n",
-			} {
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			command := machineOnboardingCommand(machineCommandConfig{InstallURL: "https://example.test/install.sh"}, "owner@example.test", "fixture-token", "11111111-1111-4111-8111-111111111111", machineProvisionInput{})
-			cmd := exec.Command("bash")
-			cmd.Stdin = strings.NewReader(command)
-			cmd.Env = append(os.Environ(), "HOME="+dir, "MULTICA_BIN_DIR="+dir, "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_FAILURE="+failure)
-			var stderr strings.Builder
-			cmd.Stderr = &stderr
-			output, err := cmd.Output()
-			if (failure == "") != (err == nil) {
-				t.Fatalf("wrong exit status: %v %s", err, stderr.String())
-			}
-			var result map[string]any
-			if json.Unmarshal(output, &result) != nil || result["success"] != (failure == "") || strings.Contains(string(output), "fixture-token") {
-				t.Fatalf("stdout must contain exactly one safe JSON result: %s", output)
-			}
-			if failure != "" && result["failed_step"] != failure {
-				t.Fatalf("wrong failed step: %v", result)
-			}
-			if failure == "enrollment" || failure == "" {
-				detail, _ := result["result"].(map[string]any)
-				if detail["daemon_id"] != "fixture-machine" {
-					t.Fatal("machine IDs and partial enrollment results were lost")
-				}
-			}
-			if strings.Contains(stderr.String(), "fixture-token") {
-				t.Fatal("login credential exposed in logs")
-			}
-		})
+func TestMachineAgentLockRejectsAnotherOwnersPrivateAgent(t *testing.T) {
+	actor := dbfx.User(t, "Fixture member", "fixture-member-"+uuid.NewString()+"@example.test")
+	dbfx.Member(t, testWorkspaceID, actor, "member")
+	dbfx.Agent(t, "Private fixture", "", testutil.Cols{"owner_id": testUserID, "visibility": "private"})
+	req := testutil.WithHeaders(testutil.JSONRequest("POST", "/api/tmesh/agents/lock", map[string]string{
+		"workspace_id": testWorkspaceID, "agent_name": "Private fixture",
+	}), "X-User-ID", actor)
+	response := testutil.Call(t, testHandler.MachineAgentLock, req).ResponseRecorder
+	if response.Code != http.StatusConflict || strings.Contains(response.Body.String(), testUserID) {
+		t.Fatalf("private conflict not safely rejected: %d %s", response.Code, response.Body.String())
 	}
 }

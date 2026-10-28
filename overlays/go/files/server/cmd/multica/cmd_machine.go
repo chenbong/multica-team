@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -60,8 +64,9 @@ func newMachineCommand() *cobra.Command {
 			return err
 		}}
 	parent.AddCommand(prepare)
-	for _, name := range []string{"enroll", "rename", "agent"} {
+	for _, name := range []string{"rename", "agent"} {
 		command := &cobra.Command{Use: name, Short: "Rename this computer and/or create or rebind an owned agent", Args: machineNoArgs, RunE: runMachineEnroll}
+		command.Flags().String("workspace-name", "", "Workspace display name; create it if it is not accessible")
 		command.Flags().String("machine-name", "", "Computer display name (OS hostname is unchanged)")
 		command.Flags().String("agent-name", "", "Agent name in the explicitly selected workspace")
 		command.Flags().String("runtime", "ducc", "Registered runtime command on this computer")
@@ -166,6 +171,21 @@ func runMachineEnroll(cmd *cobra.Command, _ []string) (err error) {
 		return err
 	}
 	token = client.Token
+	workspaceName, _ := cmd.Flags().GetString("workspace-name")
+	if strings.TrimSpace(workspaceName) != "" {
+		flag := cmd.Flags().Lookup("workspace-id")
+		if flag == nil {
+			flag = cmd.InheritedFlags().Lookup("workspace-id")
+		}
+		if flag != nil && flag.Changed {
+			return errors.New("specify either --workspace-id or --workspace-name")
+		}
+		workspace, ensureErr := machineEnsureWorkspace(cmd.Context(), client, workspaceName)
+		if ensureErr != nil {
+			return ensureErr
+		}
+		client.WorkspaceID = strVal(workspace, "workspace_id")
+	}
 	result["workspace_id"] = client.WorkspaceID
 	if _, err = uuid.Parse(client.WorkspaceID); err != nil {
 		return errors.New("a full --workspace-id is required")
@@ -216,6 +236,68 @@ func machineRuntimeMatches(runtime map[string]any, requested string, profiles ma
 		return profiles[profile] == requested
 	}
 	return strVal(runtime, "provider") == requested
+}
+
+// The server holds a cross-instance database lock while this response stream is
+// open. Losing the stream cancels any in-flight mutation instead of proceeding
+// without coordination.
+func machineAcquireAgentLock(ctx context.Context, client *cli.APIClient, name string) (context.Context, func(), error) {
+	lockCtx, cancel := context.WithCancel(ctx)
+	startupTimeout := time.AfterFunc(15*time.Second, cancel)
+	defer startupTimeout.Stop()
+	body, err := json.Marshal(map[string]string{"workspace_id": client.WorkspaceID, "agent_name": name})
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	req, err := http.NewRequestWithContext(lockCtx, http.MethodPost, strings.TrimRight(client.BaseURL, "/")+"/api/tmesh/agents/lock", bytes.NewReader(body))
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+client.Token)
+	requestClient := *client.HTTPClient
+	requestClient.Timeout = 0
+	response, err := requestClient.Do(req)
+	if err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("agent coordination failed: %w", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		cancel()
+		if response.StatusCode == http.StatusConflict {
+			var conflict struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(message, &conflict) == nil && conflict.Error == "an agent with this name belongs to another owner" {
+				return nil, nil, errors.New(conflict.Error)
+			}
+			return nil, nil, errors.New("another machine is preparing this agent; retry after it finishes")
+		}
+		return nil, nil, fmt.Errorf("agent coordination failed (HTTP %d): %s", response.StatusCode, strings.TrimSpace(string(message)))
+	}
+	reader := bufio.NewReader(response.Body)
+	line, err := reader.ReadString('\n')
+	var ready struct {
+		Locked bool `json:"locked"`
+	}
+	if err != nil || json.Unmarshal([]byte(line), &ready) != nil || !ready.Locked {
+		_ = response.Body.Close()
+		cancel()
+		return nil, nil, errors.New("agent coordination stream did not start")
+	}
+	go func() {
+		_, _ = io.Copy(io.Discard, reader)
+		cancel()
+	}()
+	release := func() {
+		cancel()
+		_ = response.Body.Close()
+	}
+	return lockCtx, release, nil
 }
 
 func waitMachineRuntime(ctx context.Context, client *cli.APIClient, machineID, ownerID string, options machineOptions) (map[string]any, error) {
@@ -309,7 +391,7 @@ func machineAgentPayload(existing map[string]any, runtime map[string]any, option
 	body := map[string]any{"runtime_id": strVal(runtime, "id")}
 	if existing == nil {
 		body["name"] = options.AgentName
-		body["visibility"] = "private"
+		body["visibility"] = "workspace"
 	}
 	if options.Model != nil || model != strVal(existing, "model") {
 		body["model"] = model
@@ -481,6 +563,12 @@ func enrollMachine(ctx context.Context, client *cli.APIClient, machineID string,
 	if options.AgentName == "" {
 		return result, nil
 	}
+	lockedCtx, release, err := machineAcquireAgentLock(ctx, client, options.AgentName)
+	if err != nil {
+		return result, err
+	}
+	defer release()
+	ctx = lockedCtx
 	var catalog []map[string]any
 	if err := client.GetJSON(ctx, "/api/agents?include_archived=true", &catalog); err != nil {
 		return result, err

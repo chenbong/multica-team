@@ -47,12 +47,22 @@ func newMachineFixture(t *testing.T) *machineFixture {
 			"runtime_mode": "local", "status": "online", "provider": "claude", "profile_id": machineProfile}},
 		profiles: []map[string]any{{"id": machineProfile, "command_name": "ducc", "enabled": true}}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer fixture-user-token" || r.Header.Get("X-Workspace-ID") != machineWS {
+		userScoped := r.URL.Path == "/api/tmesh/agents/lock" || r.URL.Path == "/api/tmesh/workspaces/ensure"
+		if r.Header.Get("Authorization") != "Bearer fixture-user-token" || (!userScoped && r.Header.Get("X-Workspace-ID") != machineWS) {
 			t.Error("wrong account/workspace scope")
 		}
 		f.calls = append(f.calls, r.Method+" "+r.URL.RequestURI())
+		if r.URL.Path == "/api/tmesh/agents/lock" {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte("{\"locked\":true}\n"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
 		var response any
 		switch {
+		case r.URL.Path == "/api/tmesh/workspaces/ensure":
+			response = map[string]any{"workspace_id": machineWS, "workspace_name": "Fixture", "workspace_created": false}
 		case r.URL.Path == "/api/me":
 			response = map[string]any{"id": machineUser}
 		case strings.HasSuffix(r.URL.Path, "/members"):
@@ -133,7 +143,7 @@ func machineDefaults() machineOptions {
 }
 func machineHasMutation(calls []string) bool {
 	for _, call := range calls {
-		if !strings.HasPrefix(call, "GET ") && !strings.HasSuffix(call, "/models") {
+		if !strings.HasPrefix(call, "GET ") && !strings.HasSuffix(call, "/models") && !strings.HasSuffix(call, "/agents/lock") {
 			return true
 		}
 	}
@@ -159,6 +169,9 @@ func TestMachineEnrollmentCreatesAndRenamesOnlyCurrentOwnedMachine(t *testing.T)
 	}
 	if f.payloads[1]["runtime_id"] != machineRT {
 		t.Fatal("agent bound to another computer")
+	}
+	if f.payloads[1]["visibility"] != "workspace" {
+		t.Fatal("new agent must be visible to the workspace")
 	}
 }
 
