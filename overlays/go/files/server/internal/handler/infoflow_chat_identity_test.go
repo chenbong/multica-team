@@ -80,7 +80,13 @@ func TestInfoFlowChatInputUsesRealSenderForChatAndIssueCreation(t *testing.T) {
 			if n := dbfx.Count(t, `SELECT count(*) FROM issue WHERE id=$1 AND creator_type='member' AND creator_id=$2`, issue, f.user); n != 1 {
 				t.Fatal("independent issue has robot-owner creator")
 			}
-			requireManagerIDs(t, issue, f.user)
+			// The creator retains deletion permission as an ordinary member;
+			// retired administrator records must not be recreated for new issues.
+			dbfx.Exec(t, `UPDATE member SET role='member' WHERE id=$1`, f.member)
+			wantDeletionPermission(t, issue, f.user, "", true)
+			if n := dbfx.Count(t, `SELECT count(*) FROM issue_manager WHERE issue_id=$1`, issue); n != 0 {
+				t.Fatal("new issue recreated retired task administrators")
+			}
 			if n := dbfx.Count(t, `SELECT count(*) FROM attachment WHERE id=$1 AND issue_id=$2`, issueImage, issue); n != 1 {
 				t.Fatal("independent issue image was not retained")
 			}
