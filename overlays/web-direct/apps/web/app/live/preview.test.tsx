@@ -8,6 +8,14 @@ const render=(ui:ReactNode)=>rawRender(<QueryClientProvider client={new QueryCli
 
 afterEach(cleanup);
 describe("public live dashboard interaction preview",()=>{
+  it("uses the supplied Team Mesh artwork while keeping one accessible brand link",()=>{
+    const {container}=render(<LiveDashboardPreview/>);
+    const brand=screen.getByRole("link",{name:"Team Mesh 平台实时看板"});
+    expect(brand).toHaveAttribute("href","/live");
+    expect(brand.querySelector('img[src="/team-mesh/teammesh-lockup.svg"]')).toHaveAttribute("alt","");
+    expect(brand.querySelector('img[src="/team-mesh/teammesh-lockup-dark.svg"]')).toHaveAttribute("alt","");
+    expect(container.querySelector('.tm-live-mascot[aria-hidden="true"] img')).toHaveAttribute("src","/team-mesh/teammesh-icon.svg");
+  });
   it("can preview real change animations with explicitly labelled demo controls",async()=>{
     const user=userEvent.setup();const {container}=render(<LiveDashboardPreview/>);
     expect(container.querySelector(".tm-live-numberChanging")).toBeNull();

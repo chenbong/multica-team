@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import tarfile
 import tempfile
 import time
 import uuid
@@ -27,10 +28,10 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def run(command, *, output=None, env=None, timeout=3600):
+def run(command, *, output=None, env=None, timeout=3600, input_data=None):
     # External diagnostics can contain credentials or signed URLs. Only report
     # our own fixed stage labels; protected source data never reaches the journal.
-    subprocess.run(command, check=True, stdout=output or subprocess.DEVNULL,
+    subprocess.run(command, check=True, input=input_data, stdout=output or subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL, env=env, timeout=timeout)
 
 
@@ -145,6 +146,57 @@ def capture(config, directory):
     record(directory / "manifest.json", metadata)
 
 
+def verify_downloaded_archive(config, archive, directory):
+    """Read the downloaded archive fully and validate its recorded components."""
+    expected = {"database.dump", "globals.sql", "state.tar.gz", "source.tar.gz",
+                "web-source.tar.gz", "bridge-source.tar.gz", "containers.json", "manifest.json"}
+    seen = set()
+    hashes = {}
+    manifest = None
+    verified_dir = directory / "verified-components"
+    verified_dir.mkdir(mode=0o700)
+    with tarfile.open(archive, mode="r|gz") as bundle:
+        for member in bundle:
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            if name in ("", ".") and member.isdir():
+                continue
+            if not member.isfile() or name not in expected or name in seen:
+                raise ValueError("Unexpected backup archive entry")
+            seen.add(name)
+            source = bundle.extractfile(member)
+            if source is None:
+                raise ValueError("Unreadable backup archive entry")
+            if name == "manifest.json":
+                if member.size > 1024 * 1024:
+                    raise ValueError("Backup manifest exceeds limit")
+                manifest = json.loads(source.read().decode("utf-8"))
+                continue
+            digest = hashlib.sha256()
+            total = 0
+            dump = open(verified_dir / "database.dump", "xb") if name == "database.dump" else None
+            try:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    total += len(block)
+                    digest.update(block)
+                    if dump is not None:
+                        dump.write(block)
+            finally:
+                if dump is not None:
+                    dump.close()
+            if total != member.size:
+                raise ValueError("Incomplete backup archive entry")
+            hashes[name] = digest.hexdigest()
+    if seen != expected or not isinstance(manifest, dict) or manifest.get("files") != hashes:
+        raise ValueError("Backup component checksum mismatch")
+    # Decode the downloaded database dump completely, not just its table of
+    # contents. This checks readability without restoring into the live DB.
+    run([config["docker"], "run", "--rm", "--network", "none", "--log-driver", "none",
+         "-v", str(verified_dir) + ":/snapshot:ro",
+         config.get("postgres_tools_image", "postgres:16-alpine"),
+         "pg_restore", "--no-owner", "--file=/dev/null", "/snapshot/database.dump"], timeout=1800)
+    return {"archive_files_verified": len(hashes), "database_dump_readable": True}
+
+
 def backup(config):
     base = validate_config(config)
     work = base / "data/daily-backup"
@@ -173,24 +225,48 @@ def backup(config):
         bos(config,"cp",remote,str(verified),"--disable-bar","--quiet","--yes")
         if sha256(verified)!=digest:
             raise ValueError("BOS round-trip checksum mismatch")
+        checks = verify_downloaded_archive(config, verified, directory)
         # Persist the successful object before retention so pruning failure
         # cannot orphan the new backup from the owned-object ledger.
         entries.append({"key":key,"created_at":now.isoformat(),"sha256":digest,"bytes":archive.stat().st_size})
         record(ledger,entries)
         entries=prune(config,entries,now)
         record(ledger,entries)
-        return {"completed_at":datetime.now(timezone.utc).isoformat(),"key":key,"sha256":digest,"verified":True}
+        return {"completed_at":datetime.now(timezone.utc).isoformat(),"key":key,"sha256":digest,
+                "bytes":archive.stat().st_size,"verified":True,**checks}
 
 
-def execute(config, *, sleep=time.sleep, operation=backup, notify=None):
+def notify_verified_success(config, result):
+    """Use the existing operator/robot target, with verified facts on stdin."""
+    current = config.get("notify_command")
+    if (not isinstance(current, list) or len(current) != 6 or
+            current[1:4] != ["exec", "team-mesh-bridge", "node"] or
+            not isinstance(current[4], str) or
+            not current[4].endswith("/notify-backup-failure.mjs")):
+        raise ValueError("Backup notification target is not configured")
+    script = current[4][:-len("notify-backup-failure.mjs")] + "notify-backup-success.mjs"
+    command = [current[0], "exec", "-i", current[2], current[3], script, current[5]]
+    run(command, timeout=60, input_data=json.dumps(result).encode("utf-8"))
+
+
+def execute(config, *, sleep=time.sleep, operation=backup, notify=None, notify_success=None):
     last_stage="backup"
     for attempt in range(3):
         try:
             result=operation(config)
-            return {"ok":True,"attempts":attempt+1,**result}
         except Exception:
             # No exception text: subprocess output and storage URLs can carry secrets.
             if attempt<2:sleep(600)
+            continue
+        outcome={"ok":True,"attempts":attempt+1,**result}
+        if notify_success:
+            try:
+                notify_success(outcome)
+                outcome["notification_ok"]=True
+            except Exception:
+                # The completed backup remains successful; don't make another.
+                outcome["notification_ok"]=False
+        return outcome
     if notify:
         try:notify()
         except Exception:last_stage="backup-and-notification"
@@ -218,12 +294,14 @@ def main():
         except BlockingIOError:
             print('{"ok":true,"skipped":"already-running"}')
             return 0
-        result=execute_attempt(config,args.attempt) if args.attempt else execute(config,notify=lambda:run(config["notify_command"],timeout=60))
+        result=execute_attempt(config,args.attempt) if args.attempt else execute(
+            config,notify=lambda:run(config["notify_command"],timeout=60),
+            notify_success=lambda outcome:notify_verified_success(config,outcome))
         record(state/"last-result.json",result)
         with open(state/"runs.jsonl","a") as history:
             history.write(json.dumps(result)+"\n")
         print(json.dumps(result))
-        return 0 if result["ok"] else 1
+        return 0 if result["ok"] and result.get("notification_ok",True) else 1
 
 
 if __name__=="__main__":

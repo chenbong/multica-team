@@ -2,13 +2,44 @@ package db
 
 import (
 	"context"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// Serialize deletion's cancellation phase against permission and workspace moves.
+// CanManageIssueByCreator is shared by deletion and cross-workspace transfer.
+// Agent-created issues belong to the agent's current owner, including archived
+// agents. A missing agent never grants authority to a guessed owner.
+func (q *Queries) CanManageIssueByCreator(ctx context.Context, issue, workspace, user pgtype.UUID) (bool, error) {
+	var allowed bool
+	err := q.db.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM issue i JOIN member m ON m.workspace_id=i.workspace_id AND m.user_id=$3
+		WHERE i.id=$1 AND i.workspace_id=$2 AND (m.role IN ('owner','admin')
+		 OR (i.creator_type='member' AND i.creator_id=$3)
+		 OR (i.creator_type='agent' AND EXISTS (SELECT 1 FROM agent a WHERE a.id=i.creator_id AND a.owner_id=$3)))
+	)`, issue, workspace, user).Scan(&allowed)
+	return allowed, err
+}
+
+// Lock the issue, actor membership, and (when needed) agent owner until the
+// caller's transaction ends. An agent disappearing or changing owner cannot
+// turn a stale authorization check into an accepted delete.
 func (q *Queries) LockManagedIssueForHumanDeletion(ctx context.Context, issue, workspace, user pgtype.UUID) error {
-	var id pgtype.UUID
-	return q.db.QueryRow(ctx, `SELECT i.id FROM issue i JOIN issue_manager im ON im.issue_id=i.id AND im.user_id=$3 JOIN member m ON m.workspace_id=i.workspace_id AND m.user_id=$3 WHERE i.id=$1 AND i.workspace_id=$2 FOR UPDATE OF i FOR SHARE OF im,m`, issue, workspace, user).Scan(&id)
+	var kind, role string
+	var creator pgtype.UUID
+	err := q.db.QueryRow(ctx, `SELECT i.creator_type,i.creator_id,m.role FROM issue i
+		JOIN member m ON m.workspace_id=i.workspace_id AND m.user_id=$3
+		WHERE i.id=$1 AND i.workspace_id=$2 FOR UPDATE OF i FOR SHARE OF m`, issue, workspace, user).Scan(&kind, &creator, &role)
+	if err != nil {
+		return err
+	}
+	if role == "owner" || role == "admin" || (kind == "member" && creator == user) {
+		return nil
+	}
+	if kind == "agent" {
+		var id pgtype.UUID
+		return q.db.QueryRow(ctx, `SELECT id FROM agent WHERE id=$1 AND owner_id=$2 FOR SHARE`, creator, user).Scan(&id)
+	}
+	return pgx.ErrNoRows
 }
 
 // Bind once per token. Reusing a token hash cannot replace its owner grant.

@@ -36,6 +36,9 @@ type machineFixture struct {
 	failPut      bool
 	changeDetail bool
 	modelCatalog machineModelCatalog
+	skills       []machineSkill
+	agentSkills  []machineSkill
+	failSkills   string
 	calls        []string
 	payloads     []map[string]any
 }
@@ -84,6 +87,42 @@ func newMachineFixture(t *testing.T) *machineFixture {
 			} else {
 				response = f.modelCatalog
 			}
+		case r.Method == "GET" && r.URL.Path == "/api/skills":
+			if f.failSkills == "catalog" {
+				http.Error(w, "fixture skill catalog failure", 503)
+				return
+			}
+			response = f.skills
+		case r.Method == "GET" && r.URL.Path == "/api/agents/"+machineAgent+"/skills":
+			response = f.agentSkills
+		case r.Method == "POST" && r.URL.Path == "/api/agents/"+machineAgent+"/skills/add":
+			if f.failSkills == "add" {
+				http.Error(w, "fixture skill add failure", 500)
+				return
+			}
+			var body struct {
+				SkillIDs []string `json:"skill_ids"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, id := range body.SkillIDs {
+				f.agentSkills = append(f.agentSkills, machineSkill{ID: id, Enabled: true})
+			}
+			response = f.agentSkills
+		case r.Method == "PUT" && strings.Contains(r.URL.Path, "/skills/") && strings.HasSuffix(r.URL.Path, "/enabled"):
+			if f.failSkills == "enable" {
+				http.Error(w, "fixture skill enable failure", 500)
+				return
+			}
+			var body struct {
+				Enabled bool `json:"enabled"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for i := range f.agentSkills {
+				if strings.Contains(r.URL.Path, "/"+f.agentSkills[i].ID+"/") {
+					f.agentSkills[i].Enabled = body.Enabled
+				}
+			}
+			response = f.agentSkills
 		case r.Method == "PATCH":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)

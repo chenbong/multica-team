@@ -12,7 +12,10 @@ New units use the team-mesh-daily-bos-backup name.
 
 The host shell runner owns the three-attempt retry boundary, including Docker
 launch failures. It invokes one Python backup operation per attempt, waits ten
-minutes between failures and sends at most one terminal-failure notice. The
+minutes between failures and sends one private notice for a verified success or
+one terminal-failure notice. A skipped overlapping run sends no success notice.
+Notification delivery failure is recorded independently and never retries a
+completed backup. The
 Python CLI without the host-runner attempt flag retains its standalone retry
 mode. The host runner and Python worker have separate locks to prevent overlap.
 
@@ -31,7 +34,10 @@ them before the backup process starts.
   staging are mode 0600/0700. A private-bucket probe is checked before capture;
   each archive is explicitly private and anonymous access must be denied.
 - No signed/download links are produced. All archive bytes are downloaded
-  again and SHA-256 compared before declaring success or pruning.
+  again and SHA-256 compared before declaring success or pruning. The downloaded
+  archive is read fully, every component is checked against its manifest, and
+  the downloaded database dump is fully decoded with `pg_restore` into a sink.
+  This checks readability; it is not a database restore drill.
 - Only exact objects in the instance-owned successful-backup ledger are
   eligible for deletion after 30 days. Images, other prefixes and old manual
   backups are never recursively deleted. Concurrent invocations use a lock.

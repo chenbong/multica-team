@@ -31,6 +31,7 @@ type machineOptions struct {
 	Runtime     string
 	Model       *string
 	Thinking    *string
+	SkillList   []string // nil means keep the existing assignments unchanged
 	Wait        time.Duration
 }
 
@@ -73,6 +74,9 @@ func newMachineCommand() *cobra.Command {
 		command.Flags().String("model", "", "Optional model override")
 		command.Flags().String("thinking-level", "", "Optional thinking override; empty uses the runtime default")
 		command.Flags().Duration("wait", 90*time.Second, "Maximum wait for this computer/runtime to register")
+		if name == "agent" {
+			command.Flags().StringSlice("skill-list", nil, "Existing skill names or full IDs, comma-separated; add and enable without removing other skills")
+		}
 		parent.AddCommand(command)
 	}
 	return parent
@@ -147,6 +151,10 @@ func runMachineEnroll(cmd *cobra.Command, _ []string) (err error) {
 	options.AgentName, _ = cmd.Flags().GetString("agent-name")
 	options.Runtime, _ = cmd.Flags().GetString("runtime")
 	options.Wait, _ = cmd.Flags().GetDuration("wait")
+	if cmd.Flags().Changed("skill-list") {
+		values, _ := cmd.Flags().GetStringSlice("skill-list")
+		options.SkillList = append([]string{}, values...)
+	}
 	if cmd.Flags().Changed("model") {
 		value, _ := cmd.Flags().GetString("model")
 		options.Model = &value
@@ -546,6 +554,17 @@ func enrollMachine(ctx context.Context, client *cli.APIClient, machineID string,
 		return result, errors.New("the signed-in user is not a member of the selected workspace")
 	}
 	machineCompleted(result, "account_verified")
+	var skillIDs []string
+	var err error
+	if options.SkillList != nil {
+		if options.AgentName == "" {
+			return result, errors.New("--agent-name is required with --skill-list")
+		}
+		skillIDs, err = machineResolveSkills(ctx, client, options.SkillList)
+		if err != nil {
+			return result, err
+		}
+	}
 	runtime, err := waitMachineRuntime(ctx, client, machineID, owner, options)
 	if err != nil {
 		return result, err
@@ -596,6 +615,9 @@ func enrollMachine(ctx context.Context, client *cli.APIClient, machineID string,
 	}
 	var saved map[string]any
 	if existing == nil {
+		if skillIDs != nil {
+			body["skill_ids"] = skillIDs
+		}
 		if err = client.PostJSON(ctx, "/api/agents", body, &saved); err != nil {
 			return result, err
 		}
@@ -646,5 +668,14 @@ func enrollMachine(ctx context.Context, client *cli.APIClient, machineID string,
 	}
 	result["agent_id"], result["agent_name"] = saved["id"], saved["name"]
 	machineCompleted(result, "agent_ready")
+	if skillIDs != nil {
+		if existing != nil {
+			if err = machineAddSkills(ctx, client, strVal(saved, "id"), skillIDs); err != nil {
+				return result, err
+			}
+		}
+		result["skill_ids"] = skillIDs
+		machineCompleted(result, "skills_ready")
+	}
 	return result, nil
 }

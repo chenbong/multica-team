@@ -75,7 +75,7 @@ func TestOwnerManagedIssueReadsStayReadOnlyAndOwnerScoped(t *testing.T) {
 	req := withURLParam(newRequest(http.MethodPut, "/administrators", map[string]any{"user_ids": []string{bob}}), "id", own)
 	req.Header.Set("X-User-ID", alice)
 	req.Header.Set("X-Workspace-ID", target)
-	testutil.Call(t, testHandler.IssueManagers, req).Want(200)
+	testutil.Call(t, testHandler.IssueManagers, req).Want(410)
 	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(own, "", testUserID, agent, task)).Want(200)
 	dbfx.Exec(t, `DELETE FROM member WHERE workspace_id=$1 AND user_id=$2`, target, alice)
 	testutil.Call(t, testHandler.OwnerManagedIssues, managedReadRequest(own, "", testUserID, agent, task)).Want(404)

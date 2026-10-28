@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { Activity, ArrowRight, Bot, CheckCheck, ChevronRight, Clock3, Layers3, MessageSquare, Monitor, MousePointer2, RefreshCw, Users, Zap } from "lucide-react";
 import { TrendChart } from "./trend-chart";
 import { usePublicLive } from "./public-data";
@@ -9,7 +10,7 @@ import { AnimatedNumber } from "./animated-number";
 import { ActivityFeed } from "./activity-feed";
 import "./preview.css";
 
-const styleNames = ["page","demo","nav","logo","logoIcon","navBadge","guide","primary","secondary","main","hero","eyebrow","greenDot","amberDot","status","sectionHead","schedule","liveGrid","card","cardTitle","value","splitValue","section","todayGrid","todayCard","caption","middleGrid","chartPanel","feedPanel","tabs","chartMeta","legend","chart","chartColumn","barTrack","bar","completedBar","axis","empty","feedBadge","feedIntro","eventIcon","green","blue","violet","amber","capabilityGrid","capability","capabilityIcon","scale","scaleNumbers","cta","footer","notes","previewControls","warning","srOnly"];
+const styleNames = ["page","demo","nav","logo","brandLight","brandDark","navBadge","guide","primary","secondary","main","hero","heroAside","mascot","heroAccent","eyebrow","greenDot","amberDot","status","sectionHead","schedule","liveGrid","card","cardTitle","value","splitValue","section","todayGrid","todayCard","caption","middleGrid","chartPanel","feedPanel","tabs","chartMeta","legend","chart","chartColumn","barTrack","bar","completedBar","axis","empty","feedBadge","feedIntro","eventIcon","green","blue","violet","amber","capabilityGrid","capability","capabilityIcon","scale","scaleNumbers","cta","footer","notes","previewControls","warning","srOnly"];
 const styles: Record<string, string> = Object.fromEntries([...styleNames,"eventMembers"].map(name=>[name,`tm-live-${name}`]));
 
 const demoSeries = {
@@ -59,13 +60,13 @@ export function LiveDashboardPreview({quickStartHref,mode="demo",readOnlyPreview
   return <div className={styles.page} role="region" aria-label="平台实时看板" tabIndex={0}>
     {(mode==="demo"||readOnlyPreview)&&<aside className={styles.demo} role="note">{mode==="demo"?<><strong>本地交互预览 · 演示数据</strong><span>所有数字与动态均为示例，不代表平台实际使用情况，未接入线上统计。</span></>:<><strong>本地只读预览 · 真实聚合数据</strong><span>仅查询线上数据，不修改业务记录。新口径活跃人数和 PV 尚未采集，以“—”显示。</span></>}</aside>}
     <header className={styles.nav}>
-      <Link className={styles.logo} href="/live"><span className={styles.logoIcon}><Layers3 size={20}/></span>Team Mesh <span className={styles.navBadge}>平台实时看板</span></Link>
+      <Link className={styles.logo} href="/live" aria-label="Team Mesh 平台实时看板"><Image className={styles.brandLight} src="/team-mesh/teammesh-lockup.svg" alt="" width={580} height={132} unoptimized/><Image className={styles.brandDark} src="/team-mesh/teammesh-lockup-dark.svg" alt="" width={580} height={132} unoptimized/><span className={styles.navBadge} aria-hidden="true">平台实时看板</span></Link>
       <nav aria-label="看板导航">{quickStartHref && <a href={quickStartHref} className={styles.guide} target="_blank" rel="noopener noreferrer">快速上手</a>}<Link className={styles.primary} href="/login" target="_blank" rel="noopener noreferrer">开始使用 <ArrowRight size={15}/></Link></nav>
     </header>
     <main className={styles.main}>
       <section className={styles.hero}>
-        <div><div className={styles.eyebrow}><span/> 人与 AI，一起把事情做成</div><h1>协作，正在发生。</h1><p>从一个想法到一项任务，让智能体、开发机器和团队对话连接起来。</p></div>
-        <div className={styles.status}><span className={delayed ? styles.amberDot : styles.greenDot}/>{mode==="demo"?(delayed ? "演示：数据更新延迟" : "演示状态 · 非实时数据"):(delayed?"数据更新延迟":hasData?"数据正常更新":"数据加载中")}{mode==="live"&&updatedAt&&<small>最近成功更新：{new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).format(new Date(updatedAt))}</small>}</div>
+        <div><div className={styles.eyebrow}><span/> 团队与 AI 小队，一起把事情做成</div><h1>协作，<span className={styles.heroAccent}>正在发生。</span></h1><p>从一个想法到一项任务，让智能体、开发机器和团队对话连接起来。</p></div>
+        <div className={styles.heroAside}><div className={styles.mascot} aria-hidden="true"><Image src="/team-mesh/teammesh-icon.svg" alt="" width={264} height={264} unoptimized/></div><div className={styles.status}><span className={delayed ? styles.amberDot : styles.greenDot}/>{mode==="demo"?(delayed ? "演示：数据更新延迟" : "演示状态 · 非实时数据"):(delayed?"数据更新延迟":hasData?"数据正常更新":"数据加载中")}{mode==="live"&&updatedAt&&<small>最近成功更新：{new Intl.DateTimeFormat("zh-CN",{timeZone:"Asia/Shanghai",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).format(new Date(updatedAt))}</small>}</div></div>
       </section>
 
       <section aria-labelledby="now-title">
@@ -113,7 +114,7 @@ export function LiveDashboardPreview({quickStartHref,mode="demo",readOnlyPreview
 
       <section className={styles.scale} aria-labelledby="scale-title"><div><span className={styles.eyebrow}>一起构建 AI 协作网络</span><h2 id="scale-title">平台已有的规模</h2><span className={styles.schedule}>每 10 秒更新</span></div><div className={styles.scaleNumbers}>{scaleRows.map(({label,value,unit})=><div key={label}><strong><AnimatedNumber value={unavailable?null:value}/><small>{unit}</small></strong><span>{label}</span></div>)}</div></section>
 
-      <section className={styles.cta}><div><h2>下一项工作，让 AI 和你一起完成。</h2><p>接入开发机器，创建智能体，从一个真实任务开始。</p></div><Link className={styles.primary} href="/login" target="_blank" rel="noopener noreferrer">开始使用 Team Mesh <ArrowRight size={17}/></Link>{quickStartHref && <a className={styles.secondary} href={quickStartHref} target="_blank" rel="noopener noreferrer">查看快速上手 <ChevronRight size={15}/></a>}</section>
+      <section className={styles.cta}><div><h2>下一项工作，让 AI小队和团队一起完成。</h2><p>接入开发机器，创建智能体，从一个真实任务开始。</p></div><Link className={styles.primary} href="/login" target="_blank" rel="noopener noreferrer">开始使用 Team Mesh <ArrowRight size={17}/></Link>{quickStartHref && <a className={styles.secondary} href={quickStartHref} target="_blank" rel="noopener noreferrer">查看快速上手 <ChevronRight size={15}/></a>}</section>
       <footer className={styles.footer}><span>Team Mesh · 组织 AI 协作平台</span></footer>
       {mode==="demo"&&<section className={styles.previewControls} aria-label="本地预览控制"><span><Activity size={15}/> 预览状态</span><button disabled={delayed||unavailable} onClick={()=>setDemoRefresh(v=>v+1)}><RefreshCw size={14}/>模拟数字刷新</button><button disabled={delayed||unavailable} onClick={()=>setDemoActivity(v=>v+1)}><Activity size={14}/>模拟新增动态</button><button aria-pressed={delayed} onClick={()=>setDelayed(v=>!v)}><Clock3 size={14}/>{delayed ? "恢复状态展示" : "模拟更新延迟"}</button><button aria-pressed={unavailable} onClick={()=>setUnavailable(v=>!v)}><RefreshCw size={14}/>{unavailable ? "恢复示例数值" : "模拟数据缺失"}</button></section>}
     </main>

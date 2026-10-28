@@ -19,6 +19,9 @@ if ! flock -n 9; then
  exit 0
 fi
 stop_job(){ "$docker_bin" stop -t 30 team-mesh-daily-backup-job >/dev/null 2>&1 || true; }
+attempt_result="$(mktemp "$state_dir/.attempt-result.XXXXXXXX")" || exit 2
+cleanup(){ rm -f -- "$attempt_result"; }
+trap cleanup EXIT
 trap 'stop_job; exit 143' TERM INT
 for attempt in 1 2 3; do
  "$docker_bin" run --rm --name team-mesh-daily-backup-job --log-driver none --network host \
@@ -26,12 +29,25 @@ for attempt in 1 2 3; do
   -v "$docker_bin:/usr/local/bin/docker:ro" \
   -e HTTPS_PROXY -e HTTP_PROXY -e NO_PROXY \
   "$python_image" python3 "$instance_dir/code/multica-team/deploy/daily-bos-backup.py" \
-  --config "$instance_dir/config/daily-backup.json" --attempt "$attempt"
+  --config "$instance_dir/config/daily-backup.json" --attempt "$attempt" > "$attempt_result"
  code=$?
  stamp=$(date -u +%FT%TZ)
  if [ "$code" = 0 ]; then
+  if grep -Eq '"skipped"[[:space:]]*:[[:space:]]*"already-running"' "$attempt_result"; then
+   printf '{"ok":true,"skipped":"already-running","finished_at":"%s"}\n' "$stamp" >> "$state_dir/runner-runs.jsonl"
+   exit 0
+  fi
   printf '{"ok":true,"attempts":%s,"finished_at":"%s"}\n' "$attempt" "$stamp" >> "$state_dir/runner-runs.jsonl"
-  exit 0
+  notice_ok=false
+  if [[ "${TEAM_MESH_BACKUP_NOTIFY_USER:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+   if "$docker_bin" exec -i team-mesh-bridge node /team/code/multica-team/deploy/notify-backup-success.mjs "$TEAM_MESH_BACKUP_NOTIFY_USER" < "$attempt_result"; then notice_ok=true; fi
+  fi
+  printf '{"ok":%s,"kind":"success","attempts":%s,"finished_at":"%s"}\n' "$notice_ok" "$attempt" "$(date -u +%FT%TZ)" > "$state_dir/.notification-result.tmp"
+  mv -f "$state_dir/.notification-result.tmp" "$state_dir/notification-result.json"
+  if [ "$notice_ok" = true ]; then exit 0; fi
+  # A delivery failure is not a backup failure and must not trigger a new
+  # backup attempt. Keep the verified backup and report notification failure.
+  exit 1
  fi
  stop_job
  printf '{"ok":false,"attempts":%s,"exit_code":%s,"failed_stage":"backup_or_container","finished_at":"%s"}\n' "$attempt" "$code" "$stamp" > "$state_dir/.runner-result.tmp"

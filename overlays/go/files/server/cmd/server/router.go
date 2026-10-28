@@ -2106,6 +2106,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.With(handler.RequireHumanActor).Delete("/web-panels/{panelId}", h.DeleteIssueWebPanel)
 					r.Get("/administrators", h.IssueManagers)
 					r.With(handler.RequireHumanActor).Put("/administrators", h.IssueManagers)
+					r.Get("/permissions", h.IssuePermissions)
 					r.Get("/infoflow-groups", h.GetIssueInfoFlowGroups)
 					r.With(handler.RequireHumanActor).Get("/infoflow-group-binding", h.GetIssueInfoFlowGroupBinding)
 					r.With(handler.RequireHumanActor).Post("/infoflow-group-binding", h.BindIssueInfoFlowGroup)

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestIssueTransferTreePreservesContentAndRemapsAdministrators(t *testing.T) {
+func TestIssueTransferTreePreservesContentAndLegacyManagers(t *testing.T) {
 	f := newTransferFixture(t)
 	ctx := context.Background()
 	alice := managerTestUser(t, "Source-only task creator")
@@ -75,8 +75,8 @@ func TestIssueTransferTreePreservesContentAndRemapsAdministrators(t *testing.T) 
 		t.Fatal("source wakeup still active")
 	}
 	requireManagerIDs(t, uuidToString(f.issue), testUserID)
-	requireManagerIDs(t, child, targetOwner)
-	requireManagerIDs(t, grandchild, targetOwner)
+	requireManagerIDs(t, child, alice)
+	requireManagerIDs(t, grandchild, alice)
 	// Simulate an already-admitted old DELETE continuing after the move. It must
 	// not cancel a newly started run in the destination workspace.
 	runtime := dbfx.Runtime(t, "Destination runtime", testutil.Cols{"workspace_id": uuidToString(f.target), "owner_id": targetOwner})
@@ -106,17 +106,55 @@ func TestIssueTransferSingleDetachesChildrenAndRequiresHumanConfirmation(t *test
 		t.Fatal("single-task move moved or retained the external child edge")
 	}
 }
-func TestIssueTransferTreeChecksEveryTaskAdministrator(t *testing.T) {
+func TestIssueTransferTreeChecksEveryCreator(t *testing.T) {
 	f := newTransferFixture(t)
 	alice := managerTestUser(t, "Root-only administrator")
 	dbfx.Member(t, uuidToString(f.target), alice, "member")
-	dbfx.Exec(t, `DELETE FROM issue_manager WHERE issue_id=$1`, f.issue)
-	dbfx.Exec(t, `INSERT INTO issue_manager(issue_id,user_id) VALUES($1,$2)`, f.issue, alice)
+	dbfx.Exec(t, `UPDATE issue SET creator_id=$2 WHERE id=$1`, f.issue, alice)
 	child := dbfx.Issue(t, "Child owned by someone else", testutil.Cols{"status": "cancelled", "parent_issue_id": uuidToString(f.issue)})
 	initializeManagers(t, child)
 	_, err := testHandler.runIssueTransfer(context.Background(), f.issue, f.source, f.target, parseUUID(alice), issueTransferRequest{IncludeSubissues: true}, false)
 	expectTransferCode(t, err, "transfer_forbidden")
 	if _, err = testHandler.runIssueTransfer(context.Background(), f.issue, f.source, f.target, parseUUID(alice), issueTransferRequest{}, false); err != nil {
-		t.Fatal("root administrator cannot move their own task:", err)
+		t.Fatal("creator cannot move their own task:", err)
 	}
+}
+
+func TestIssueTransferRetainsCreatorWhoIsNotDestinationMember(t *testing.T) {
+	f := newTransferFixture(t)
+	creator := managerTestUser(t, "Source-only creator")
+	dbfx.Exec(t, `UPDATE issue SET creator_id=$2 WHERE id=$1`, f.issue, creator)
+	plan, err := f.run(issueTransferRequest{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.run(issueTransferRequest{Fingerprint: plan.Fingerprint}, true); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	dbfx.QueryRow(t, `SELECT creator_id::text FROM issue WHERE id=$1`, f.issue).Scan(&got)
+	if got != creator {
+		t.Fatal("transfer changed creator")
+	}
+	allowed, err := testHandler.Queries.CanManageIssueByCreator(context.Background(), f.issue, f.target, parseUUID(creator))
+	if err != nil || allowed {
+		t.Fatalf("nonmember creator should not have deletion permission: %v %v", allowed, err)
+	}
+}
+
+func TestIssueTransferUsesCurrentAgentOwner(t *testing.T) {
+	f := newTransferFixture(t)
+	owner := managerTestUser(t, "Agent creator owner")
+	other := managerTestUser(t, "Other user")
+	dbfx.Member(t, uuidToString(f.target), owner, "member")
+	agent := dbfx.Agent(t, "Archived creator", testRuntimeID, testutil.Cols{"owner_id": owner})
+	dbfx.Exec(t, `UPDATE agent SET archived_at=now() WHERE id=$1`, agent)
+	dbfx.Exec(t, `UPDATE issue SET creator_type='agent',creator_id=$2 WHERE id=$1`, f.issue, agent)
+	plan, err := testHandler.runIssueTransfer(context.Background(), f.issue, f.source, f.target, parseUUID(owner), issueTransferRequest{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Exec(t, `UPDATE agent SET owner_id=$2 WHERE id=$1`, agent, other)
+	_, err = testHandler.runIssueTransfer(context.Background(), f.issue, f.source, f.target, parseUUID(owner), issueTransferRequest{Fingerprint: plan.Fingerprint, ConfirmCleanup: true}, true)
+	expectTransferCode(t, err, "transfer_forbidden")
 }

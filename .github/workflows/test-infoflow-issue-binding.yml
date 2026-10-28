@@ -49,6 +49,10 @@ jobs:
           reactions.test.js task-status-notifications.test.js group-info.test.js conversation-notices.test.js robot-directory.test.js admin-form.test.js private-bind-metadata.test.js issue-handlers.test.js receipt-handoff.test.js reply-mentions.test.js reply-title.test.js group-markdown.test.js reply-format.test.js infoflow-markdown.test.js
       - name: Verify configured Web release acceptance
         run: python3 -m unittest discover -s deploy -p test_verify_web_release.py -v
+      - name: Verify backup notifications with isolated storage fixtures
+        run: |
+          python3 -m unittest discover -s deploy -p test_daily_bos_backup.py -v
+          python3 -m unittest discover -s deploy -p test_backup_host_runner.py -v
       - name: Verify standalone restart credentials and private state exclusions
         run: |
           python3 -m unittest discover -s infoflow-bridge/test -p 'test_bridgectl.py' -v
@@ -72,10 +76,8 @@ jobs:
         run: |
           set -euo pipefail
           export GOFLAGS="-overlay=$GITHUB_WORKSPACE/overlays/go-overlay.json -mod=readonly"
-          go test -race ./internal/handler -run '^Test(MachineProvision|MachineWorkspace|MachineAgentLock|MachineRelease|MachineScript|InfoFlow|SharedChat|BuiltinSandbox|OneAPI|OneToolImport|ImportSkill|ParseSkillArchive|FetchImportedSkill|SkillRefresh|ResourceWebPanel|IssueTransfer)' -count=1 -v
+          go test -race ./internal/handler -run '^Test(MachineProvision|MachineScript|IssueCreator|IssueAgentCreator|IssueBatchDeletion|IssueDeletionTransaction|IssueLegacyAdministrators|InfoFlow|SharedChat|BuiltinSandbox|OneAPI|OneToolImport|ImportSkill|ParseSkillArchive|FetchImportedSkill|SkillRefresh|ResourceWebPanel|IssueTransfer)' -count=1 -v
           go test -race ./cmd/server -run '^TestInfoFlow' -count=1 -v
-          go build -o "$RUNNER_TEMP/tmesh-cli-fixture" ./cmd/multica
-          TMESH_CLI_TEST_BINARY="$RUNNER_TEMP/tmesh-cli-fixture" go test -race ./cmd/server -run '^TestTmesh(Machine|ReleaseLookup)' -count=1 -v
           go test -race ./cmd/server -run '^TestPersonalMachineName' -count=1 -v
           go test -race ./internal/handler -run '^Test(MachineName|UpdateAgentRuntime_CustomName|DaemonRegister_.*(CustomName|MachineName))' -count=1 -v
           go test -race ./internal/service -run '^Test(ResourceWebPanelSkill|BuiltinSkillsConformToTemplate|BuiltinSkillsFrontmatterIsStrictYAML|BuiltinSkillPayload)' -count=1 -v
@@ -112,6 +114,9 @@ jobs:
           cd build/group-web
           pnpm --filter @multica/web exec vitest run platform/document-title.test.tsx
           pnpm --filter @multica/core exec vitest run api/infoflow-groups.test.ts api/infoflow-group-binding.test.ts issues/infoflow-groups.test.ts issues/infoflow-group-binding.test.ts api/infoflow-conversations.test.ts issues/infoflow-conversations.test.ts
+          pnpm --filter @multica/core exec vitest run api/issue-permissions.test.ts
+          pnpm --filter @multica/views exec vitest run issues/actions/__tests__/issue-actions-menu.test.tsx settings/components/personal-secrets-section.test.tsx
+          pnpm --filter @multica/web exec vitest run app/live/preview.test.tsx
           pnpm --filter @multica/core exec vitest run runtimes/personal-name-schema.test.ts runtimes/mutations.machine-name.test.tsx
           pnpm --filter @multica/views exec vitest run issues/components/issue-infoflow-groups.test.tsx issues/components/issue-infoflow-group-binding.test.tsx issues/components/bind-infoflow-conversation.test.tsx
           pnpm --filter @multica/views exec vitest run agents/components/inspector/oneapi-thinking.test.ts agents/components/inspector/manual-model-thinking.test.tsx agents/components/inspector/model-change-cleanup.test.ts

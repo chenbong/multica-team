@@ -19,19 +19,65 @@ import (
 )
 
 type machineProvisionInput struct {
-	Username    string `json:"username"`
-	MachineName string `json:"machine_name,omitempty"`
+	Username      string `json:"username"`
+	MachineName   string `json:"machine_name,omitempty"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
 }
+
+const defaultMachineProvisionWorkspace = "pdc-loop"
 
 var errMachineWorkspaceAmbiguous = errors.New("multiple accessible workspaces have this name")
 var errMachineWorkspaceDisabled = errors.New("workspace creation disabled")
+var errMachineProvisionWorkspaceMissing = errors.New("target workspace not found")
+var errMachineProvisionWorkspaceAmbiguous = errors.New("multiple workspaces have the target name")
+
+func (input machineProvisionInput) workspaceName() string {
+	if name := strings.TrimSpace(input.WorkspaceName); name != "" {
+		return name
+	}
+	return defaultMachineProvisionWorkspace
+}
 
 func (input *machineProvisionInput) validate() error {
 	if !utf8.ValidString(input.MachineName) || utf8.RuneCountInString(input.MachineName) > 128 || strings.IndexFunc(input.MachineName, unicode.IsControl) >= 0 {
 		return errors.New("invalid machine name")
 	}
 	input.MachineName = strings.TrimSpace(input.MachineName)
+	if !utf8.ValidString(input.WorkspaceName) || utf8.RuneCountInString(input.WorkspaceName) > 128 || strings.IndexFunc(input.WorkspaceName, unicode.IsControl) >= 0 {
+		return errors.New("invalid workspace name")
+	}
+	input.WorkspaceName = input.workspaceName()
 	return nil
+}
+
+// The provisioning credential may join a user to an existing workspace. The
+// client ensure command remains membership-scoped and must not guess a target.
+func machineProvisionWorkspaceByName(ctx context.Context, tx pgx.Tx, name string) (db.Workspace, error) {
+	rows, err := tx.Query(ctx, `SELECT id FROM workspace WHERE name=$1 ORDER BY id LIMIT 2 FOR SHARE`, name)
+	if err != nil {
+		return db.Workspace{}, err
+	}
+	var ids []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return db.Workspace{}, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return db.Workspace{}, err
+	}
+	if len(ids) == 0 {
+		return db.Workspace{}, errMachineProvisionWorkspaceMissing
+	}
+	if len(ids) > 1 {
+		return db.Workspace{}, errMachineProvisionWorkspaceAmbiguous
+	}
+	return db.New(tx).GetWorkspace(ctx, ids[0])
 }
 
 // The caller serializes ensures for this user. Slug contention between
@@ -195,8 +241,9 @@ func machineWorkspaceSlug(name string) string {
 	return base
 }
 
-func machineOnboardingCommand(cfg machineCommandConfig, email, token, username string, input machineProvisionInput) string {
+func machineOnboardingCommand(cfg machineCommandConfig, email, token string, input machineProvisionInput) string {
 	cli := "multica --profile " + daemonProfileSlug(email)
+	workspace := machineShellQuote(input.workspaceName())
 	defaults := ""
 	if cfg.Runtimes != "" {
 		defaults += cli + " config set daemon_runtimes " + machineShellQuote(cfg.Runtimes) + "\n"
@@ -206,119 +253,47 @@ func machineOnboardingCommand(cfg machineCommandConfig, email, token, username s
 	}
 	machineSteps := ""
 	if input.MachineName != "" {
-		machineSteps = `tmesh_step=machine_rename
-__CLI__ tmesh-machine rename --workspace-name __USERNAME__ --machine-name __MACHINE__ > "$tmesh_result_dir/machine.json"
-tmesh_complete machine_rename
-tmesh_step=agent
-__CLI__ tmesh-machine agent --workspace-name __USERNAME__ --agent-name __MACHINE__ --runtime ducc > "$tmesh_result_dir/agent.json"
-tmesh_complete agent
+		machineSteps = `
+# 5. 重命名机器并创建或复用智能体
+__CLI__ tmesh-machine rename --workspace-name __WORKSPACE__ --machine-name __MACHINE__
+__CLI__ tmesh-machine agent --workspace-name __WORKSPACE__ --agent-name __MACHINE__ --runtime ducc
 `
 	}
-	usernameJSON, _ := json.Marshal(username)
 	template := `#!/usr/bin/env bash
 set +x
-set -e
-set -o pipefail
+set -e -o pipefail
 umask 077
 
-# Preserve stdout for exactly one final JSON document; all ordinary logs use stderr.
-exec 3>&1
-exec 1>&2
-tmesh_step=network
-tmesh_steps=''
-tmesh_result_dir=''
-tmesh_complete() {
-  if [ -n "$tmesh_steps" ]; then tmesh_steps="$tmesh_steps,"; fi
-  tmesh_steps="$tmesh_steps\"$1\""
-}
-tmesh_finish() {
-  tmesh_status=$?
-  trap - EXIT
-  set +e
-  unset MULTICA_TOKEN
-  tmesh_workspace='{}'; tmesh_machine='{}'; tmesh_agent='{}'
-  for tmesh_part in workspace machine agent; do
-    tmesh_value='{}'
-    if [ -n "$tmesh_result_dir" ] && [ -s "$tmesh_result_dir/$tmesh_part.json" ]; then
-      tmesh_value=$(cat "$tmesh_result_dir/$tmesh_part.json")
-      case "$tmesh_value" in \{*\}) ;; *) tmesh_value='{}'; tmesh_status=1 ;; esac
-    fi
-    case "$tmesh_part" in
-      workspace) tmesh_workspace="$tmesh_value" ;;
-      machine) tmesh_machine="$tmesh_value" ;;
-      agent) tmesh_agent="$tmesh_value" ;;
-    esac
-  done
-  if [ "$tmesh_status" -eq 0 ]; then
-    printf '{"success":true,"exit_code":0,"username":__USERJSON__,"completed_steps":[%s],"workspace":%s,"machine":%s,"agent":%s}\n' "$tmesh_steps" "$tmesh_workspace" "$tmesh_machine" "$tmesh_agent" >&3
-  else
-    printf '{"success":false,"exit_code":%s,"username":__USERJSON__,"failed_step":"%s","error":"The step failed; completed changes were retained. See stderr for details.","completed_steps":[%s],"workspace":%s,"machine":%s,"agent":%s}\n' "$tmesh_status" "$tmesh_step" "$tmesh_steps" "$tmesh_workspace" "$tmesh_machine" "$tmesh_agent" >&3
-  fi
-  if [ -n "$tmesh_result_dir" ]; then
-    command rm -f "$tmesh_result_dir/workspace.json" "$tmesh_result_dir/machine.json" "$tmesh_result_dir/agent.json"
-    rmdir "$tmesh_result_dir" 2>/dev/null
-  fi
-  exit "$tmesh_status"
-}
-trap tmesh_finish EXIT
-tmesh_result_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmesh-enroll.XXXXXXXX")
+# 1. 配置网络并安装 Multica CLI
 export no_proxy=".bcebos.com,.duckdns.org,.ai-chat.host,.baidu-int.com,10.0.0.0/8${no_proxy:+,$no_proxy}"
 export NO_PROXY="$no_proxy"
 export https_proxy="http://agent.baidu.com:8188"
 export http_proxy="$https_proxy"
-tmesh_complete network
-tmesh_step=release
-tmesh_release=$(curl -fsSL --connect-timeout 5 --max-time 15 -H __AUTH__ __RELEASE_URL__)
-if ! printf '%s\n' "$tmesh_release" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-overlay\.[0-9]+$' >/dev/null; then
-  printf '%s\n' 'The platform returned an invalid Team Mesh CLI release.'
-  exit 1
-fi
-tmesh_complete release
-tmesh_step=install
 export MULTICA_BIN_DIR="${MULTICA_BIN_DIR:-$HOME/.local/bin}"
-curl -fsSL __INSTALL__ | MULTICA_VERSION="$tmesh_release" bash
-export PATH="${MULTICA_BIN_DIR:+$MULTICA_BIN_DIR:}$HOME/.local/bin:/usr/local/bin:$PATH"
-if ! multica tmesh-workspace ensure --help | grep -F -- '--set-default-if-unset' >/dev/null; then
-  printf '%s\n' 'Installed CLI does not support Team Mesh workspace preparation.'
-  exit 1
-fi
-if ! multica tmesh-machine agent --help | grep -F -- '--workspace-name' >/dev/null; then
-  printf '%s\n' 'Installed CLI does not support workspace names for Team Mesh agents.'
-  exit 1
-fi
-if ! multica login --help | grep -F -- '--tmesh-noninteractive' >/dev/null; then
-  printf '%s\n' 'Installed CLI does not support non-interactive Team Mesh login.'
-  exit 1
-fi
-tmesh_complete install
-tmesh_step=workspace
+curl -fsSL __INSTALL__ | bash
+export PATH="$MULTICA_BIN_DIR:$HOME/.local/bin:/usr/local/bin:$PATH"
+
+# 2. 配置平台地址、登录并准备工作区
 __CLI__ config set server_url __SERVER__
 __CLI__ config set app_url __APP__
-export MULTICA_TOKEN=__TOKEN__
-__CLI__ tmesh-workspace ensure --name __USERNAME__ --set-default-if-unset > "$tmesh_result_dir/workspace.json"
-unset MULTICA_TOKEN
-tmesh_complete workspace
-tmesh_step=login
 __CLI__ login --tmesh-noninteractive --token __TOKEN__
-tmesh_complete login
-tmesh_step=runtime_setup
+__CLI__ tmesh-workspace ensure --name __WORKSPACE__
+
+# 3. 配置运行时并准备 ducc、ducx
 __DEFAULTS____CLI__ ducc setup
 export PATH="$HOME/.baidu-cc/baidu-cc/bin:$HOME/.comate/baidu-cc/bin:$HOME/.baidu-cx/baidu-cx/bin:$HOME/.comate/baidu-cx/bin:$PATH"
 ducc config model 'Opus 4.8'
-tmesh_complete runtime_setup
-tmesh_step=daemon_restart
+
+# 4. 启动守护进程，连接平台
 __CLI__ daemon restart
-tmesh_complete daemon_restart
 __MACHINESTEPS__`
 	return strings.NewReplacer(
 		"__CLI__", cli, "__INSTALL__", machineShellQuote(cfg.InstallURL),
 		"__SERVER__", machineShellQuote(cfg.ServerURL), "__APP__", machineShellQuote(cfg.AppURL),
-		"__TOKEN__", machineShellQuote(token), "__AUTH__", machineShellQuote("Authorization: Bearer "+token),
-		"__RELEASE_URL__", machineShellQuote(strings.TrimRight(cfg.ServerURL, "/")+"/api/tmesh/releases/latest"),
-		"__USERNAME__", machineShellQuote(username),
-		"__MACHINE__", machineShellQuote(input.MachineName), "__USERJSON__", string(usernameJSON),
-		"__DEFAULTS__", defaults, "__MACHINESTEPS__", strings.NewReplacer(
-			"__CLI__", cli, "__USERNAME__", machineShellQuote(username), "__MACHINE__", machineShellQuote(input.MachineName),
+		"__TOKEN__", machineShellQuote(token), "__WORKSPACE__", workspace,
+		"__MACHINE__", machineShellQuote(input.MachineName), "__DEFAULTS__", defaults,
+		"__MACHINESTEPS__", strings.NewReplacer(
+			"__CLI__", cli, "__WORKSPACE__", workspace, "__MACHINE__", machineShellQuote(input.MachineName),
 		).Replace(machineSteps),
 	).Replace(template)
 }

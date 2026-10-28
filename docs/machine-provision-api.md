@@ -1,6 +1,6 @@
 # Delegated machine installation command
 
-The provisioning API prepares the account and returns a Bash script for a
+The provisioning API prepares the account, joins it to an existing workspace, and returns a Bash script for a
 trusted allocation backend to execute on the user's Linux or macOS machine.
 The API does not execute the script or create a workspace.
 
@@ -14,11 +14,12 @@ Content-Type: application/json
 ```
 
 ```json
-{"username":"zhangsan","machine_name":"zhangsan-dev"}
+{"username":"zhangsan","machine_name":"zhangsan-dev","workspace_name":"pdc-loop"}
 ```
 
 `username` is required; it is the canonical account name, not a full email.
-`machine_name` is optional. Other fields, including the former `agent_name`,
+`machine_name` and `workspace_name` are optional. An omitted or blank
+`workspace_name` defaults to `pdc-loop`. Other fields, including the former `agent_name`,
 `runtime`, `model`, `thinking_level` and `workspace_id`, are rejected.
 Browser Origin requests and query parameters are rejected. User PATs and
 session cookies do not authorize this operator endpoint.
@@ -27,34 +28,45 @@ A successful response is `200 text/plain` containing the complete script.
 It is not a JSON response and contains the user's reusable login token. The
 response is marked `no-store`. Keep it out of logs, Git and shared artifacts.
 
-The account and token can be created during the API request. A workspace is
-created only when the script's user-authenticated CLI step executes. With a
-machine name, the script uses that name for both the machine and the agent.
-Without one, it still prepares the username workspace and daemon but does not
-rename a machine or create an agent.
+The API resolves one existing workspace by its exact display name, adds the
+user as a regular `member` if they are not already present, and issues the
+login credential in the same transaction as account preparation. Existing
+member roles are retained, including owner/admin. Repeated requests are
+idempotent. A missing target returns 404 and an ambiguous name returns 409;
+neither failure leaves a new account, token, or membership. Joining an existing
+workspace works even when creating new workspaces is disabled. The new
+membership is announced to the user's running daemon after commit.
+
+The API does not create a workspace. The returned script uses the selected
+name for workspace ensure, machine rename and agent creation. With a machine
+name, that name still applies to both the machine and the agent. Without it,
+the script still prepares the selected workspace and daemon, but skips rename
+and agent creation.
 
 ## Script contract
 
-The script asks the authenticated platform endpoint for the newest published
-stable Team Mesh release, independently of GitHub's Latest marker. The server
-caches successful lookups for five minutes, avoiding a GitHub request for
-every machine. A lookup failure stops the script before workspace preparation.
-The installer receives the selected release explicitly; existing daemon
-updaters continue to use GitHub Latest and are not actively upgraded.
+The script runs the same installer command as the Web add-computer flow,
+without querying the platform for a release, passing a `--version` argument,
+or prechecking CLI help. By default the installer uses GitHub Latest. An
+operator can set `MULTICA_VERSION` in the environment when invoking the script
+to select a different published version. The selected release must support the
+Team Mesh workspace and machine commands; an incompatible release fails when
+the affected command is reached.
 
-The script installs that release and checks for the required CLI features
-before proceeding. It prepares the username workspace using the user
-credential, performs non-interactive login while retaining any existing
-profile default, configures the runtime, sets the ducc default model to
-`Opus 4.8`, and restarts the profile's daemon on every execution. It then
-invokes separate machine-rename and agent commands when a machine name was
-provided. The agent is bound to the current machine's online `ducc` runtime.
+The script performs non-interactive login first while retaining any existing
+profile default, and then ensures the selected workspace using the existing CLI behavior. If the
+execution environment contains a nonempty `MULTICA_TOKEN`, subsequent CLI
+commands use that value ahead of the saved profile credential. The script does
+not set a default workspace if the profile lacks one. It configures the runtime,
+sets the ducc default model to `Opus 4.8`, and restarts the profile's daemon on every execution. It then invokes separate machine-rename
+and agent commands when a machine name was provided. The agent is bound to the
+current machine's online `ducc` runtime.
 
-Standard output contains one JSON object with `success`, `completed_steps`,
-workspace, machine and agent results. On failure it also contains `exit_code`
-and `failed_step`; completed changes are retained. Ordinary logs go to stderr.
-Neither result channel should contain the login token. An explicit retry can
-restart the daemon again.
+The script stops on the first failed command and returns its process exit status:
+zero means all steps completed, and nonzero means a step failed. Individual CLI commands may print their own results.
+There is no single aggregated JSON document or `failed_step` field. Completed
+changes remain in place after failure. Output must not contain the login token.
+An explicit retry can restart the daemon again.
 
 `tmesh-machine enroll` was removed. Previously generated scripts that invoke
 it must be regenerated before they install the new release.
@@ -68,12 +80,13 @@ the root domain; other supported child-domain names follow the configured
 company mapping. Disabled accounts, signup restrictions and workspace-creation
 policy still apply.
 
-The CLI workspace operation reuses one exact-name workspace accessible to the
+The standalone CLI workspace operation is unchanged: it reuses one exact-name workspace accessible to the
 user, including membership as an ordinary member. Multiple matches fail with
 candidate identifiers. If no accessible match exists, the CLI creates a new
 workspace owned by that user; an inaccessible workspace with the same name is
 not adopted. Concurrent ensures for the same user are serialized. The new
-workspace notification allows a running daemon to discover it.
+workspace notification allows a running daemon to discover it. The generated
+script leaves the profile default unchanged even when none exists.
 
 Machine names apply to the current user's stable daemon identity across
 workspaces. The agent command selects only that user's online runtime on that
@@ -91,16 +104,17 @@ agent operations and is released on disconnect.
 - `MULTICA_WEB_BUILD_CONFIG`: protected manifest providing the installer URL and runtime defaults.
 - `MULTICA_PLUGIN_SECRET_KEY`: existing key for encrypted daemon credentials.
 - `MULTICA_DAEMON_SERVER_URL` and `MULTICA_APP_URL`: platform addresses used in the generated script.
-- `MULTICA_MACHINE_RELEASE_API_URL` (optional): trusted release metadata endpoint; defaults to the Team Mesh GitHub releases API.
+- `MULTICA_MACHINE_RELEASE_API_URL` (optional): metadata endpoint for the independent release-query API; the generated script does not call it.
 
 An absent or invalid setting fails closed with HTTP 503. Invalid input returns
 400; bad service credentials return 401; account policy failures return 403;
-ambiguous account identities return 409. Workspace policy and name conflicts
-are reported later by the CLI operation.
+ambiguous account identities or workspace names return 409, and missing
+workspaces return 404. CLI-time permission or membership changes are still
+handled by the existing CLI workspace operation.
 
 The service credential can obtain a full user token for any permitted username,
-including privileged users. The caller must derive usernames from trusted
-allocation data. Use a protected transport: internal HTTP does not encrypt the
+including privileged users. The credential can also add permitted users to a named existing workspace.
+The caller must derive usernames and workspace targets from trusted allocation data. Use a protected transport: internal HTTP does not encrypt the
 Bearer or returned user token. Rotating the service credential does not revoke
 tokens already issued; revoking a shared user token can affect other machines.
 

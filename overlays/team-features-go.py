@@ -13,17 +13,6 @@ def extend(upstream, files, entries):
  def once(s,old,new):
   if s.count(old)!=1:raise SystemExit('six-feature anchor changed: '+old[:100])
   return s.replace(old,new,1)
- def issue_queries(s):
-  import re
-  for name in ('CreateIssue','CreateIssueWithOrigin'):
-   pattern=rf'(?ms)^func \(q \*Queries\) {name}\(.*?^\}}'
-   match=re.search(pattern,s)
-   if not match:raise SystemExit('issue creation hook missing: '+name)
-   old=match.group()
-   new=once(old,'\treturn i, err','\tif err == nil { _, err = q.db.Exec(ctx, "SELECT team_mesh_ensure_issue_managers($1)", i.ID) }\n\treturn i, err')
-   s=s[:match.start()]+new+s[match.end():]
-  return s
- patch('server/pkg/db/generated/issue.sql.go',issue_queries)
  def delete_queries(s):
   anchor='WITH target AS (\n    SELECT issue.id FROM issue WHERE issue.id = $1 AND issue.workspace_id = $2'
   s=once(s,anchor,'WITH deleted_issue_manager_state AS (DELETE FROM issue_manager_state WHERE issue_id=$1 AND EXISTS(SELECT 1 FROM issue WHERE id=$1 AND workspace_id=$2)), deleted_issue_managers AS (DELETE FROM issue_manager WHERE issue_id=$1 AND EXISTS(SELECT 1 FROM issue WHERE id=$1 AND workspace_id=$2)), target AS (\n    SELECT issue.id FROM issue WHERE issue.id = $1 AND issue.workspace_id = $2')
@@ -41,20 +30,35 @@ def extend(upstream, files, entries):
    if not match:raise SystemExit('delete hook missing: '+name)
    old=match.group()
    if name=='DeleteIssue':
-    new=once(old,'\th.TaskService.CancelTasksForIssue(r.Context(), issue.ID)','\tif !h.requireIssueDeletionManager(w,r,issue) { return }\n\tr=r.WithContext(withIssueDeleteActor(r.Context(),requestUserID(r)))\n\tif !h.cancelIssueForHumanDeletion(w,r,issue) { return }')
+    new=once(old,'\th.TaskService.CancelTasksForIssue(r.Context(), issue.ID)','\tif !h.requireIssueDeletionManager(w,r,issue) { return }\n\tr=r.WithContext(withIssueDeleteActor(r.Context(),requestUserID(r)))')
     new=once(new,'\t_ = h.AutopilotService.FailAutopilotRunsByIssue(r.Context(), issue.ID)\n','')
    else:
     new=once(old,'\t\tseenIssueIDs[issueUUID] = struct{}{}','\t\tif !h.requireIssueDeletionManager(w,r,issue) { return }\n\t\tseenIssueIDs[issueUUID] = struct{}{}')
+    new=once(new,'\t\tissueUUID, err := util.ParseUUID(issueID)\n\t\tif err != nil {\n\t\t\tcontinue\n\t\t}', '\t\tissueUUID, err := util.ParseUUID(issueID)\n\t\tif err != nil {\n\t\t\twriteError(w, http.StatusBadRequest, "invalid issue id")\n\t\t\treturn\n\t\t}')
+    new=once(new,'\t\tif err != nil {\n\t\t\tcontinue\n\t\t}', '\t\tif err != nil {\n\t\t\twriteError(w, http.StatusNotFound, "selected issue not found in workspace")\n\t\t\treturn\n\t\t}')
     new=once(new,'\t\th.TaskService.CancelTasksForIssue(r.Context(), issue.ID)\n\t\t_ = h.AutopilotService.FailAutopilotRunsByIssue(r.Context(), issue.ID)\n','')
-    new=once(new,'\tdeleteResult, err := h.deleteIssuesAndCollectAttachmentURLs(', '\tr=r.WithContext(withIssueDeleteActor(r.Context(),userID))\n\tfor _,issue:=range issues { if !h.cancelIssueForHumanDeletion(w,r,issue) {return} }\n\tdeleteResult, err := h.deleteIssuesAndCollectAttachmentURLs(')
+    new=once(new,'\tdeleteResult, err := h.deleteIssuesAndCollectAttachmentURLs(', '\tr=r.WithContext(withIssueDeleteActor(r.Context(),userID))\n\tdeleteResult, err := h.deleteIssuesAndCollectAttachmentURLs(')
    s=s[:match.start()]+new+s[match.end():]
-  s=once(s,'\t\tdetached, err := qtx.DetachDirectChildIssues(', '\t\tif err:=validateIssueDeleteActor(ctx,tx,issue); err!=nil {return issueDeleteResult{},err}\n\t\tif _,err:=tx.Exec(ctx,`DELETE FROM issue_manager WHERE issue_id=$1`,issue.ID);err!=nil{return issueDeleteResult{},err}\n\t\tdetached, err := qtx.DetachDirectChildIssues(')
+  s=once(s,'\tresult := issueDeleteResult{}\n\tfor _, issue := range issues {\n\t\tif _, err := qtx.LockIssueForDelete(ctx, db.LockIssueForDeleteParams{\n\t\t\tID: issue.ID, WorkspaceID: issue.WorkspaceID,\n\t\t}); err != nil {\n\t\t\treturn issueDeleteResult{}, fmt.Errorf("lock issue for delete: %w", err)\n\t\t}\n', '''\tresult := issueDeleteResult{}
+\t// Lock and authorize the complete batch before changing or cancelling any
+\t// task. Permission changes and cancellations roll back with the deletion.
+\tfor _, issue := range issues {
+\t\tif _,err:=qtx.LockIssueForDelete(ctx,db.LockIssueForDeleteParams{ID:issue.ID,WorkspaceID:issue.WorkspaceID});err!=nil{return issueDeleteResult{},err}
+\t\tif err:=validateIssueDeleteActor(ctx,tx,issue);err!=nil{return issueDeleteResult{},err}
+\t}
+\tcancelled := []db.AgentTaskQueue{}
+\tfor _,issue := range issues {
+\t\tif _,err:=qtx.FailAutopilotRunsByIssue(ctx,issue.ID);err!=nil{return issueDeleteResult{},err}
+\t\tstopped,err:=qtx.CancelAgentTasksByIssue(ctx,issue.ID);if err!=nil{return issueDeleteResult{},err}
+\t\tcancelled=append(cancelled,stopped...)
+\t}
+\tif err:=service.SettleTerminalTaskState(ctx,qtx,cancelled...);err!=nil{return issueDeleteResult{},err}
+\tfor _, issue := range issues {
+\t\tif _,err:=tx.Exec(ctx,`DELETE FROM issue_manager WHERE issue_id=$1`,issue.ID);err!=nil{return issueDeleteResult{},err}
+''')
+  s=once(s,'\treturn result, nil\n}\n\n// publishIssueSnapshots', '\tif h.TaskService != nil { h.TaskService.FinalizeTransferredTaskCancellations(ctx,cancelled) }\n\treturn result, nil\n}\n\n// publishIssueSnapshots')
   return s
  patch('server/internal/handler/issue.go',issue_handlers)
- def workspace_revoke(s):
-  anchor='\tif err := tx.Commit(ctx); err != nil {'
-  return once(s,anchor,'\tif err:=repairIssueManagersAfterDeparture(ctx,tx,workspaceID,userID);err!=nil{return empty,err}\n'+anchor)
- patch('server/internal/handler/workspace_revoke.go',workspace_revoke)
  def file_upload(s):
   s=once(s,'const maxUploadSize = 100 << 20 // 100 MB','const maxUploadSize = 50 << 20 // 50 MiB')
   s=once(s,'MarkdownURL string `json:"markdown_url"`','LegacyURLs []string `json:"legacy_urls,omitempty"`\n\tMarkdownURL string `json:"markdown_url"`')

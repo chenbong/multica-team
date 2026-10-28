@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -126,6 +127,7 @@ func TestTmeshMachineCLIThroughRouter(t *testing.T) {
 	}
 	name := "CLI fixture " + uuid.NewString()
 	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), "DELETE FROM agent_skill WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id=$1 AND name=$2)", testWorkspaceID, name)
 		_, _ = testPool.Exec(context.Background(), "DELETE FROM agent WHERE workspace_id=$1 AND name=$2", testWorkspaceID, name)
 		_, _ = testPool.Exec(context.Background(), "DELETE FROM user_machine_name WHERE user_id=$1 AND machine_key=$2", testUserID, "daemon:local:"+did)
 		_, _ = testPool.Exec(context.Background(), "DELETE FROM agent_runtime WHERE id=$1", runtimeID)
@@ -149,13 +151,55 @@ func TestTmeshMachineCLIThroughRouter(t *testing.T) {
 	if rename["machine_name"] != "CLI fixture machine" {
 		t.Fatal("machine was not renamed")
 	}
-	first := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s")
-	second := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s")
+	createSkill := func(scope string) (string, string) {
+		t.Helper()
+		skillName := "machine-skill-" + uuid.NewString()
+		resp := authRequest(t, "POST", "/api/skills", map[string]string{"name": skillName, "content": "Synthetic local test skill", "scope": scope})
+		if resp.StatusCode != http.StatusCreated {
+			defer resp.Body.Close()
+			data, _ := io.ReadAll(resp.Body)
+			t.Fatalf("skill fixture status %d: %s", resp.StatusCode, data)
+		}
+		var skill map[string]any
+		readJSON(t, resp, &skill)
+		id := skill["id"].(string)
+		t.Cleanup(func() {
+			_, _ = testPool.Exec(context.Background(), "DELETE FROM agent_skill WHERE skill_id=$1", id)
+			_, _ = testPool.Exec(context.Background(), "DELETE FROM skill WHERE id=$1", id)
+		})
+		return id, skillName
+	}
+	skillA, skillName := createSkill("workspace")
+	skillB, _ := createSkill("personal")
+	first := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s", "--skill-list", skillName)
+	if _, err := testPool.Exec(t.Context(), "UPDATE agent_skill SET enabled=false WHERE agent_id=$1 AND skill_id=$2", first["agent_id"], skillA); err != nil {
+		t.Fatal(err)
+	}
+	second := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s", "--skill-list", skillName+","+skillB)
 	if first["agent_created"] != true || second["agent_created"] != false || first["agent_id"] != second["agent_id"] {
 		t.Fatalf("agent was not reused: %v %v", first, second)
 	}
 	var visibility, bound string
 	if err := testPool.QueryRow(t.Context(), "SELECT visibility,runtime_id::text FROM agent WHERE id=$1", first["agent_id"]).Scan(&visibility, &bound); err != nil || visibility != "workspace" || bound != runtimeID {
 		t.Fatal(fmt.Errorf("wrong agent visibility %q or runtime %q: %v", visibility, bound, err))
+	}
+	// Omitting the flag preserves both bindings, and repeating one does not
+	// replace the other assignment.
+	run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--wait", "3s")
+	run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--wait", "3s", "--skill-list", skillA)
+	var total, enabled int
+	if err := testPool.QueryRow(t.Context(), "SELECT count(*),count(*) FILTER (WHERE enabled) FROM agent_skill WHERE agent_id=$1", first["agent_id"]).Scan(&total, &enabled); err != nil || total != 2 || enabled != 2 {
+		t.Fatalf("bindings not preserved/enabled: %d %d %v", total, enabled, err)
+	}
+	cmd := exec.Command(binary, "--profile", "fixture", "tmesh-machine", "agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--machine-name", "must-not-rename", "--skill-list", "missing-"+uuid.NewString())
+	cmd.Env = append(os.Environ(), "HOME="+home, "MULTICA_TOKEN="+testToken, "MULTICA_SERVER_URL="+testServer.URL,
+		"MULTICA_WORKSPACE_ID=", "MULTICA_AGENT_ID=", "MULTICA_TASK_ID=", "MULTICA_DAEMON_PORT=", "MULTICA_TASK_CONFIG_ROOT=")
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "not found or is not accessible") {
+		t.Fatalf("missing skill was not rejected: %s %v", out, err)
+	}
+	var machineName string
+	if err := testPool.QueryRow(t.Context(), "SELECT name FROM user_machine_name WHERE user_id=$1 AND machine_key=$2", testUserID, "daemon:local:"+did).Scan(&machineName); err != nil || machineName != "CLI fixture machine" {
+		t.Fatalf("invalid list changed machine name: %s %v", machineName, err)
 	}
 }

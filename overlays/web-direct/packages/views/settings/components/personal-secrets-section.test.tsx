@@ -1,5 +1,5 @@
 import {afterEach,beforeEach,describe,it,expect,vi} from "vitest";
-import {render,screen,waitFor,cleanup} from "@testing-library/react";
+import {render,screen,waitFor,cleanup,fireEvent} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {QueryClient,QueryClientProvider} from "@tanstack/react-query";
 import {PersonalSecretsSection} from "./personal-secrets-section";
@@ -34,5 +34,17 @@ describe("personal secret management",()=>{
   expect(screen.queryByText("private implementation error")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button",{name:"Save"}));
   await waitFor(()=>expect(mocks.savePersonalSecret).toHaveBeenLastCalledWith(null,{name:"ugate",description:"",value:"fixture-value"}));
+ });
+ it("preserves long unbroken and multiline secret values when saved",async()=>{
+  const user=userEvent.setup();mount();await screen.findByText("SSH");
+  await user.click(screen.getByRole("button",{name:"Add"}));
+  await user.type(screen.getByLabelText("Name"),"long secret");
+  const value="fixture-"+"a".repeat(3000)+"\nsecond line";
+  const input=screen.getByLabelText("Secret content");
+  expect(input).toHaveClass("field-sizing-fixed");
+  expect(input).not.toHaveClass("field-sizing-content");
+  fireEvent.change(input,{target:{value}});
+  await user.click(screen.getByRole("button",{name:"Save"}));
+  await waitFor(()=>expect(mocks.savePersonalSecret).toHaveBeenLastCalledWith(null,{name:"long secret",description:"",value}));
  });
 });

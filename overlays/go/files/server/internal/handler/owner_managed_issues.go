@@ -248,28 +248,8 @@ func (h *Handler) OwnerManagedIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"values": json.RawMessage(issue.Properties), "definitions": properties})
 	case "administrators":
-		rows, e := tx.Query(ctx, `SELECT im.user_id,u.name FROM issue_manager im JOIN member m ON m.user_id=im.user_id AND m.workspace_id=$2 JOIN "user" u ON u.id=im.user_id WHERE im.issue_id=$1 ORDER BY im.created_at,im.user_id`, issue.ID, issue.WorkspaceID)
-		if e != nil {
-			writeError(w, 503, "Task administrators unavailable")
-			return
-		}
-		administrators := []issueManagerResponse{}
-		for rows.Next() {
-			var item issueManagerResponse
-			if e = rows.Scan(&item.UserID, &item.Name); e != nil {
-				rows.Close()
-				writeError(w, 503, "Task administrators unavailable")
-				return
-			}
-			administrators = append(administrators, item)
-		}
-		e = rows.Err()
-		rows.Close()
-		if e != nil {
-			writeError(w, 503, "Task administrators unavailable")
-			return
-		}
-		writeJSON(w, 200, map[string]any{"administrators": administrators, "can_manage": false, "can_delete": false})
+		// Retired compatibility endpoint: do not expose stale task managers.
+		writeJSON(w, 200, map[string]any{"administrators": []issueManagerResponse{}, "can_manage": false, "can_delete": false})
 	case "panels":
 		rows, e := tx.Query(ctx, `SELECT `+webPanelColumns+` FROM resource_web_panel WHERE issue_id=$1 ORDER BY created_at,id LIMIT $2`, issue.ID, resourceWebPanelLimit)
 		if e != nil {

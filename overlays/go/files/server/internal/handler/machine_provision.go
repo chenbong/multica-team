@@ -177,6 +177,18 @@ func (h *Handler) MachineProvisionCommand(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer tx.Rollback(r.Context())
+	workspace, err := machineProvisionWorkspaceByName(r.Context(), tx, input.WorkspaceName)
+	if err != nil {
+		switch {
+		case errors.Is(err, errMachineProvisionWorkspaceMissing):
+			writeErrorCode(w, http.StatusNotFound, "workspace_not_found", "Target workspace not found; specify an existing workspace_name")
+		case errors.Is(err, errMachineProvisionWorkspaceAmbiguous):
+			writeErrorCode(w, http.StatusConflict, "ambiguous_workspace", "More than one workspace has this name; choose a unique workspace name")
+		default:
+			writeError(w, http.StatusServiceUnavailable, "Unable to resolve target workspace")
+		}
+		return
+	}
 	user, created, err := h.machineProvisionUser(r.Context(), tx, username, email)
 	if err != nil {
 		if errors.Is(err, auth.ErrTemporarilyDisabledUser) || errors.Is(err, ErrSignupProhibited) || errors.Is(err, ErrEmailNotAllowed) {
@@ -192,17 +204,25 @@ func (h *Handler) MachineProvisionCommand(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	membership, err := tx.Exec(r.Context(), `INSERT INTO member(workspace_id,user_id,role) VALUES($1,$2,'member') ON CONFLICT(workspace_id,user_id) DO NOTHING`, workspace.ID, user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Unable to join target workspace")
+		return
+	}
 	raw, _, err := h.daemonBootstrapTokenInTx(r.Context(), tx, user.ID, box)
 	if err != nil {
 		writeError(w, 500, "token issuance failed")
 		return
 	}
-	command := machineOnboardingCommand(cfg, email, raw, username, input)
+	command := machineOnboardingCommand(cfg, email, raw, input)
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "provisioning commit failed")
 		return
 	}
-	slog.Info("machine provisioning command issued", "user_id", uuidToString(user.ID), "user_created", created)
+	if membership.RowsAffected() != 0 {
+		h.notifyDaemonWorkspacesChanged(uuidToString(user.ID))
+	}
+	slog.Info("machine provisioning command issued", "user_id", uuidToString(user.ID), "user_created", created, "workspace_id", uuidToString(workspace.ID), "member_added", membership.RowsAffected() != 0)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, command)

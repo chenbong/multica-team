@@ -52,28 +52,26 @@ The final claim gate rejects new preferences on older clients with an explicit
 upgrade message instead of letting them silently ignore the path. Development
 and tests do not install, restart or upgrade any existing client daemon.
 
-## Human task administrators
+## Human task deletion permissions
 
-Task administrators are real current workspace members. The human creator is
-the default administrator. Agent-created sub-tasks copy their parent's current
-administrator list once; subsequent edits are independent. Independent tasks
-requested by a human use the real initiating person. Autonomous independent
-creation inherits trusted source-task administrators, otherwise the agent owner;
-unresolvable historical records fall back to the current workspace owner.
+A current workspace member may delete a task if they created it as a human,
+are the current owner of its creator agent (including an archived agent), or
+are the current workspace owner/admin. Agent and machine credentials cannot
+delete. If a creator agent no longer exists, only workspace owner/admin may
+delete that task. Membership is checked again inside the deletion transaction.
+Batch deletion checks every selected task and cancels runs in the same atomic
+transaction. Deleting a parent detaches its children without deleting them.
 
-Only listed human task administrators can delete a task. Task administrators and
-workspace owner/admin may edit the list, which must retain at least one member.
-A workspace owner/admin does not implicitly gain deletion rights: they can first
-explicitly add themselves. Agent/cloud credentials cannot delete tasks or edit
-the list. Member departure removes that person's authority and adds a workspace
-owner if nobody eligible remains. Updates, cancellation authorization and final
-deletion checks are serialized against transfers and list changes.
-
-Endpoints: `GET/PUT /api/issues/{id}/administrators` (`user_ids` on PUT).
+The old task administrator UI, edit endpoint and authorization are retired.
+Legacy rows are retained for rollback while the task exists, but do not grant
+permissions and are not modified by membership changes or transfers. The legacy
+GET endpoint returns an empty list and the current `can_delete`; legacy PUT
+returns 410. `GET /api/issues/{id}/permissions` reports the current user's
+`can_delete` without relying on the old table.
 
 ## Read-only owner-managed task context
 
-`GET /api/agent/managed-issues` lists tasks administered by the executing agent's
+`GET /api/agent/managed-issues` lists tasks accessible to the executing agent's
 owner across workspaces. `q` and `after` provide search and pagination. The
 request must use a live task credential. A server-only snapshot binds each new
 token to the agent owner at claim time. The machine owner and invoker are not
@@ -83,8 +81,8 @@ substituted for that owner. Ownership changes do not upgrade an old token.
 `comments`, `timeline`, `runs`, `panels`, `properties`, `administrators`,
 `attachments`, `runs/{runId}/messages`, and attachment metadata/content/download.
 Each nested resource must belong to the authorized task. Related-task expansion
-cannot bypass per-task authorization. Current owner, membership, administrator
-list and run/token validity are checked on every request. Existing redaction and
+cannot bypass per-task authorization. Current owner, workspace membership, issue access
+and run/token validity are checked on every request. Existing redaction and
 private-chat restrictions remain in effect. Ordinary task-token workspace
 selectors are unchanged. No write operation is exposed here.
 
@@ -101,7 +99,7 @@ returns the affected task IDs, status choices, counts, effects and fingerprint.
 
 `POST /api/issues/{id}/transfer` additionally requires that fingerprint,
 `confirm_cleanup: true`, and `confirm_unassign: true` when needed. Only a human
-who administers every moved task or is source workspace owner/admin may apply;
+who created every moved task, owns each creator agent, or is source workspace owner/admin may apply;
 they must also belong to the destination. Choices are current task only, or its
 entire descendant sub-task tree. Invalid status mappings require a user choice;
 any active destination status may be selected. Structural permission/configuration
@@ -113,8 +111,7 @@ old tokens/capabilities, clears incompatible workspace settings and routing,
 allocates destination numbers, and moves content/access metadata. The project,
 wakeups, labels, custom properties, pins, PR associations and InfoFlow bindings
 are removed. External parent/dependency/duplicate edges are detached; compatible
-internal relationships stay. Eligible administrators remain; destination owner
-is the fallback. Comments, file metadata, immutable captured context and run
+internal relationships stay. Original creators and historical administrator rows remain unchanged; a creator without destination access cannot delete after migration. Comments, file metadata, immutable captured context and run
 history are retained. Private chats are not moved or granted new access.
 No extra stop request goes to an external job platform. Offline daemons do not
 block the platform transaction. Old identifiers stop resolving.

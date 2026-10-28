@@ -83,15 +83,12 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 		if e != nil {
 			return nil, e
 		}
-		if role != "owner" && role != "admin" {
-			var allowed bool
-			e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM issue_manager WHERE issue_id=$1 AND user_id=$2)`, current, actor).Scan(&allowed)
-			if e != nil {
-				return nil, e
-			}
-			if !allowed {
-				return nil, transferFailure(403, "transfer_forbidden", "You must administer every issue being moved, or be a source workspace administrator.")
-			}
+		allowed, e := q.CanManageIssueByCreator(ctx, current, source, actor)
+		if e != nil {
+			return nil, e
+		}
+		if !allowed {
+			return nil, transferFailure(403, "transfer_forbidden", "Every issue must be created by you or your agent, or you must be a source workspace owner/admin.")
 		}
 		issues = append(issues, issue)
 		p.IssueIDs = append(p.IssueIDs, uuidToString(current))
@@ -195,8 +192,8 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 	// a moving agent to become quiet merely to obtain a stable confirmation.
 	var stamp string
 	err = tx.QueryRow(ctx, `SELECT md5(jsonb_build_array(
- (SELECT jsonb_agg(jsonb_build_array(x.id,x.workspace_id,x.status,x.assignee_type,x.assignee_id,x.parent_issue_id,x.duplicate_of_issue_id,x.project_id,x.properties,x.metadata,x.context_refs,x.triage_state) ORDER BY x.id) FROM issue x WHERE x.id=ANY($1::uuid[]) OR x.parent_issue_id=ANY($1::uuid[]) OR x.duplicate_of_issue_id=ANY($1::uuid[])),
- (SELECT jsonb_agg(to_jsonb(x) ORDER BY issue_id,user_id) FROM issue_manager x WHERE issue_id=ANY($1::uuid[])),
+ (SELECT jsonb_agg(jsonb_build_array(x.id,x.workspace_id,x.creator_type,x.creator_id,x.status,x.assignee_type,x.assignee_id,x.parent_issue_id,x.duplicate_of_issue_id,x.project_id,x.properties,x.metadata,x.context_refs,x.triage_state) ORDER BY x.id) FROM issue x WHERE x.id=ANY($1::uuid[]) OR x.parent_issue_id=ANY($1::uuid[]) OR x.duplicate_of_issue_id=ANY($1::uuid[])),
+ (SELECT jsonb_agg(jsonb_build_array(a.id,a.owner_id) ORDER BY a.id) FROM agent a WHERE a.id IN (SELECT creator_id FROM issue WHERE id=ANY($1::uuid[]) AND creator_type='agent')),
  (SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM member x WHERE workspace_id IN($2,$3)),
  (SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM issue_status x WHERE workspace_id=$3),
  (SELECT jsonb_agg(jsonb_build_array(x.id,x.status,x.agent_id) ORDER BY id) FROM agent_task_queue x WHERE issue_id=ANY($1::uuid[]) AND status NOT IN('completed','failed','cancelled')),
@@ -271,22 +268,11 @@ func (h *Handler) runIssueTransfer(ctx context.Context, id, source, target, acto
 		return nil, err
 	}
 	for _, issue := range issues {
-		// Initialize old/raw records before remapping; normal production records
-		// were initialized by the backfill or the create transaction.
-		if _, err = tx.Exec(ctx, `SELECT team_mesh_ensure_issue_managers($1)`, issue.ID); err != nil {
-			return nil, err
-		}
 		var number int32
 		if err = tx.QueryRow(ctx, `UPDATE workspace SET issue_counter=greatest(issue_counter,(SELECT coalesce(max(number),0) FROM issue WHERE workspace_id=$1))+1 WHERE id=$1 RETURNING issue_counter`, target).Scan(&number); err != nil {
 			return nil, err
 		}
 		if _, err = tx.Exec(ctx, `UPDATE issue SET workspace_id=$2,number=$3,status=$4,assignee_id=CASE WHEN assignee_type='member' AND EXISTS(SELECT 1 FROM member WHERE workspace_id=$2 AND user_id=assignee_id) THEN assignee_id ELSE NULL END,assignee_type=CASE WHEN assignee_type='member' AND EXISTS(SELECT 1 FROM member WHERE workspace_id=$2 AND user_id=assignee_id) THEN assignee_type ELSE NULL END,project_id=NULL,properties='{}',metadata='{}',context_refs='[]',triage_state=NULL,parent_issue_id=CASE WHEN parent_issue_id=ANY($5::uuid[]) THEN parent_issue_id ELSE NULL END,duplicate_of_issue_id=CASE WHEN duplicate_of_issue_id=ANY($5::uuid[]) AND $4='cancelled' THEN duplicate_of_issue_id ELSE NULL END,revision=revision+1,updated_at=now(),last_activity_at=now() WHERE id=$1`, issue.ID, target, number, mappings[issue.Status], ids); err != nil {
-			return nil, err
-		}
-		if _, err = tx.Exec(ctx, `DELETE FROM issue_manager WHERE issue_id=$1 AND NOT EXISTS(SELECT 1 FROM member WHERE workspace_id=$2 AND user_id=issue_manager.user_id)`, issue.ID, target); err != nil {
-			return nil, err
-		}
-		if _, err = tx.Exec(ctx, `SELECT team_mesh_ensure_issue_managers($1)`, issue.ID); err != nil {
 			return nil, err
 		}
 		identifier := fmt.Sprintf("%s-%d", p.TargetPrefix, number)

@@ -58,6 +58,7 @@ func TestTmeshAgentUsesWorkspaceNameWithoutChangingDefault(t *testing.T) {
 		t.Setenv(key, "")
 	}
 	f := newMachineFixture(t)
+	f.skills = []machineSkill{{ID: machineSkillA, Name: "search"}}
 	oldWorkspace := "77777777-7777-4777-8777-777777777777"
 	if err := cli.SaveCLIConfigForProfile(cli.CLIConfig{ServerURL: f.client.BaseURL, WorkspaceID: oldWorkspace}, "fixture"); err != nil {
 		t.Fatal(err)
@@ -74,13 +75,16 @@ func TestTmeshAgentUsesWorkspaceNameWithoutChangingDefault(t *testing.T) {
 	root.AddCommand(newMachineCommand())
 	var out bytes.Buffer
 	root.SetOut(&out)
-	root.SetArgs([]string{"tmesh-machine", "agent", "--workspace-name", "Fixture", "--agent-name", "My agent", "--runtime", "ducc"})
+	root.SetArgs([]string{"tmesh-machine", "agent", "--workspace-name", "Fixture", "--agent-name", "My agent", "--runtime", "ducc", "--skill-list", "search"})
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
 	var result map[string]any
 	if json.Unmarshal(out.Bytes(), &result) != nil || result["success"] != true || result["workspace_id"] != machineWS {
 		t.Fatalf("workspace name was not used: %s", out.String())
+	}
+	if !strings.Contains(out.String(), machineSkillA) {
+		t.Fatal("skill-list flag did not reach agent creation")
 	}
 	cfg, err := cli.LoadCLIConfigForProfile("fixture")
 	if err != nil || cfg.WorkspaceID != oldWorkspace {

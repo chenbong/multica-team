@@ -41,6 +41,7 @@ func machineTestConfig(t *testing.T, username string) *Handler {
 		t.Fatal(err)
 	}
 	t.Setenv("MULTICA_WEB_BUILD_CONFIG", p)
+	dbfx.Workspace(t, defaultMachineProvisionWorkspace, "provision-default-"+uuid.NewString())
 	t.Cleanup(func() {
 		ctx := context.Background()
 		email := username + "@example.test"
@@ -117,8 +118,13 @@ func TestMachineProvisionNewUserIdempotentAndAtomic(t *testing.T) {
 		t.Fatal("new user not initialized")
 	}
 	ws, err := h.Queries.ListWorkspaces(context.Background(), user.ID)
-	if err != nil || len(ws) != 0 {
-		t.Fatal("requesting a command must not create a workspace")
+	if err != nil || len(ws) != 1 || ws[0].Name != defaultMachineProvisionWorkspace {
+		t.Fatal("requesting a command must join the existing default workspace")
+	}
+	var role string
+	dbfx.QueryRow(t, `SELECT role FROM member WHERE workspace_id=$1 AND user_id=$2`, ws[0].ID, user.ID).Scan(&role)
+	if role != "member" {
+		t.Fatal("provisioned user must join as a regular member")
 	}
 	var pats int
 	_ = testPool.QueryRow(context.Background(), `SELECT count(*) FROM personal_access_token WHERE user_id=$1`, user.ID).Scan(&pats)
@@ -153,8 +159,8 @@ func TestMachineProvisionExistingUserKeepsWorkspacesAndRoles(t *testing.T) {
 		t.Fatalf("status %d", one.Code)
 	}
 	rows, err := h.Queries.ListWorkspaces(context.Background(), parseUUID(user))
-	if err != nil || len(rows) != 1 {
-		t.Fatal("expected only the existing shared workspace")
+	if err != nil || len(rows) != 2 {
+		t.Fatal("expected the old workspace plus the provisioning target")
 	}
 	kept := false
 	for _, row := range rows {
@@ -198,8 +204,8 @@ func TestMachineProvisionConcurrentRetryReusesResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws, err := h.Queries.ListWorkspaces(context.Background(), user.ID)
-	if err != nil || len(ws) != 0 {
-		t.Fatal("API must not create a workspace")
+	if err != nil || len(ws) != 1 || ws[0].Name != defaultMachineProvisionWorkspace {
+		t.Fatal("concurrent provisioning must reuse the same default membership")
 	}
 }
 

@@ -1,5 +1,5 @@
 "use client";
-import { useIssueAdministrators } from "@multica/core/issues";
+import { useIssuePermissions } from "@multica/core/issues";
 import { DropdownMenuItem } from "@multica/ui/components/ui/dropdown-menu";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -53,7 +53,7 @@ export function IssueTransferDialog({ issue, onClose }: { issue: Issue; onClose:
 // Mounted inside the menu portal so listing many tasks does not start one
 // permission poller per closed dropdown.
 export function IssueTransferMenuItem({issue,workspaceAdmin,onSelect}:{issue:Issue;workspaceAdmin:boolean;onSelect:()=>void}){
- const query=useIssueAdministrators(issue.workspace_id,issue.id);const {t}=useT("issues");
+ const query=useIssuePermissions(issue.workspace_id,issue.id);const {t}=useT("issues");
  const allowed=workspaceAdmin||query.data?.canDelete===true;
  return <DropdownMenuItem disabled={!allowed} title={allowed?undefined:t($=>$.transfer_expanded.forbidden)} onClick={onSelect}>{t($=>$.transfer.title)}</DropdownMenuItem>;
 }
