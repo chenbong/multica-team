@@ -18,11 +18,33 @@ Content-Type: application/json
 ```
 
 `username` is required; it is the canonical account name, not a full email.
-`machine_name` and `workspace_name` are optional. An omitted or blank
+`machine_name`, `workspace_name`, `skill_list` and `system_prompt` are optional. An omitted or blank
 `workspace_name` defaults to `pdc-loop`. Other fields, including the former `agent_name`,
 `runtime`, `model`, `thinking_level` and `workspace_id`, are rejected.
 Browser Origin requests and query parameters are rejected. User PATs and
 session cookies do not authorize this operator endpoint.
+
+To include existing skills and custom instructions in the generated agent command:
+
+```json
+{"username":"zhangsan","machine_name":"zhangsan-dev","skill_list":["search","report-writing"],"system_prompt":"Read project rules first. Run relevant tests after changes."}
+```
+
+`skill_list` is an array of 1–100 exact skill names or full IDs. Names are trimmed
+and deduplicated, at most 128 characters each, and cannot contain control
+characters. The executing CLI checks existence, ambiguity and the user's
+permission; the API does not import skills or query them on the operator's behalf.
+`system_prompt` is a UTF-8 string of at most 64 KiB without NUL bytes. It preserves
+whitespace and newlines. An empty string explicitly clears custom instructions.
+Both options require a nonempty `machine_name`, since this is also the agent name.
+Omitted or null options preserve the original script behavior; an explicit empty
+skill array is rejected. JSON request bodies are limited to 512 KiB.
+
+The API appends shell-quoted `--skill-list` and `--system-prompt` arguments only to
+`tmesh-machine agent`. Commas and quotes in skill names use standard CSV escaping;
+prompt text is passed literally, including shell-like text. The CLI must support
+the options (System Prompt support is available in `v0.6.1-overlay.12` and later).
+As before, the API only returns the script; it does not execute these commands.
 
 A successful response is `200 text/plain` containing the complete script.
 It is not a JSON response and contains the user's reusable login token. The

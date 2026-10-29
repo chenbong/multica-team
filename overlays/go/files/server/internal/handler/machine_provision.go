@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/auth"
@@ -113,8 +115,13 @@ func (h *Handler) MachineProvisionCommand(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var input machineProvisionInput
-	r.Body = http.MaxBytesReader(w, r.Body, 4096)
-	decoder := json.NewDecoder(r.Body)
+	r.Body = http.MaxBytesReader(w, r.Body, maxMachineProvisionBodyBytes)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil || !utf8.Valid(payload) {
+		writeError(w, 400, "invalid request")
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil {
 		writeError(w, 400, "invalid request")

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,12 +20,16 @@ import (
 )
 
 type machineProvisionInput struct {
-	Username      string `json:"username"`
-	MachineName   string `json:"machine_name,omitempty"`
-	WorkspaceName string `json:"workspace_name,omitempty"`
+	Username      string   `json:"username"`
+	MachineName   string   `json:"machine_name,omitempty"`
+	WorkspaceName string   `json:"workspace_name,omitempty"`
+	SkillList     []string `json:"skill_list,omitempty"`
+	SystemPrompt  *string  `json:"system_prompt,omitempty"`
 }
 
 const defaultMachineProvisionWorkspace = "pdc-loop"
+const maxMachineSystemPromptBytes = 64 << 10
+const maxMachineProvisionBodyBytes = 512 << 10
 
 var errMachineWorkspaceAmbiguous = errors.New("multiple accessible workspaces have this name")
 var errMachineWorkspaceDisabled = errors.New("workspace creation disabled")
@@ -47,6 +52,36 @@ func (input *machineProvisionInput) validate() error {
 		return errors.New("invalid workspace name")
 	}
 	input.WorkspaceName = input.workspaceName()
+	if (input.SkillList != nil || input.SystemPrompt != nil) && input.MachineName == "" {
+		return errors.New("machine_name is required with skill_list or system_prompt")
+	}
+	if input.SkillList != nil {
+		if len(input.SkillList) == 0 || len(input.SkillList) > 100 {
+			return errors.New("skill_list must contain between 1 and 100 skill names or full IDs")
+		}
+		seen := map[string]bool{}
+		names := make([]string, 0, len(input.SkillList))
+		for _, value := range input.SkillList {
+			if !utf8.ValidString(value) || utf8.RuneCountInString(value) > 128 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+				return errors.New("invalid skill name or ID")
+			}
+			value = strings.TrimSpace(value)
+			if value == "" {
+				return errors.New("skill_list contains an empty skill name or ID")
+			}
+			if !seen[value] {
+				names = append(names, value)
+				seen[value] = true
+			}
+		}
+		input.SkillList = names
+	}
+	if input.SystemPrompt != nil {
+		value := *input.SystemPrompt
+		if !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') || len(value) > maxMachineSystemPromptBytes {
+			return errors.New("system_prompt must be valid UTF-8 without NUL bytes and at most 64 KiB")
+		}
+	}
 	return nil
 }
 
@@ -252,11 +287,22 @@ func machineOnboardingCommand(cfg machineCommandConfig, email, token string, inp
 		defaults += cli + " config set runtime_shims " + machineShellQuote(cfg.Shims) + "\n"
 	}
 	machineSteps := ""
+	agentOptions := ""
+	if input.SkillList != nil {
+		var value strings.Builder
+		csvWriter := csv.NewWriter(&value)
+		_ = csvWriter.Write(input.SkillList) // strings.Builder cannot fail a write.
+		csvWriter.Flush()
+		agentOptions += " --skill-list " + machineShellQuote(strings.TrimSuffix(value.String(), "\n"))
+	}
+	if input.SystemPrompt != nil {
+		agentOptions += " --system-prompt " + machineShellQuote(*input.SystemPrompt)
+	}
 	if input.MachineName != "" {
 		machineSteps = `
 # 5. 重命名机器并创建或复用智能体
 __CLI__ tmesh-machine rename --workspace-name __WORKSPACE__ --machine-name __MACHINE__
-__CLI__ tmesh-machine agent --workspace-name __WORKSPACE__ --agent-name __MACHINE__ --runtime ducc
+__CLI__ tmesh-machine agent --workspace-name __WORKSPACE__ --agent-name __MACHINE__ --runtime ducc__AGENT_OPTIONS__
 `
 	}
 	template := `#!/usr/bin/env bash
@@ -294,6 +340,7 @@ __MACHINESTEPS__`
 		"__MACHINE__", machineShellQuote(input.MachineName), "__DEFAULTS__", defaults,
 		"__MACHINESTEPS__", strings.NewReplacer(
 			"__CLI__", cli, "__WORKSPACE__", workspace, "__MACHINE__", machineShellQuote(input.MachineName),
+			"__AGENT_OPTIONS__", agentOptions,
 		).Replace(machineSteps),
 	).Replace(template)
 }
