@@ -52,8 +52,14 @@ if (display) {
   });
   edit("apps/web/platform/document-title.test.tsx", (source) => {
     const previous = escapeTestString(previousSuffix);
-    assert(source.includes(previous), "Upstream title tests changed");
-    return source.split(previous).join(escapeTestString(nextSuffix));
+    if (source.includes(previous)) {
+      return source.split(previous).join(escapeTestString(nextSuffix));
+    }
+    // Newer regression tests derive their expectations from the exported
+    // suffix, so branding requires no literal replacement in those tests.
+    assert(/import\s*\{[^}]*\bTITLE_SUFFIX\b[^}]*\}\s*from\s*["']\.\/document-title["']/s.test(source)
+      && source.includes("${TITLE_SUFFIX}"), "Upstream title tests changed");
+    return source;
   });
   edit("apps/web/app/manifest.ts", (source) => {
     source = replaceOnce(source, /    name: "(?:\\.|[^"\\])*",/,
