@@ -1,0 +1,2 @@
+-- Keep operational transfer history on application rollback.
+-- This additive table does not affect older application versions.

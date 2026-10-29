@@ -2753,6 +2753,13 @@ func (h *Handler) UpsertSkillFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, ok := h.beginSkillMutation(w, r, skill.ID)
+	if !ok {
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
 	var req CreateSkillFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -2768,7 +2775,7 @@ func (h *Handler) UpsertSkillFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sf, err := h.Queries.UpsertSkillFile(r.Context(), db.UpsertSkillFileParams{
+	sf, err := qtx.UpsertSkillFile(r.Context(), db.UpsertSkillFileParams{
 		SkillID: skill.ID,
 		Path:    sanitizeNullBytes(req.Path),
 		Content: sanitizeNullBytes(req.Content),
@@ -2778,6 +2785,10 @@ func (h *Handler) UpsertSkillFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, 503, "Unable to save skill file")
+		return
+	}
 	writeJSON(w, http.StatusOK, skillFileToResponse(sf))
 }
 
@@ -2791,6 +2802,13 @@ func (h *Handler) DeleteSkillFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, ok := h.beginSkillMutation(w, r, skill.ID)
+	if !ok {
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+
 	fileID := chi.URLParam(r, "fileId")
 	fileUUID, ok := parseUUIDOrBadRequest(w, fileID, "file id")
 	if !ok {
@@ -2798,13 +2816,17 @@ func (h *Handler) DeleteSkillFile(w http.ResponseWriter, r *http.Request) {
 	}
 	// Verify the file belongs to the parent skill we just authorized — guards
 	// against deleting a file owned by a different skill via the URL param.
-	file, err := h.Queries.GetSkillFile(r.Context(), fileUUID)
+	file, err := qtx.GetSkillFile(r.Context(), fileUUID)
 	if err != nil || uuidToString(file.SkillID) != uuidToString(skill.ID) {
 		writeError(w, http.StatusNotFound, "skill file not found")
 		return
 	}
-	if err := h.Queries.DeleteSkillFile(r.Context(), file.ID); err != nil {
+	if err := qtx.DeleteSkillFile(r.Context(), file.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete skill file")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, 503, "Unable to save skill file")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

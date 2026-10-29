@@ -907,6 +907,7 @@ runpy.run_path(str(HERE / "platform-expansion-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "public-live-web-patch.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "team-features-web.py"))["extend"](CHANGES)
 runpy.run_path(str(HERE / "skill-governance-web.py"))["extend"](CHANGES)
+runpy.run_path(str(HERE / "skill-transfer-web.py"))["extend"](CHANGES)
 
 
 def apply_patches():

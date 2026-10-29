@@ -19,3 +19,11 @@ func requirePluginSkillCreator(ctx context.Context, q *db.Queries, installation,
 	}
 	return nil
 }
+
+// The HTTP caller identity is revalidated inside plugin uninstall's transaction.
+// Trusted internal callers retain the original service API.
+type skillMutationUserKey struct{}
+
+func WithSkillMutationUser(ctx context.Context, user pgtype.UUID) context.Context {
+	return context.WithValue(ctx, skillMutationUserKey{}, user)
+}
