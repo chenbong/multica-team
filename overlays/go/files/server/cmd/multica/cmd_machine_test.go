@@ -26,21 +26,22 @@ const machineAgent = "55555555-5555-4555-8555-555555555555"
 const machineProfile = "66666666-6666-4666-8666-666666666666"
 
 type machineFixture struct {
-	client       *cli.APIClient
-	current      map[string]any
-	catalog      []map[string]any
-	runtimes     []map[string]any
-	profiles     []map[string]any
-	owner        bool
-	nonMember    bool
-	failPut      bool
-	changeDetail bool
-	modelCatalog machineModelCatalog
-	skills       []machineSkill
-	agentSkills  []machineSkill
-	failSkills   string
-	calls        []string
-	payloads     []map[string]any
+	client             *cli.APIClient
+	current            map[string]any
+	catalog            []map[string]any
+	runtimes           []map[string]any
+	profiles           []map[string]any
+	owner              bool
+	nonMember          bool
+	failPut            bool
+	changeDetail       bool
+	changeInstructions bool
+	modelCatalog       machineModelCatalog
+	skills             []machineSkill
+	agentSkills        []machineSkill
+	failSkills         string
+	calls              []string
+	payloads           []map[string]any
 }
 
 func newMachineFixture(t *testing.T) *machineFixture {
@@ -137,6 +138,9 @@ func newMachineFixture(t *testing.T) *machineFixture {
 			}
 			if f.changeDetail {
 				copy["updated_at"] = "changed"
+			}
+			if f.changeInstructions {
+				copy["instructions"] = "Changed by another editor"
 			}
 			response = copy
 		case strings.HasSuffix(r.URL.Path, "/cancel-tasks"):

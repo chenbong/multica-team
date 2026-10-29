@@ -75,7 +75,7 @@ func TestTmeshAgentUsesWorkspaceNameWithoutChangingDefault(t *testing.T) {
 	root.AddCommand(newMachineCommand())
 	var out bytes.Buffer
 	root.SetOut(&out)
-	root.SetArgs([]string{"tmesh-machine", "agent", "--workspace-name", "Fixture", "--agent-name", "My agent", "--runtime", "ducc", "--skill-list", "search"})
+	root.SetArgs([]string{"tmesh-machine", "agent", "--workspace-name", "Fixture", "--agent-name", "My agent", "--runtime", "ducc", "--skill-list", "search", "--system-prompt", "Fixture instructions"})
 	if err := root.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +85,9 @@ func TestTmeshAgentUsesWorkspaceNameWithoutChangingDefault(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), machineSkillA) {
 		t.Fatal("skill-list flag did not reach agent creation")
+	}
+	if f.current["instructions"] != "Fixture instructions" || strings.Contains(out.String(), "Fixture instructions") {
+		t.Fatal("system prompt did not reach agent creation, or was printed")
 	}
 	cfg, err := cli.LoadCLIConfigForProfile("fixture")
 	if err != nil || cfg.WorkspaceID != oldWorkspace {

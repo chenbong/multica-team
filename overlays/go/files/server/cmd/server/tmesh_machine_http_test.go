@@ -171,11 +171,20 @@ func TestTmeshMachineCLIThroughRouter(t *testing.T) {
 	}
 	skillA, skillName := createSkill("workspace")
 	skillB, _ := createSkill("personal")
-	first := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s", "--skill-list", skillName)
+	first := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s", "--skill-list", skillName, "--system-prompt", "Initial fixture instructions")
+	var initialInstructions string
+	if err := testPool.QueryRow(t.Context(), "SELECT instructions FROM agent WHERE id=$1", first["agent_id"]).Scan(&initialInstructions); err != nil || initialInstructions != "Initial fixture instructions" {
+		t.Fatalf("initial instructions were not persisted: %v", err)
+	}
 	if _, err := testPool.Exec(t.Context(), "UPDATE agent_skill SET enabled=false WHERE agent_id=$1 AND skill_id=$2", first["agent_id"], skillA); err != nil {
 		t.Fatal(err)
 	}
-	second := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s", "--skill-list", skillName+","+skillB)
+	promptFile := filepath.Join(home, "prompt.md")
+	promptText := "你是测试助手。\nKeep spaces, $HOME and `code`.\r\n\n"
+	if err := os.WriteFile(promptFile, []byte(promptText), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second := run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--runtime", "ducc", "--wait", "3s", "--skill-list", skillName+","+skillB, "--system-prompt-file", promptFile)
 	if first["agent_created"] != true || second["agent_created"] != false || first["agent_id"] != second["agent_id"] {
 		t.Fatalf("agent was not reused: %v %v", first, second)
 	}
@@ -187,6 +196,10 @@ func TestTmeshMachineCLIThroughRouter(t *testing.T) {
 	// replace the other assignment.
 	run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--wait", "3s")
 	run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--wait", "3s", "--skill-list", skillA)
+	var instructions string
+	if err := testPool.QueryRow(t.Context(), "SELECT instructions FROM agent WHERE id=$1", first["agent_id"]).Scan(&instructions); err != nil || instructions != promptText {
+		t.Fatalf("instructions were not preserved exactly: %v", err)
+	}
 	var total, enabled int
 	if err := testPool.QueryRow(t.Context(), "SELECT count(*),count(*) FILTER (WHERE enabled) FROM agent_skill WHERE agent_id=$1", first["agent_id"]).Scan(&total, &enabled); err != nil || total != 2 || enabled != 2 {
 		t.Fatalf("bindings not preserved/enabled: %d %d %v", total, enabled, err)
@@ -201,5 +214,9 @@ func TestTmeshMachineCLIThroughRouter(t *testing.T) {
 	var machineName string
 	if err := testPool.QueryRow(t.Context(), "SELECT name FROM user_machine_name WHERE user_id=$1 AND machine_key=$2", testUserID, "daemon:local:"+did).Scan(&machineName); err != nil || machineName != "CLI fixture machine" {
 		t.Fatalf("invalid list changed machine name: %s %v", machineName, err)
+	}
+	run("agent", "--workspace-name", "Integration Tests", "--agent-name", name, "--wait", "3s", "--system-prompt", "")
+	if err := testPool.QueryRow(t.Context(), "SELECT instructions FROM agent WHERE id=$1", first["agent_id"]).Scan(&instructions); err != nil || instructions != "" {
+		t.Fatalf("explicit empty prompt did not clear instructions: %v", err)
 	}
 }

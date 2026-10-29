@@ -26,13 +26,14 @@ import (
 )
 
 type machineOptions struct {
-	MachineName string
-	AgentName   string
-	Runtime     string
-	Model       *string
-	Thinking    *string
-	SkillList   []string // nil means keep the existing assignments unchanged
-	Wait        time.Duration
+	MachineName  string
+	AgentName    string
+	Runtime      string
+	Model        *string
+	Thinking     *string
+	SkillList    []string // nil means keep the existing assignments unchanged
+	SystemPrompt *string  // nil preserves instructions; an explicit empty value clears them
+	Wait         time.Duration
 }
 
 func init() {
@@ -76,6 +77,8 @@ func newMachineCommand() *cobra.Command {
 		command.Flags().Duration("wait", 90*time.Second, "Maximum wait for this computer/runtime to register")
 		if name == "agent" {
 			command.Flags().StringSlice("skill-list", nil, "Existing skill names or full IDs, comma-separated; add and enable without removing other skills")
+			command.Flags().String("system-prompt", "", "Agent instructions; replaces existing instructions (empty clears them)")
+			command.Flags().String("system-prompt-file", "", "Read agent instructions from a UTF-8 file; exclusive with --system-prompt")
 		}
 		parent.AddCommand(command)
 	}
@@ -151,6 +154,10 @@ func runMachineEnroll(cmd *cobra.Command, _ []string) (err error) {
 	options.AgentName, _ = cmd.Flags().GetString("agent-name")
 	options.Runtime, _ = cmd.Flags().GetString("runtime")
 	options.Wait, _ = cmd.Flags().GetDuration("wait")
+	options.SystemPrompt, err = machineReadSystemPrompt(cmd)
+	if err != nil {
+		return err
+	}
 	if cmd.Flags().Changed("skill-list") {
 		values, _ := cmd.Flags().GetStringSlice("skill-list")
 		options.SkillList = append([]string{}, values...)
@@ -397,6 +404,9 @@ func machineAgentPayload(existing map[string]any, runtime map[string]any, option
 		tier = ""
 	}
 	body := map[string]any{"runtime_id": strVal(runtime, "id")}
+	if options.SystemPrompt != nil {
+		body["instructions"] = *options.SystemPrompt
+	}
 	if existing == nil {
 		body["name"] = options.AgentName
 		body["visibility"] = "workspace"
@@ -515,6 +525,14 @@ func machineValidateCatalog(ctx context.Context, client *cli.APIClient, runtimeI
 func enrollMachine(ctx context.Context, client *cli.APIClient, machineID string, options machineOptions) (map[string]any, error) {
 	options.MachineName, options.AgentName = strings.TrimSpace(options.MachineName), strings.TrimSpace(options.AgentName)
 	result := map[string]any{"workspace_id": client.WorkspaceID, "daemon_id": machineID, "completed_steps": []string{}}
+	if options.SystemPrompt != nil {
+		if options.AgentName == "" {
+			return result, errors.New("--agent-name is required with a system prompt")
+		}
+		if err := machineValidateSystemPrompt(*options.SystemPrompt); err != nil {
+			return result, err
+		}
+	}
 	if !validMachineText(options.MachineName) || !validMachineText(options.AgentName) {
 		return nil, errors.New("invalid machine or agent name")
 	}
@@ -638,10 +656,17 @@ func enrollMachine(ctx context.Context, client *cli.APIClient, machineID string,
 				return result, errors.New("agent changed during preparation; retry before cancelling or rebinding")
 			}
 		}
+		if options.SystemPrompt != nil && !reflect.DeepEqual(existing["instructions"], current["instructions"]) {
+			return result, errors.New("agent instructions changed during preparation; retry before updating")
+		}
 		changed := strVal(existing, "runtime_id") != strVal(runtime, "id")
+		cancelTasks := changed
 		for key, value := range body {
 			if key != "runtime_id" && !reflect.DeepEqual(value, existing[key]) {
 				changed = true
+				if key != "instructions" {
+					cancelTasks = true
+				}
 			}
 		}
 		if existing["archived_at"] != nil && strVal(existing, "archived_at") != "" {
@@ -652,12 +677,14 @@ func enrollMachine(ctx context.Context, client *cli.APIClient, machineID string,
 			machineCompleted(result, "agent_restored")
 		}
 		if changed {
-			var cancelled map[string]any
-			if err = client.PostJSON(ctx, path+"/cancel-tasks", nil, &cancelled); err != nil {
-				return result, err
+			if cancelTasks {
+				var cancelled map[string]any
+				if err = client.PostJSON(ctx, path+"/cancel-tasks", nil, &cancelled); err != nil {
+					return result, err
+				}
+				result["cancelled_tasks"] = cancelled["cancelled"]
+				machineCompleted(result, "agent_tasks_cancelled")
 			}
-			result["cancelled_tasks"] = cancelled["cancelled"]
-			machineCompleted(result, "agent_tasks_cancelled")
 			if err = client.PutJSON(ctx, path, body, &saved); err != nil {
 				return result, err
 			}
