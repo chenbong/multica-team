@@ -33,6 +33,13 @@ case "$private_model" in
   *) echo "Cannot verify the private-task migration index; repair the failed migration before retrying" >&2; exit 1 ;;
 esac
 
+# Never accept an invalid global skill index left by an interrupted build.
+skill_index_valid="$(psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atqc "SELECT coalesce((SELECT indisvalid::text FROM pg_index WHERE indexrelid=to_regclass('public.skill_name_global_key_idx')),'missing')")"
+case "$skill_index_valid" in
+ t|true|missing) ;;
+ *) echo "Global skill name index is invalid; repair it before retrying migration" >&2;exit 1 ;;
+esac
+
 for migration in "$migration_dir"/*.up.sql; do
   [ -e "$migration" ] || continue
   if [ "$private_model" = multi ] && [ "${migration##*/}" = 493_infoflow_private_scope.up.sql ]; then

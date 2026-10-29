@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -50,7 +51,7 @@ func createSkillWithFilesInTx(ctx context.Context, qtx *db.Queries, input skillC
 
 	skill, err := qtx.CreateSkill(ctx, db.CreateSkillParams{
 		WorkspaceID: workspaceID,
-		Name:        sanitizeNullBytes(input.Name),
+		Name:        strings.TrimSpace(sanitizeNullBytes(input.Name)),
 		Description: sanitizeNullBytes(input.Description),
 		Content:     sanitizeNullBytes(input.Content),
 		Config:      config,
@@ -102,6 +103,9 @@ func (h *Handler) createSkillWithFiles(ctx context.Context, input skillCreateInp
 		return SkillWithFilesResponse{}, err
 	}
 
+	if result.CreatedBy != nil {
+		result.Creator = h.skillCreator(ctx, parseUUID(*result.CreatedBy))
+	}
 	return result, nil
 }
 
@@ -125,7 +129,8 @@ type skillOverwriteInput struct {
 	// against a client sending the wrong target_skill_id and overwriting a
 	// different skill than the one the conflict dialog showed the user. The
 	// caller passes the sanitized effective import name.
-	ExpectedName string
+	ExpectedScope string
+	ExpectedName  string
 	// NewName, when non-empty, renames the target to the imported skill's name.
 	// A collision with another skill in the workspace (UNIQUE(workspace_id,
 	// name)) fails the whole overwrite with errSkillOverwriteNameConflict.
@@ -168,15 +173,21 @@ func (h *Handler) overwriteSkillWithFiles(ctx context.Context, input skillOverwr
 
 	qtx := h.Queries.WithTx(tx)
 
-	existing, err := qtx.GetSkillInWorkspace(ctx, db.GetSkillInWorkspaceParams{
-		ID:          input.TargetSkillID,
-		WorkspaceID: input.WorkspaceID,
-	})
+	if err := h.lockSkillCreator(ctx, tx, input.TargetSkillID, input.UserID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SkillWithFilesResponse{}, errSkillOverwriteNotFound
+		}
+		return SkillWithFilesResponse{}, errSkillOverwriteForbidden
+	}
+	existing, err := qtx.GetSkill(ctx, input.TargetSkillID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return SkillWithFilesResponse{}, errSkillOverwriteNotFound
 		}
 		return SkillWithFilesResponse{}, err
+	}
+	if input.ExpectedScope != "" && !sameSkillDestination(existing, input.ExpectedScope, input.WorkspaceID, parseUUID(input.UserID)) {
+		return SkillWithFilesResponse{}, errSkillOverwriteForbidden
 	}
 	allowOverwrite := input.AllowOverwrite
 	if allowOverwrite == nil {
@@ -189,7 +200,7 @@ func (h *Handler) overwriteSkillWithFiles(ctx context.Context, input skillOverwr
 	// confirmed was a same-name collision; reject if the target's name no longer
 	// matches the imported skill so a stale/wrong target_skill_id can't write
 	// one skill's content onto another.
-	if input.ExpectedName != "" && existing.Name != input.ExpectedName {
+	if input.ExpectedName != "" && normalizedSkillName(existing.Name) != normalizedSkillName(input.ExpectedName) {
 		return SkillWithFilesResponse{}, errSkillOverwriteNameMismatch
 	}
 
@@ -244,7 +255,7 @@ func (h *Handler) overwriteSkillWithFiles(ctx context.Context, input skillOverwr
 	}
 
 	return SkillWithFilesResponse{
-		SkillResponse: skillToResponse(skill),
+		SkillResponse: h.skillResponse(ctx, skill),
 		Files:         fileResps,
 	}, nil
 }

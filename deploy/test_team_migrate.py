@@ -32,6 +32,8 @@ from pathlib import Path
 args = sys.argv[1:]
 if '-Atqc' in args:
     query = args[args.index('-Atqc')+1]
+    if 'skill_name_global_key_idx' in query:
+        print(os.environ.get('TEST_SKILL_INDEX_VALID', 'missing'));sys.exit(0)
     print(os.environ.get('TEST_PRIVATE_MODEL', 'legacy') if 'infoflow_binding_private_issue_idx' in query else os.environ['TEST_GROUP_MODEL'])
     sys.exit(0)
 name = Path(args[args.index('-f')+1]).name
@@ -52,6 +54,11 @@ if name == os.environ.get('TEST_FAIL_MIGRATION'):
 
     def calls(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_invalid_skill_index_blocks_replay(self):
+        result=self.run_model("multi",TEST_SKILL_INDEX_VALID="f")
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(self.calls(),[])
 
     def test_first_upgrade_runs_original_files_in_order(self):
         result = self.run_model("legacy")

@@ -52,9 +52,12 @@ const (
 // terminated in RuntimeLocalSkillConflict. CanOverwrite reflects the
 // creator-only re-import policy (canOverwriteSkillByLocalImport).
 type LocalSkillImportConflict struct {
-	ExistingSkillID   string `json:"existing_skill_id"`
-	ExistingCreatedBy string `json:"existing_created_by,omitempty"`
-	CanOverwrite      bool   `json:"can_overwrite"`
+	ExistingName        string `json:"existing_name,omitempty"`
+	ExistingScope       string `json:"existing_scope,omitempty"`
+	ExistingCreatorName string `json:"existing_creator_name,omitempty"`
+	ExistingSkillID     string `json:"existing_skill_id"`
+	ExistingCreatedBy   string `json:"existing_created_by,omitempty"`
+	CanOverwrite        bool   `json:"can_overwrite"`
 }
 
 const (
@@ -1027,10 +1030,23 @@ func (h *Handler) resolveLocalSkillConflict(w http.ResponseWriter, r *http.Reque
 // RuntimeLocalSkillConflict state with structured metadata the caller uses to
 // offer overwrite / rename / skip.
 func (h *Handler) reportLocalSkillConflict(w http.ResponseWriter, r *http.Request, requestID, creatorID string, existing db.Skill) {
-	info := LocalSkillImportConflict{
-		ExistingSkillID: uuidToString(existing.ID),
-		CanOverwrite:    canOverwriteSkillByLocalImport(creatorID, existing),
+	info := LocalSkillImportConflict{ExistingSkillID: uuidToString(existing.ID), ExistingName: existing.Name, ExistingScope: existing.Scope}
+	if creator := h.skillCreator(r.Context(), existing.CreatedBy); creator != nil {
+		info.ExistingCreatorName = creator.Name
 	}
+	if req, err := h.LocalSkillImportStore.Get(r.Context(), requestID); err == nil && req != nil {
+		scope := req.Scope
+		if scope == "" {
+			scope = "workspace"
+		}
+		if rt, err := h.Queries.GetAgentRuntime(r.Context(), parseUUID(req.RuntimeID)); err == nil {
+			info.CanOverwrite = canOverwriteSkillByLocalImport(creatorID, existing) && sameSkillDestination(existing, scope, rt.WorkspaceID, parseUUID(creatorID))
+		}
+	}
+	if existing.Scope == "personal" && uuidToString(existing.OwnerUserID) != creatorID {
+		info.ExistingSkillID = ""
+	}
+
 	if existing.CreatedBy.Valid {
 		info.ExistingCreatedBy = uuidToString(existing.CreatedBy)
 	}
@@ -1045,12 +1061,7 @@ func (h *Handler) reportLocalSkillConflict(w http.ResponseWriter, r *http.Reques
 // lookupSkillByName resolves a skill by its level identity. found=false with
 // a nil error means there is no such skill — i.e. no conflict.
 func (h *Handler) lookupSkillByName(ctx context.Context, workspaceID, ownerUserID pgtype.UUID, scope, name string) (db.Skill, bool, error) {
-	skill, err := h.Queries.GetSkillByScopeAndName(ctx, db.GetSkillByScopeAndNameParams{
-		WorkspaceID: workspaceID,
-		OwnerUserID: ownerUserID,
-		Scope:       scope,
-		Name:        name,
-	})
+	skill, err := h.globalSkillByName(ctx, name)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return db.Skill{}, false, nil

@@ -22,7 +22,7 @@ func TestMachineSkillListResolution(t *testing.T) {
 	}{
 		{"names IDs and deduplication", []string{" search ", strings.ToUpper(machineSkillB), machineSkillA}, []machineSkill{{ID: machineSkillA, Name: "search"}, {ID: machineSkillB, Name: "report"}}, []string{machineSkillA, machineSkillB}, ""},
 		{"unknown", []string{"missing"}, nil, nil, "not found or is not accessible"},
-		{"case sensitive", []string{"Search"}, []machineSkill{{ID: machineSkillA, Name: "search"}}, nil, "not found or is not accessible"},
+		{"case insensitive", []string{"Search"}, []machineSkill{{ID: machineSkillA, Name: "search"}}, []string{machineSkillA}, ""},
 		{"ambiguous", []string{"search"}, []machineSkill{{ID: machineSkillA, Name: "search"}, {ID: machineSkillB, Name: "search"}}, nil, "ambiguous"},
 		{"ID disambiguates", []string{machineSkillB}, []machineSkill{{ID: machineSkillA, Name: "search"}, {ID: machineSkillB, Name: "search"}}, []string{machineSkillB}, ""},
 		{"empty", []string{}, nil, nil, "at least one"},

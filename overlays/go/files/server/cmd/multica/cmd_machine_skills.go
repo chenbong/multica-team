@@ -23,7 +23,8 @@ func machineResolveSkills(ctx context.Context, client *cli.APIClient, requested 
 		return nil, fmt.Errorf("--skill-list must include at least one skill name or full ID")
 	}
 	for _, value := range requested {
-		if strings.TrimSpace(value) == "" || !validMachineText(value) {
+		value = strings.TrimSpace(value)
+		if value == "" || !validMachineText(value) {
 			return nil, fmt.Errorf("--skill-list contains an empty or invalid skill name/ID")
 		}
 	}
@@ -39,7 +40,7 @@ func machineResolveSkills(ctx context.Context, client *cli.APIClient, requested 
 		isID := parseErr == nil && strings.EqualFold(parsed.String(), value)
 		var matches []machineSkill
 		for _, skill := range catalog {
-			if (isID && strings.EqualFold(skill.ID, value)) || (!isID && skill.Name == value) {
+			if (isID && strings.EqualFold(skill.ID, value)) || (!isID && strings.ToLower(strings.TrimSpace(skill.Name)) == strings.ToLower(value)) {
 				matches = append(matches, skill)
 			}
 		}

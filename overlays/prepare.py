@@ -82,6 +82,8 @@ def main() -> None:
     generated = six_features["extend"](UPSTREAM, FILES, generated)
     project_directory = runpy.run_path(str(HERE / "project-working-directory.py"))
     generated = project_directory["extend"](UPSTREAM, FILES, generated)
+    skill_governance = runpy.run_path(str(HERE / "skill-governance-go.py"))
+    generated = skill_governance["extend"](UPSTREAM, FILES, generated)
     for rel, text in generated:
         source = UPSTREAM / rel
         override = HERE / ".generated" / rel

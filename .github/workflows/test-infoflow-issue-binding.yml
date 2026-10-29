@@ -74,12 +74,14 @@ jobs:
           done
           python3 overlays/prepare.py
           python3 overlays/prepare.py --check
+          python3 scripts/test-skill-global-migration.py
       - name: Verify permission, transaction and real HTTP contracts
         working-directory: multica/server
         run: |
           set -euo pipefail
           export GOFLAGS="-overlay=$GITHUB_WORKSPACE/overlays/go-overlay.json -mod=readonly"
-          go test -race ./internal/handler -run '^Test(MachineProvision|MachineScript|IssueCreator|IssueAgentCreator|IssueBatchDeletion|IssueDeletionTransaction|IssueLegacyAdministrators|InfoFlow|SharedChat|BuiltinSandbox|OneAPI|OneToolImport|ImportSkill|ParseSkillArchive|FetchImportedSkill|SkillRefresh|ResourceWebPanel|IssueTransfer)' -count=1 -v
+          go test -race ./internal/handler -run '^Test(MachineProvision|MachineScript|IssueCreator|IssueAgentCreator|IssueBatchDeletion|IssueDeletionTransaction|IssueLegacyAdministrators|InfoFlow|SharedChat|BuiltinSandbox|OneAPI|OneToolImport|ImportSkill|ParseSkillArchive|FetchImportedSkill|SkillGovernance|RefreshSkill|SkillRefresh|ResourceWebPanel|IssueTransfer)' -count=1 -v
+          go test -race ./internal/handler -run 'Skill' -count=1 -v
           go test -race ./cmd/server -run '^TestInfoFlow' -count=1 -v
           go test -race ./cmd/server -run '^TestPersonalMachineName' -count=1 -v
           go test -race ./internal/handler -run '^Test(MachineName|UpdateAgentRuntime_CustomName|DaemonRegister_.*(CustomName|MachineName))' -count=1 -v
@@ -119,6 +121,8 @@ jobs:
           pnpm --filter @multica/web exec vitest run platform/document-title.test.tsx
           pnpm --filter @multica/core exec vitest run api/infoflow-groups.test.ts api/infoflow-group-binding.test.ts issues/infoflow-groups.test.ts issues/infoflow-group-binding.test.ts api/infoflow-conversations.test.ts issues/infoflow-conversations.test.ts
           pnpm --filter @multica/core exec vitest run api/issue-permissions.test.ts
+          pnpm --filter @multica/core exec vitest run api/skill-governance.test.ts
+          pnpm --filter @multica/views exec vitest run skills/components/skill-governance.test.tsx skills/lib/skill-creator.test.ts skills/hooks/use-can-edit-skill.test.ts
           pnpm --filter @multica/views exec vitest run issues/actions/__tests__/issue-actions-menu.test.tsx settings/components/personal-secrets-section.test.tsx
           pnpm --filter @multica/web exec vitest run app/live/preview.test.tsx
           pnpm --filter @multica/core exec vitest run runtimes/personal-name-schema.test.ts runtimes/mutations.machine-name.test.tsx

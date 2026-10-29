@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -116,7 +116,7 @@ func mergeSkillConfigOrigin(existingConfig []byte, origin map[string]any) map[st
 
 // RefreshSkill re-downloads a skill from its stored config.origin source and
 // overwrites the skill in place. Identity (id, created_by, created_at) and
-// agent_skill bindings are preserved; name, description, content, files, and
+// agent_skill bindings are preserved; description, content, files, and
 // config.origin are replaced with the fresh upstream state. Unlike the
 // creator-only import-overwrite path, refresh follows the canManageSkill
 // policy (workspace owner/admin or creator): the source URL is pinned on the
@@ -131,27 +131,54 @@ func (h *Handler) RefreshSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Permission before any upstream fetch, so a forbidden caller cannot burn
-	// the 45s fetch budget. Mirrors canManageSkill, keeping the member row to
-	// re-check permission inside the overwrite transaction.
-	workspaceID := uuidToString(skill.WorkspaceID)
-	member, ok := h.requireWorkspaceRole(w, r, workspaceID, "skill not found", "owner", "admin", "member")
-	if !ok {
+	if !h.canManageSkill(w, r, skill) {
 		return
 	}
-	isAdmin := roleAllowed(member.Role, "owner", "admin")
-	isCreator := skill.CreatedBy.Valid && uuidToString(skill.CreatedBy) == userID
-	if !isAdmin && !isCreator {
-		writeError(w, http.StatusForbidden, "only the skill creator or a workspace admin can update this skill from its source")
+	var body struct {
+		URL *string `json:"url,omitempty"`
+	}
+	if r.Body != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+		decoder.DisallowUnknownFields()
+		decodeErr := decoder.Decode(&body)
+		if decodeErr != nil && decodeErr != io.EOF {
+			writeError(w, 400, "invalid update request")
+			return
+		}
+		if decodeErr == nil {
+			var extra any
+			if decoder.Decode(&extra) != io.EOF {
+				writeError(w, 400, "invalid update request")
+				return
+			}
+		}
+	}
+	origin, hasOrigin := parseSkillOrigin(skill.Config)
+	if body.URL != nil {
+		source, normalized, err := detectImportSource(*body.URL)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		sourceType := ""
+		switch source {
+		case sourceGitHub:
+			sourceType = "github"
+		case sourceSkillsSh:
+			sourceType = "skills_sh"
+		case sourceClawHub:
+			sourceType = "clawhub"
+		case sourceOneTool:
+			sourceType = "onetool"
+		}
+		origin = skillOriginRef{Type: sourceType, SourceURL: normalized}
+		hasOrigin = true
+	}
+	if !hasOrigin {
+		writeError(w, 422, errSkillNotRefreshable.Error())
 		return
 	}
-
-	origin, ok := parseSkillOrigin(skill.Config)
-	if !ok {
-		writeError(w, http.StatusUnprocessableEntity, errSkillNotRefreshable.Error())
-		return
-	}
-
+	workspaceID := h.resolveWorkspaceID(r)
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	ctx, cancel := context.WithTimeout(r.Context(), importFetchTimeout)
 	defer cancel()
@@ -167,19 +194,13 @@ func (h *Handler) RefreshSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newName := sanitizeNullBytes(imported.name)
-	if newName != skill.Name {
-		slog.Info("skill refresh: adopting upstream rename",
-			"skill_id", uuidToString(skill.ID), "old_name", skill.Name, "new_name", newName)
-	}
-
 	resp, err := h.overwriteSkillWithFiles(r.Context(), skillOverwriteInput{
 		WorkspaceID:   skill.WorkspaceID,
 		TargetSkillID: skill.ID,
 		UserID:        userID,
-		NewName:       newName,
+		ExpectedScope: skill.Scope,
 		AllowOverwrite: func(uid string, s db.Skill) bool {
-			return isAdmin || (s.CreatedBy.Valid && uuidToString(s.CreatedBy) == uid)
+			return canOverwriteSkillByLocalImport(uid, s)
 		},
 		Description: imported.description,
 		Content:     imported.content,
@@ -193,7 +214,7 @@ func (h *Handler) RefreshSkill(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errSkillOverwriteForbidden):
 			writeError(w, http.StatusForbidden, "only the skill creator or a workspace admin can update this skill from its source")
 		case errors.Is(err, errSkillOverwriteNameConflict):
-			writeError(w, http.StatusConflict, "a skill named \""+newName+"\" already exists in this workspace")
+			writeError(w, http.StatusConflict, "skill name conflict")
 		default:
 			writeError(w, http.StatusInternalServerError, "failed to update skill from source: "+err.Error())
 		}

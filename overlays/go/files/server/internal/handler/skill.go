@@ -44,19 +44,20 @@ func sanitizeNullBytes(s string) string {
 // --- Response structs ---
 
 type SkillResponse struct {
-	ID            string  `json:"id"`
-	WorkspaceID   string  `json:"workspace_id"`
-	WorkspaceName string  `json:"workspace_name,omitempty"`
-	Scope         string  `json:"scope"`
-	OwnerUserID   *string `json:"owner_user_id,omitempty"`
-	Name          string  `json:"name"`
-	Description   string  `json:"description"`
-	Content       string  `json:"content"`
-	Config        any     `json:"config"`
-	CreatedBy     *string `json:"created_by"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
-	UsageCount    int64   `json:"usage_count"`
+	Creator       *SkillCreatorResponse `json:"creator,omitempty"`
+	ID            string                `json:"id"`
+	WorkspaceID   string                `json:"workspace_id"`
+	WorkspaceName string                `json:"workspace_name,omitempty"`
+	Scope         string                `json:"scope"`
+	OwnerUserID   *string               `json:"owner_user_id,omitempty"`
+	Name          string                `json:"name"`
+	Description   string                `json:"description"`
+	Content       string                `json:"content"`
+	Config        any                   `json:"config"`
+	CreatedBy     *string               `json:"created_by"`
+	CreatedAt     string                `json:"created_at"`
+	UpdatedAt     string                `json:"updated_at"`
+	UsageCount    int64                 `json:"usage_count"`
 }
 
 // SkillSummaryResponse is the list-endpoint shape: everything SkillResponse
@@ -65,18 +66,19 @@ type SkillResponse struct {
 // links (GH multica-ai/multica#2174). Detail endpoints still return the full
 // SkillResponse with content.
 type SkillSummaryResponse struct {
-	ID            string  `json:"id"`
-	WorkspaceID   string  `json:"workspace_id"`
-	WorkspaceName string  `json:"workspace_name,omitempty"`
-	Scope         string  `json:"scope"`
-	OwnerUserID   *string `json:"owner_user_id,omitempty"`
-	Name          string  `json:"name"`
-	Description   string  `json:"description"`
-	Config        any     `json:"config"`
-	CreatedBy     *string `json:"created_by"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
-	UsageCount    int64   `json:"usage_count"`
+	Creator       *SkillCreatorResponse `json:"creator,omitempty"`
+	ID            string                `json:"id"`
+	WorkspaceID   string                `json:"workspace_id"`
+	WorkspaceName string                `json:"workspace_name,omitempty"`
+	Scope         string                `json:"scope"`
+	OwnerUserID   *string               `json:"owner_user_id,omitempty"`
+	Name          string                `json:"name"`
+	Description   string                `json:"description"`
+	Config        any                   `json:"config"`
+	CreatedBy     *string               `json:"created_by"`
+	CreatedAt     string                `json:"created_at"`
+	UpdatedAt     string                `json:"updated_at"`
+	UsageCount    int64                 `json:"usage_count"`
 	// Enabled is only populated for agent-scoped skill responses. Workspace
 	// skill lists describe the skill itself, so they omit assignment state.
 	Enabled *bool `json:"enabled,omitempty"`
@@ -165,15 +167,19 @@ type SkillImportResult struct {
 }
 
 type ExistingSkillIdentity struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	CreatedBy    string `json:"created_by,omitempty"`
-	CanOverwrite bool   `json:"can_overwrite,omitempty"`
+	Scope         string                `json:"scope,omitempty"`
+	WorkspaceID   string                `json:"workspace_id,omitempty"`
+	WorkspaceName string                `json:"workspace_name,omitempty"`
+	Creator       *SkillCreatorResponse `json:"creator,omitempty"`
+	ID            string                `json:"id"`
+	Name          string                `json:"name"`
+	CreatedBy     string                `json:"created_by,omitempty"`
+	CanOverwrite  bool                  `json:"can_overwrite,omitempty"`
 }
 
 func writeSkillImportDuplicateConflict(w http.ResponseWriter, existing ExistingSkillIdentity) {
 	writeJSON(w, http.StatusConflict, map[string]any{
-		"error":          "a skill with this name already exists",
+		"error":          skillConflictMessage(existing),
 		"existing_skill": existing,
 	})
 }
@@ -202,19 +208,14 @@ func (h *Handler) existingSkillIdentityByName(ctx context.Context, workspaceID p
 }
 
 func (h *Handler) existingSkillIdentityByScopeAndName(ctx context.Context, workspaceID, ownerUserID pgtype.UUID, scope, name string) (ExistingSkillIdentity, bool, error) {
-	skill, err := h.Queries.GetSkillByScopeAndName(ctx, db.GetSkillByScopeAndNameParams{
-		WorkspaceID: workspaceID,
-		OwnerUserID: ownerUserID,
-		Scope:       scope,
-		Name:        name,
-	})
+	skill, err := h.globalSkillByName(ctx, name)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ExistingSkillIdentity{}, false, nil
 		}
 		return ExistingSkillIdentity{}, false, err
 	}
-	return existingSkillIdentity(skill, ""), true, nil
+	return h.skillConflictIdentity(ctx, skill, uuidToString(ownerUserID)), true, nil
 }
 
 func existingSkillIdentity(skill db.Skill, userID string) ExistingSkillIdentity {
@@ -416,6 +417,18 @@ func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
 		resp[i].Labels = &labels
 	}
 
+	idsForCreators := []string{}
+	for _, item := range resp {
+		if item.CreatedBy != nil {
+			idsForCreators = append(idsForCreators, *item.CreatedBy)
+		}
+	}
+	creators := h.skillCreators(r.Context(), idsForCreators)
+	for i := range resp {
+		if resp[i].CreatedBy != nil {
+			resp[i].Creator = creators[*resp[i].CreatedBy]
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -534,7 +547,7 @@ func (h *Handler) GetSkill(w http.ResponseWriter, r *http.Request) {
 		fileResps[i] = skillFileToResponse(f)
 	}
 
-	response := skillToResponse(skill)
+	response := h.skillResponse(r.Context(), skill)
 	if count, err := h.Queries.GetSkillUsageCount(r.Context(), skill.ID); err == nil {
 		response.UsageCount = count
 	}
@@ -560,7 +573,7 @@ func (h *Handler) writeSkillMetadata(w http.ResponseWriter, r *http.Request, ski
 		fileResps[i] = skillFileMetadataToResponse(f)
 	}
 
-	writeJSON(w, http.StatusOK, SkillWithFileMetadataResponse{
+	metadata := SkillWithFileMetadataResponse{
 		SkillSummaryResponse: skillSummaryToResponse(
 			skill.ID, skill.WorkspaceID, skill.Name, skill.Description,
 			skill.Config, skill.CreatedBy, skill.CreatedAt, skill.UpdatedAt, skill.Scope, skill.OwnerUserID,
@@ -568,7 +581,9 @@ func (h *Handler) writeSkillMetadata(w http.ResponseWriter, r *http.Request, ski
 		ContentSize: int64(len(skill.Content)),
 		ContentHash: contentHash(skill.Content),
 		Files:       fileResps,
-	})
+	}
+	metadata.Creator = h.skillCreator(r.Context(), skill.CreatedBy)
+	writeJSON(w, http.StatusOK, metadata)
 }
 
 func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
@@ -597,7 +612,7 @@ func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "scope must be personal, workspace, or team")
 		return
 	}
-	if req.Name == "" {
+	if normalizedSkillName(sanitizeNullBytes(req.Name)) == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
@@ -621,7 +636,7 @@ func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, "a skill with this name already exists")
+			h.writeGlobalSkillNameConflict(w, r, req.Name)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create skill: "+err.Error())
@@ -633,39 +648,9 @@ func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 // canManageSkill checks whether the current user can update or delete a skill.
-// The skill creator or workspace owner/admin can manage any skill.
+// Only the creator may mutate a skill, independent of workspace membership.
 func (h *Handler) canManageSkill(w http.ResponseWriter, r *http.Request, skill db.Skill) bool {
-	if skill.Scope == "personal" {
-		ownerID := uuidToString(skill.OwnerUserID)
-		if ownerID == "" {
-			ownerID = uuidToString(skill.CreatedBy)
-		}
-		if ownerID != requestUserID(r) {
-			writeError(w, http.StatusForbidden, "only the personal skill owner can manage this skill")
-			return false
-		}
-		return true
-	}
-	if skill.Scope == "team" {
-		if !skill.CreatedBy.Valid || uuidToString(skill.CreatedBy) != requestUserID(r) {
-			writeError(w, http.StatusForbidden, "only the team skill creator can manage this skill")
-			return false
-		}
-		return true
-	}
-	// A project-skill creator may edit it from any workspace because project
-	// skills are intentionally visible across workspaces. Non-creators still
-	// follow the origin project's administrator policy below.
-	if skill.CreatedBy.Valid && uuidToString(skill.CreatedBy) == requestUserID(r) {
-		return true
-	}
-	wsID := uuidToString(skill.WorkspaceID)
-	member, ok := h.requireWorkspaceRole(w, r, wsID, "skill not found", "owner", "admin", "member")
-	if !ok {
-		return false
-	}
-	isAdmin := roleAllowed(member.Role, "owner", "admin")
-	if !isAdmin {
+	if !canOverwriteSkillByLocalImport(requestUserID(r), skill) {
 		writeError(w, http.StatusForbidden, "only the skill creator can manage this skill")
 		return false
 	}
@@ -674,7 +659,7 @@ func (h *Handler) canManageSkill(w http.ResponseWriter, r *http.Request, skill d
 
 // canOverwriteSkillByLocalImport reports whether userID may overwrite skill via
 // a runtime-local-skill re-import. This is intentionally NARROWER than
-// canManageSkill: only the original creator may overwrite by re-importing.
+// canManageSkill: both paths now require the original creator.
 // Workspace owners/admins who want to change a skill they did not create must
 // edit it in-app instead. See MUL-2701 / MUL-2800.
 func canOverwriteSkillByLocalImport(userID string, skill db.Skill) bool {
@@ -714,9 +699,17 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 	qtx := h.Queries.WithTx(tx)
 
 	params := db.UpdateSkillParams{
-		ID: parseUUID(id),
+		ID: skill.ID,
+	}
+	if err := h.lockSkillCreator(r.Context(), tx, skill.ID, requestUserID(r)); err != nil {
+		writeError(w, 403, "only the skill creator can manage this skill")
+		return
 	}
 	if req.Name != nil {
+		if normalizedSkillName(sanitizeNullBytes(*req.Name)) == "" {
+			writeError(w, 400, "name is required")
+			return
+		}
 		params.Name = pgtype.Text{String: sanitizeNullBytes(*req.Name), Valid: true}
 	}
 	if req.Description != nil {
@@ -733,7 +726,12 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 	skill, err = qtx.UpdateSkill(r.Context(), params)
 	if err != nil {
 		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, "a skill with this name already exists")
+			_ = tx.Rollback(r.Context())
+			name := skill.Name
+			if req.Name != nil {
+				name = *req.Name
+			}
+			h.writeGlobalSkillNameConflict(w, r, name)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to update skill: "+err.Error())
@@ -778,7 +776,7 @@ func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := SkillWithFilesResponse{
-		SkillResponse: skillToResponse(skill),
+		SkillResponse: h.skillResponse(r.Context(), skill),
 		Files:         fileResps,
 	}
 	wsID := h.resolveWorkspaceID(r)
@@ -793,7 +791,7 @@ func (h *Handler) PromoteSkill(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if skill.Scope != "personal" || uuidToString(skill.OwnerUserID) != requestUserID(r) {
+	if skill.Scope != "personal" || !canOverwriteSkillByLocalImport(requestUserID(r), skill) {
 		writeError(w, http.StatusForbidden, "only the personal skill owner can promote this skill")
 		return
 	}
@@ -809,7 +807,7 @@ func (h *Handler) PromoteSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to promote skill")
 		return
 	}
-	writeJSON(w, http.StatusOK, skillToResponse(updated))
+	writeJSON(w, http.StatusOK, h.skillResponse(r.Context(), updated))
 }
 
 // ChangeSkillScope moves a skill between personal, project, and team scope.
@@ -874,7 +872,7 @@ func (h *Handler) ChangeSkillScope(w http.ResponseWriter, r *http.Request) {
 	workspaceID := h.resolveWorkspaceID(r)
 	actorType, actorID := h.resolveActor(r, creatorID, workspaceID)
 	h.publish(protocol.EventSkillUpdated, workspaceID, actorType, actorID, map[string]any{"skill": updated})
-	writeJSON(w, http.StatusOK, skillToResponse(updated))
+	writeJSON(w, http.StatusOK, h.skillResponse(r.Context(), updated))
 }
 
 func (h *Handler) DeleteSkill(w http.ResponseWriter, r *http.Request) {
@@ -893,6 +891,10 @@ func (h *Handler) DeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err := h.lockSkillCreator(r.Context(), tx, skill.ID, requestUserID(r)); err != nil {
+		writeError(w, 403, "only the skill creator can manage this skill")
+		return
+	}
 	qtx := h.Queries.WithTx(tx)
 	if err := qtx.DeleteSkillLabelAssignmentsBySkill(r.Context(), skill.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove skill label assignments")
@@ -2448,15 +2450,20 @@ func skillImportOverwriteFailure(err error) (int, string) {
 }
 
 func (h *Handler) resolveImportSkillConflict(w http.ResponseWriter, r *http.Request, strategy string, workspaceID string, workspaceUUID, creatorUUID pgtype.UUID, creatorID string, name string, imported *importedSkill, config map[string]any, files []CreateSkillFileRequest, existing db.Skill, scope string) {
-	existingInfo := existingSkillIdentity(existing, creatorID)
+	existingInfo := h.skillConflictIdentity(r.Context(), existing, creatorID)
+	existingInfo.CanOverwrite = existingInfo.CanOverwrite && sameSkillDestination(existing, scope, workspaceUUID, creatorUUID)
 	switch strategy {
 	case importOnConflictSkip:
 		writeJSON(w, http.StatusOK, SkillImportResult{
 			Status:        "skipped",
-			Reason:        "a skill with this name already exists",
+			Reason:        skillConflictMessage(existingInfo),
 			ExistingSkill: &existingInfo,
 		})
 	case importOnConflictOverwrite:
+		if !sameSkillDestination(existing, scope, workspaceUUID, creatorUUID) {
+			writeJSON(w, 409, SkillImportResult{Status: "conflict", Reason: "cross-scope overwrite is not allowed; update the existing skill in its original scope", ExistingSkill: &existingInfo})
+			return
+		}
 		if !canOverwriteSkillByLocalImport(creatorID, existing) {
 			writeJSON(w, http.StatusForbidden, SkillImportResult{
 				Status:        "failed",
@@ -2470,6 +2477,7 @@ func (h *Handler) resolveImportSkillConflict(w http.ResponseWriter, r *http.Requ
 			TargetSkillID: existing.ID,
 			UserID:        creatorID,
 			ExpectedName:  name,
+			ExpectedScope: scope,
 			Description:   imported.description,
 			Content:       imported.content,
 			Config:        config,
@@ -2508,7 +2516,7 @@ func (h *Handler) resolveImportSkillConflict(w http.ResponseWriter, r *http.Requ
 	default:
 		writeJSON(w, http.StatusConflict, SkillImportResult{
 			Status:        "conflict",
-			Reason:        skillImportConflictReason(),
+			Reason:        skillConflictMessage(existingInfo),
 			ExistingSkill: &existingInfo,
 		})
 	}
